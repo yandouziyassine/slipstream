@@ -29,7 +29,7 @@ def parse_message(raw: str | bytes) -> BookUpdate | None:
         raise KrakenMessageError("message too large")
     try:
         msg = json.loads(raw)
-    except json.JSONDecodeError as exc:
+    except (ValueError, RecursionError) as exc:
         raise KrakenMessageError("invalid JSON") from exc
     if not isinstance(msg, dict):
         raise KrakenMessageError("message is not an object")
@@ -80,7 +80,10 @@ def _parse_level(level: Any, name: str) -> tuple[float, float]:
 def _number(value: Any, name: str) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise KrakenMessageError(f"{name} must be a number")
-    result = float(value)
+    try:
+        result = float(value)
+    except OverflowError as exc:
+        raise KrakenMessageError(f"{name} out of range") from exc
     if not math.isfinite(result):
         raise KrakenMessageError(f"{name} must be finite")
     return result

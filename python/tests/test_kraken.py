@@ -104,3 +104,30 @@ def test_subscribe_message() -> None:
         "method": "subscribe",
         "params": {"channel": "book", "symbol": ["BTC/USD"], "depth": 10, "snapshot": True},
     }
+
+
+HUGE_INT = "1" + "0" * 400
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "[" * 100_000,
+        "1" * 5000,
+        b"\xff\xfe{",
+        '{"channel":"book","type":"snapshot","data":[{"symbol":"BTC/USD",'
+        f'"bids":[{{"price":{HUGE_INT},"qty":1}}],"asks":[]}}]}}',
+        '{"channel":"book","type":"snapshot","data":[{"symbol":"BTC/USD",'
+        f'"bids":[{{"price":1,"qty":{HUGE_INT}}}],"asks":[]}}]}}',
+    ],
+    ids=[
+        "deeply_nested",
+        "huge_int_literal",
+        "invalid_utf8",
+        "huge_price_digits",
+        "huge_qty_digits",
+    ],
+)
+def test_hostile_input_only_raises_kraken_error(raw: str | bytes) -> None:
+    with pytest.raises(KrakenMessageError):
+        parse_message(raw)
