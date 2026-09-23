@@ -58,7 +58,9 @@ def test_non_book_messages_are_ignored(raw: str) -> None:
 
 
 def test_failed_subscription_raises() -> None:
-    raw = json.dumps({"method": "subscribe", "success": False, "error": "Currency pair not supported"})
+    raw = json.dumps(
+        {"method": "subscribe", "success": False, "error": "Currency pair not supported"}
+    )
     with pytest.raises(KrakenMessageError, match="subscription failed"):
         parse_message(raw)
 
