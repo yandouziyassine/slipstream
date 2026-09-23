@@ -1,0 +1,7 @@
+{"recv_ns": 1700000000000000000, "msg": {"method": "subscribe", "result": {"channel": "book", "depth": 10, "snapshot": true, "symbol": "BTC/USD"}, "success": true, "time_in": "2023-11-14T22:13:20.000000Z", "time_out": "2023-11-14T22:13:20.000100Z"}}
+{"recv_ns": 1700000000000000000, "msg": {"channel": "book", "type": "snapshot", "data": [{"symbol": "BTC/USD", "bids": [{"price": 99990.0, "qty": 0.5}, {"price": 99980.0, "qty": 1.0}, {"price": 99970.0, "qty": 2.0}], "asks": [{"price": 100010.0, "qty": 0.02}, {"price": 100020.0, "qty": 0.05}, {"price": 100030.0, "qty": 1.0}], "checksum": 0}]}}
+{"recv_ns": 1700000001000000000, "msg": {"channel": "heartbeat"}}
+{"recv_ns": 1700000002000000000, "msg": {"channel": "book", "type": "update", "data": [{"symbol": "BTC/USD", "bids": [{"price": 99995.0, "qty": 0.4}], "asks": [{"price": 100010.0, "qty": 0.03}], "checksum": 0, "timestamp": "2023-11-14T22:13:22.000000Z"}]}}
+{"recv_ns": 1700000003000000000, "msg": {"channel": "heartbeat"}}
+{"recv_ns": 1700000004000000000, "msg": {"channel": "book", "type": "update", "data": [{"symbol": "BTC/USD", "bids": [], "asks": [{"price": 100005.0, "qty": 0.02}], "checksum": 0, "timestamp": "2023-11-14T22:13:24.000000Z"}]}}
+{"recv_ns": 1700000005000000000, "msg": {"channel": "heartbeat"}}
