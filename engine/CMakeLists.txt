@@ -16,6 +16,7 @@ set(SLIPSTREAM_WARNINGS -Wall -Wextra -Wpedantic -Wshadow -Werror)
 add_library(slipstream_core STATIC
   src/order_book.cpp
   src/twap.cpp
+  src/risk.cpp
 )
 target_include_directories(slipstream_core PUBLIC src)
 target_compile_options(slipstream_core PRIVATE ${SLIPSTREAM_WARNINGS})
@@ -27,6 +28,7 @@ include(GoogleTest)
 add_executable(engine_tests
   tests/order_book_test.cpp
   tests/twap_test.cpp
+  tests/risk_test.cpp
 )
 target_link_libraries(engine_tests PRIVATE slipstream_core GTest::gtest_main)
 target_compile_options(engine_tests PRIVATE ${SLIPSTREAM_WARNINGS})
