@@ -3,6 +3,8 @@
 #include <gtest/gtest.h>
 
 #include <cmath>
+#include <cstdint>
+#include <limits>
 
 using slipstream::TwapSchedule;
 
@@ -42,4 +44,14 @@ TEST(Twap, ReleasesExactTotalAfterLastSlice) {
     ASSERT_TRUE(schedule);
     EXPECT_EQ(schedule->target_qty_at(1500), 1.2);
     EXPECT_EQ(schedule->target_qty_at(10'000'000), 1.2);
+}
+
+TEST(Twap, ExtremeTimestampsDoNotOverflow) {
+    const auto schedule = TwapSchedule::create({1.0, 0, 1, 1});
+    ASSERT_TRUE(schedule);
+    EXPECT_EQ(schedule->target_qty_at(std::numeric_limits<std::int64_t>::max()), 1.0);
+    const auto many = TwapSchedule::create({2.0, 0, 1000, 1000});
+    ASSERT_TRUE(many);
+    EXPECT_EQ(many->target_qty_at(std::numeric_limits<std::int64_t>::max()), 2.0);
+    EXPECT_DOUBLE_EQ(many->target_qty_at(std::numeric_limits<std::int64_t>::min()), 0.0);
 }

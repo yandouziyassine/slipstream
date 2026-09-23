@@ -1,6 +1,5 @@
 #include "twap.h"
 
-#include <algorithm>
 #include <cmath>
 
 namespace slipstream {
@@ -18,10 +17,9 @@ TwapSchedule::TwapSchedule(const TwapParams& params)
 
 double TwapSchedule::target_qty_at(std::int64_t now_ns) const {
     if (now_ns < params_.start_ns) return 0.0;
-    const std::int64_t elapsed = now_ns - params_.start_ns;
-    const std::int64_t released =
-        std::min<std::int64_t>(params_.num_slices, elapsed / interval_ns_ + 1);
-    if (released == params_.num_slices) return params_.total_qty;
+    const std::int64_t intervals_elapsed = (now_ns - params_.start_ns) / interval_ns_;
+    if (intervals_elapsed >= params_.num_slices - 1) return params_.total_qty;
+    const std::int64_t released = intervals_elapsed + 1;
     return params_.total_qty * static_cast<double>(released) /
            static_cast<double>(params_.num_slices);
 }
