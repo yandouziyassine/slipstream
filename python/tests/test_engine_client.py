@@ -35,3 +35,12 @@ def test_unreachable_engine_raises_engine_error() -> None:
             client.step(0)
     finally:
         client.close()
+
+
+def test_wait_ready_times_out_when_engine_absent() -> None:
+    client = EngineClient("127.0.0.1:1")
+    try:
+        with pytest.raises(EngineError, match="not reachable"):
+            client.wait_ready(timeout_s=0.5)
+    finally:
+        client.close()
