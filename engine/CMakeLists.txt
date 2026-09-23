@@ -19,6 +19,7 @@ add_library(slipstream_core STATIC
   src/risk.cpp
   src/fill_simulator.cpp
   src/engine.cpp
+  src/config.cpp
 )
 target_include_directories(slipstream_core PUBLIC src)
 target_compile_options(slipstream_core PRIVATE ${SLIPSTREAM_WARNINGS})
@@ -33,6 +34,7 @@ add_executable(engine_tests
   tests/risk_test.cpp
   tests/fill_simulator_test.cpp
   tests/engine_test.cpp
+  tests/config_test.cpp
 )
 target_link_libraries(engine_tests PRIVATE slipstream_core GTest::gtest_main)
 target_compile_options(engine_tests PRIVATE ${SLIPSTREAM_WARNINGS})
