@@ -1,0 +1,7 @@
+.git
+.worktrees
+build
+input.md
+.env
+.env.*
+**/__pycache__

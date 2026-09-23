@@ -1,0 +1,14 @@
+.env
+.env.*
+input.md
+.worktrees/
+build/
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+python/slipstream/v1/*_pb2*.py
+python/slipstream/v1/*_pb2*.pyi
+.claude/settings.local.json
