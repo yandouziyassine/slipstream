@@ -5,7 +5,16 @@ from typing import Any, cast
 import grpc
 
 from slipstream.config import validate_engine_address
-from slipstream.models import BookUpdate, Fill, OrderSpec
+from slipstream.models import (
+    AlmgrenChrissParams,
+    BookUpdate,
+    Fill,
+    OrderSpec,
+    PovParams,
+    ScheduleParams,
+    TradeBatch,
+    VwapParams,
+)
 from slipstream.v1 import execution_pb2 as pb
 from slipstream.v1 import execution_pb2_grpc as pb_grpc
 
@@ -26,14 +35,34 @@ def book_update_to_proto(update: BookUpdate) -> pb.BookUpdate:
     )
 
 
-def order_to_proto(spec: OrderSpec, start_ns: int) -> pb.ParentOrder:
-    return pb.ParentOrder(
+def order_to_proto(
+    spec: OrderSpec, start_ns: int, params: ScheduleParams | None = None
+) -> pb.ParentOrder:
+    order = pb.ParentOrder(
         order_id=spec.order_id,
         side=_SIDES[spec.side],
         qty=spec.qty,
         start_ns=start_ns,
         duration_ns=spec.duration_s * _NS_PER_S,
         num_slices=spec.num_slices,
+    )
+    if isinstance(params, VwapParams):
+        order.vwap.weights.extend(params.weights)
+    elif isinstance(params, AlmgrenChrissParams):
+        order.almgren_chriss.sigma = params.sigma
+        order.almgren_chriss.eta = params.eta
+        order.almgren_chriss.risk_aversion = params.risk_aversion
+    elif isinstance(params, PovParams):
+        order.pov.participation = params.participation
+    else:
+        order.twap.SetInParent()
+    return order
+
+
+def trade_batch_to_proto(batch: TradeBatch) -> pb.TradeBatch:
+    return pb.TradeBatch(
+        symbol=batch.symbol,
+        trades=[pb.Trade(price=price, qty=qty) for price, qty in batch.trades],
     )
 
 
@@ -53,11 +82,17 @@ class EngineClient:
     def apply_book(self, update: BookUpdate) -> None:
         self._call(self._stub.ApplyBookUpdate, book_update_to_proto(update))
 
-    def submit(self, spec: OrderSpec, start_ns: int) -> tuple[bool, str]:
+    def submit(
+        self, spec: OrderSpec, start_ns: int, params: ScheduleParams | None = None
+    ) -> tuple[bool, str]:
         reply = cast(
-            pb.SubmitReply, self._call(self._stub.SubmitParentOrder, order_to_proto(spec, start_ns))
+            pb.SubmitReply,
+            self._call(self._stub.SubmitParentOrder, order_to_proto(spec, start_ns, params)),
         )
         return reply.accepted, reply.reason
+
+    def apply_trades(self, batch: TradeBatch) -> None:
+        self._call(self._stub.ApplyTrades, trade_batch_to_proto(batch))
 
     def step(self, now_ns: int) -> list[Fill]:
         reply = cast(pb.StepReply, self._call(self._stub.Step, pb.StepRequest(now_ns=now_ns)))
