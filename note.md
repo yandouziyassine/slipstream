@@ -36,3 +36,8 @@ Large orders move the price against the trader (market impact). Institutions pay
 ### 2026-09-23 — Day 1
 - Brainstormed and approved the design spec, then wrote the week-1 implementation plan.
 - Found no host C++ toolchain, so all builds run in an Ubuntu 24.04 dev container that CI also uses.
+- Docker Desktop crashed on startup: two stale AF_UNIX socket files in `%LOCALAPPDATA%\Docker\run` (`dockerInference`, `userAnalyticsOtlpHttp.sock`) could not be removed. Docker work is parked until the end of the week. Meanwhile, the Python track runs in a host venv (Python 3.13); the code targets 3.12+.
+- Scaffold (`chore/scaffold`): repo hygiene, CLAUDE.md, a hash-pinned dependency lock (917 sha256 hashes, all platforms), dev container definition, and the gRPC contract `execution.proto`.
+- Python orchestrator (`feat/orchestrator-core`, then `feat/replay-live-cli`): Kraken v2 parser, settings with a paper-mode gate, typed gRPC client, execution runner, JSONL replay, live WebSocket loop, JSON logging, and CLI. 79 tests; `mypy --strict` and `ruff` clean.
+- Review findings fixed (test-first): hostile Kraken messages could crash the parser with non-domain exceptions. The triggers were deeply nested JSON (`RecursionError`), integers over 4300 digits (`ValueError`), invalid UTF-8 (`UnicodeDecodeError`), and huge prices or quantities overflowing `float()` (`OverflowError`). All now surface as `KrakenMessageError`. The replay reader got the same treatment.
+- mypy strict now skips generated gRPC stubs (`exclude` plus scoped overrides) but still checks all project modules.
