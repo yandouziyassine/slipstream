@@ -9,6 +9,11 @@ struct Level {
     double qty;
 };
 
+struct Trade {
+    double price;
+    double qty;
+};
+
 inline double signed_qty(Side side, double qty) { return side == Side::Buy ? qty : -qty; }
 
 }  // namespace slipstream

@@ -1,9 +1,12 @@
 #include "engine.h"
 
 #include <algorithm>
+#include <cmath>
+#include <memory>
 
 #include "ascii.h"
 #include "fill_simulator.h"
+#include "schedule_factory.h"
 
 namespace slipstream {
 namespace {
@@ -38,6 +41,19 @@ bool Engine::apply_book_update(const std::vector<Level>& bids, const std::vector
     return book_.apply_update(bids, asks);
 }
 
+bool Engine::apply_trades(const std::vector<Trade>& trades) {
+    std::lock_guard lock(mu_);
+    double added = 0.0;
+    for (const auto& trade : trades) {
+        if (!std::isfinite(trade.price) || !std::isfinite(trade.qty)) return false;
+        if (trade.price <= 0.0 || trade.qty <= 0.0) return false;
+        added += trade.qty;
+    }
+    if (!std::isfinite(market_volume_ + added)) return false;
+    market_volume_ += added;
+    return true;
+}
+
 double Engine::projected_position_locked() const {
     double projected = position_;
     for (const auto& order : orders_) {
@@ -47,7 +63,7 @@ double Engine::projected_position_locked() const {
     return projected;
 }
 
-SubmitResult Engine::submit(const ParentOrderRequest& request) {
+SubmitResult Engine::submit(const ParentOrderRequest& request, const ScheduleSpec& spec) {
     std::lock_guard lock(mu_);
     if (!valid_order_id(request.order_id)) return {false, "invalid order id"};
     if (orders_.size() >= kMaxOrders) return {false, "order capacity reached"};
@@ -56,8 +72,9 @@ SubmitResult Engine::submit(const ParentOrderRequest& request) {
     });
     if (duplicate) return {false, "duplicate order id"};
 
-    const auto schedule = TwapSchedule::create(
-        {request.qty, request.start_ns, request.duration_ns, request.num_slices});
+    auto schedule = make_schedule(
+        {request.qty, request.start_ns, request.duration_ns, request.num_slices}, spec,
+        MarketState{market_volume_});
     if (!schedule) return {false, "invalid schedule"};
 
     const auto arrival_mid = book_.mid();
@@ -68,7 +85,8 @@ SubmitResult Engine::submit(const ParentOrderRequest& request) {
     if (!decision.ok) return {false, decision.reason};
 
     const auto immediate = simulate_market_fill(book_.liquidity_for(request.side), request.qty);
-    orders_.push_back(ParentOrder{request, *schedule, OrderState::Working, 0.0, 0.0, *arrival_mid,
+    orders_.push_back(ParentOrder{request, std::move(schedule), OrderState::Working, 0.0, 0.0,
+                                  *arrival_mid,
                                   cost_bps(request.side, immediate.avg_price, *arrival_mid), ""});
     return {true, ""};
 }
@@ -77,30 +95,41 @@ std::vector<Fill> Engine::step(std::int64_t now_ns) {
     std::lock_guard lock(mu_);
     std::vector<Fill> fills;
     const auto ref_price = book_.mid();
+    const MarketState market{market_volume_};
     for (auto& order : orders_) {
         if (order.state != OrderState::Working) continue;
-        const double dust = order.request.qty * kDustFraction;
-        const double child = order.schedule.target_qty_at(now_ns, MarketState{}) - order.filled_qty;
-        if (child <= dust || !ref_price) continue;
-
-        const auto decision = risk_.check_child(order.request.side, child, *ref_price, position_,
-                                                order.filled_notional);
-        if (!decision.ok) {
+        advance_locked(order, now_ns, ref_price, market, fills);
+        if (order.state == OrderState::Working && order.schedule->expired(now_ns)) {
             order.state = OrderState::Halted;
-            order.halt_reason = decision.reason;
-            continue;
+            order.halt_reason = "deadline reached";
         }
-
-        const auto result = simulate_market_fill(book_.liquidity_for(order.request.side), child);
-        if (result.filled_qty <= 0.0) continue;
-
-        order.filled_qty += result.filled_qty;
-        order.filled_notional += result.filled_qty * result.avg_price;
-        position_ += signed_qty(order.request.side, result.filled_qty);
-        fills.push_back({order.request.order_id, now_ns, result.filled_qty, result.avg_price});
-        if (order.request.qty - order.filled_qty <= dust) order.state = OrderState::Completed;
     }
     return fills;
+}
+
+void Engine::advance_locked(ParentOrder& order, std::int64_t now_ns,
+                            std::optional<double> ref_price, const MarketState& market,
+                            std::vector<Fill>& fills) {
+    const double dust = order.request.qty * kDustFraction;
+    const double child = order.schedule->target_qty_at(now_ns, market) - order.filled_qty;
+    if (child <= dust || !ref_price) return;
+
+    const auto decision = risk_.check_child(order.request.side, child, *ref_price, position_,
+                                            order.filled_notional);
+    if (!decision.ok) {
+        order.state = OrderState::Halted;
+        order.halt_reason = decision.reason;
+        return;
+    }
+
+    const auto result = simulate_market_fill(book_.liquidity_for(order.request.side), child);
+    if (result.filled_qty <= 0.0) return;
+
+    order.filled_qty += result.filled_qty;
+    order.filled_notional += result.filled_qty * result.avg_price;
+    position_ += signed_qty(order.request.side, result.filled_qty);
+    fills.push_back({order.request.order_id, now_ns, result.filled_qty, result.avg_price});
+    if (order.request.qty - order.filled_qty <= dust) order.state = OrderState::Completed;
 }
 
 std::vector<OrderStatus> Engine::statuses() const {
@@ -112,7 +141,7 @@ std::vector<OrderStatus> Engine::statuses() const {
         out.push_back({order.request.order_id, order.request.side, order.state, order.request.qty,
                        order.filled_qty, avg, order.arrival_mid,
                        cost_bps(order.request.side, avg, order.arrival_mid),
-                       order.immediate_cost_bps, order.halt_reason});
+                       order.immediate_cost_bps, order.halt_reason, order.schedule->name()});
     }
     return out;
 }
@@ -125,6 +154,11 @@ double Engine::position() const {
 std::optional<double> Engine::mid() const {
     std::lock_guard lock(mu_);
     return book_.mid();
+}
+
+double Engine::market_volume() const {
+    std::lock_guard lock(mu_);
+    return market_volume_;
 }
 
 }  // namespace slipstream
