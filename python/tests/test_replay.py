@@ -4,10 +4,11 @@ from pathlib import Path
 
 import pytest
 from conftest import FakeEngine
+from test_kraken_rest import ohlc_body
 
 from slipstream.kraken import parse_message
 from slipstream.models import OrderSpec
-from slipstream.replay import ReplayError, read_replay, run_replay
+from slipstream.replay import ReplayError, read_calibration, read_replay, run_replay
 from slipstream.runner import ExecutionRunner
 
 SNAPSHOT = {
@@ -100,3 +101,27 @@ def test_fixture_replays_valid_kraken_messages() -> None:
     assert recv_ns_values == sorted(recv_ns_values)
     for _, raw in records:
         parse_message(raw)
+
+
+def test_replay_skips_ohlc_header_and_calibration_reads_it(tmp_path: Path) -> None:
+    ohlc = {"kind": "ohlc", "interval": 15, "data": json.loads(ohlc_body())}
+    file = write_lines(
+        tmp_path / "c.jsonl",
+        [json.dumps(ohlc), json.dumps({"recv_ns": 5, "msg": {"channel": "heartbeat"}})],
+    )
+    assert [ns for ns, _ in read_replay(file)] == [5]
+    assert len(read_calibration(file)[15]) == 2
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        json.dumps({"kind": "ohlc", "interval": 5, "data": {}}),
+        json.dumps({"kind": "ohlc", "interval": 15, "data": {"error": ["x"], "result": {}}}),
+        json.dumps({"kind": "ohlc", "interval": True, "data": {}}),
+    ],
+    ids=["bad-interval", "kraken-error", "bool-interval"],
+)
+def test_bad_calibration_lines_raise(tmp_path: Path, line: str) -> None:
+    with pytest.raises(ReplayError, match="line 1"):
+        read_calibration(write_lines(tmp_path / "bad.jsonl", [line]))

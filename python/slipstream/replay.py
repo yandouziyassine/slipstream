@@ -3,7 +3,10 @@ from __future__ import annotations
 import json
 from collections.abc import Iterable, Iterator
 from pathlib import Path
+from typing import Any
 
+from slipstream.kraken import KrakenMessageError
+from slipstream.kraken_rest import SUPPORTED_INTERVALS, Bar, parse_ohlc
 from slipstream.runner import ExecutionRunner
 
 
@@ -11,7 +14,7 @@ class ReplayError(ValueError):
     pass
 
 
-def read_replay(path: Path) -> Iterator[tuple[int, str]]:
+def _records(path: Path) -> Iterator[tuple[int, dict[str, Any]]]:
     with path.open(encoding="utf-8") as handle:
         lineno = 0
         while True:
@@ -27,13 +30,42 @@ def read_replay(path: Path) -> Iterator[tuple[int, str]]:
                 continue
             try:
                 record = json.loads(text)
-                recv_ns = record["recv_ns"]
-                msg = record["msg"]
-            except (ValueError, RecursionError, KeyError, TypeError) as exc:
+            except (ValueError, RecursionError) as exc:
                 raise ReplayError(f"line {lineno}: malformed replay record") from exc
-            if isinstance(recv_ns, bool) or not isinstance(recv_ns, int) or recv_ns < 0:
-                raise ReplayError(f"line {lineno}: recv_ns must be a non-negative integer")
-            yield recv_ns, json.dumps(msg)
+            if not isinstance(record, dict):
+                raise ReplayError(f"line {lineno}: malformed replay record")
+            yield lineno, record
+
+
+def _is_ohlc(record: dict[str, Any]) -> bool:
+    return record.get("kind") == "ohlc"
+
+
+def read_replay(path: Path) -> Iterator[tuple[int, str]]:
+    for lineno, record in _records(path):
+        if _is_ohlc(record):
+            continue
+        recv_ns = record.get("recv_ns")
+        if "msg" not in record:
+            raise ReplayError(f"line {lineno}: malformed replay record")
+        if isinstance(recv_ns, bool) or not isinstance(recv_ns, int) or recv_ns < 0:
+            raise ReplayError(f"line {lineno}: recv_ns must be a non-negative integer")
+        yield recv_ns, json.dumps(record["msg"])
+
+
+def read_calibration(path: Path) -> dict[int, tuple[Bar, ...]]:
+    bars: dict[int, tuple[Bar, ...]] = {}
+    for lineno, record in _records(path):
+        if not _is_ohlc(record):
+            continue
+        interval = record.get("interval")
+        if isinstance(interval, bool) or interval not in SUPPORTED_INTERVALS:
+            raise ReplayError(f"line {lineno}: unsupported OHLC interval")
+        try:
+            bars[interval] = parse_ohlc(json.dumps(record.get("data")))
+        except KrakenMessageError as exc:
+            raise ReplayError(f"line {lineno}: invalid OHLC data: {exc}") from exc
+    return bars
 
 
 def run_replay(runner: ExecutionRunner, records: Iterable[tuple[int, str]]) -> None:

@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pytest
 
 from slipstream.cli import build_parser, format_summary, main
@@ -53,3 +55,10 @@ def test_live_mode_env_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_non_loopback_engine_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("SLIPSTREAM_PAPER_MODE", raising=False)
     assert main([*BASE, "--qty", "1", "--engine", "10.0.0.1:50051"]) == 1
+
+
+def test_record_refuses_existing_file_before_any_network(tmp_path: Path) -> None:
+    existing = tmp_path / "s.jsonl"
+    existing.write_text("keep me", encoding="utf-8")
+    assert main(["record", "--duration", "5", "--out", str(existing)]) == 1
+    assert existing.read_text(encoding="utf-8") == "keep me"
