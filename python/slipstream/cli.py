@@ -106,13 +106,13 @@ def build_parser() -> argparse.ArgumentParser:
         sub.add_argument("--duration", type=_positive_int, required=True, help="seconds")
         sub.add_argument("--slices", type=_positive_int, required=True)
         sub.add_argument("--symbol", type=_symbol, default="BTC/USD")
-        sub.add_argument("--order-id", type=_order_id, default=None)
         sub.add_argument("--engine", default=None, help="engine loopback host:port")
         sub.add_argument("--urgency", choices=["low", "medium", "high"], default="medium")
         sub.add_argument("--risk-aversion", type=_positive_float, default=None)
         sub.add_argument("--participation", type=_participation, default=0.1)
     for sub in (live, replay):
         sub.add_argument("--algo", choices=ALGOS, default="twap")
+        sub.add_argument("--order-id", type=_order_id, default=None)
     return parser
 
 
@@ -153,13 +153,12 @@ def format_comparison(statuses: Sequence[pb.OrderStatus], fills: Sequence[Fill])
 
 def _order_specs(args: argparse.Namespace) -> list[OrderSpec]:
     stamp = time.time_ns()
-    algos = args.algos if args.command == "compare" else [args.algo]
+    is_compare = args.command == "compare"
+    algos = args.algos if is_compare else [args.algo]
     return [
         OrderSpec(
             order_id=(
-                args.order_id
-                if args.command != "compare" and args.order_id
-                else f"{'cmp-' if args.command == 'compare' else ''}{algo}-{stamp}"
+                f"cmp-{algo}-{stamp}" if is_compare else (args.order_id or f"{algo}-{stamp}")
             ),
             side=args.side,
             qty=args.qty,

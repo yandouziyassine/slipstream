@@ -31,6 +31,7 @@ Large orders move the price against the trader (market impact). Institutions pay
 - Prices and quantities are `double`. Fixed-point decimals are planned before any live trading.
 - The Kraken book checksum is not verified yet (planned for week 2).
 - The slippage comparison includes market drift during the execution window. It illustrates one run; it does not prove an edge statistically.
+- If one of several orders submitted together is rejected by the engine, the orders accepted before it keep working in that engine process; the CLI exits with an error. The demo scripts start a fresh engine per run and stop it on exit. A cancel RPC is planned.
 
 ## Dev log
 ### 2026-09-23 — Day 1

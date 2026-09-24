@@ -24,6 +24,7 @@ class FakeEngine:
         self.done_after_steps: int | None = None
         self.fills_per_step: list[list[Fill]] = []
         self.trades: list[TradeBatch] = []
+        self.reject_ids: set[str] = set()
 
     def apply_book(self, update: BookUpdate) -> None:
         self.books.append(update)
@@ -32,6 +33,8 @@ class FakeEngine:
         self, spec: OrderSpec, start_ns: int, params: ScheduleParams | None = None
     ) -> tuple[bool, str]:
         self.submits.append((spec, start_ns, params))
+        if spec.order_id in self.reject_ids:
+            return False, "position limit exceeded"
         return self.accept, self.reason
 
     def apply_trades(self, batch: TradeBatch) -> None:

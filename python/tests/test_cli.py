@@ -184,6 +184,63 @@ def test_summary_shows_algo() -> None:
     assert "algo         vwap" in format_summary(pb.OrderStatus(order_id="o", algo="vwap"))
 
 
+def test_order_id_not_allowed_on_compare() -> None:
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(
+            [
+                "compare",
+                "--side",
+                "buy",
+                "--qty",
+                "1",
+                "--duration",
+                "6",
+                "--slices",
+                "3",
+                "--order-id",
+                "x",
+            ]
+        )
+
+
+def test_order_id_still_allowed_on_replay() -> None:
+    args = build_parser().parse_args([*BASE, "--qty", "1", "--order-id", "myid"])
+    assert args.order_id == "myid"
+
+
+def test_replay_twap_without_ohlc_fails_only_because_engine_unreachable(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("SLIPSTREAM_PAPER_MODE", raising=False)
+    file = tmp_path / "no-ohlc.jsonl"
+    file.write_text(
+        json.dumps({"recv_ns": 1, "msg": {"channel": "heartbeat"}}) + "\n", encoding="utf-8"
+    )
+    code = main(
+        [
+            "replay",
+            "--file",
+            str(file),
+            "--side",
+            "buy",
+            "--qty",
+            "1",
+            "--duration",
+            "6",
+            "--slices",
+            "3",
+            "--algo",
+            "twap",
+            "--engine",
+            "127.0.0.1:1",
+        ]
+    )
+    assert code == 1
+    err = capsys.readouterr().err
+    assert "not reachable" in err
+    assert "OHLC" not in err
+
+
 def test_replay_without_ohlc_fails_before_connecting(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:

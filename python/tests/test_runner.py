@@ -4,8 +4,9 @@ import logging
 import pytest
 from conftest import FakeEngine
 
-from slipstream.calibration import CalibrationError
+from slipstream.calibration import CalibrationData, CalibrationError
 from slipstream.kraken import KrakenMessageError
+from slipstream.kraken_rest import Bar
 from slipstream.models import Fill, OrderSpec, PovParams, TwapParams
 from slipstream.runner import ExecutionRunner, OrderRejectedError
 from slipstream.v1 import execution_pb2 as pb
@@ -132,6 +133,64 @@ def test_done_only_when_every_order_is_terminal(fake_engine: FakeEngine) -> None
 def test_calibrated_algo_without_data_fails_before_submitting(fake_engine: FakeEngine) -> None:
     spec = OrderSpec("v", "buy", 1.0, 4, 4, algo="vwap")
     runner = ExecutionRunner(fake_engine, spec, "BTC/USD", logging.getLogger("test"))
+    with pytest.raises(CalibrationError):
+        runner.on_message(snapshot(), 100)
+    assert fake_engine.submits == []
+
+
+def test_rejects_only_the_failing_order_but_leaves_earlier_ones_submitted(
+    fake_engine: FakeEngine,
+) -> None:
+    # Documented limitation: "a" was accepted by the engine before "b" was rejected, and
+    # stays working there. The runner does not attempt to cancel it.
+    fake_engine.reject_ids = {"b"}
+    specs = [OrderSpec("a", "buy", 1.0, 4, 4), OrderSpec("b", "buy", 1.0, 4, 4)]
+    runner = ExecutionRunner(fake_engine, specs, "BTC/USD", logging.getLogger("test"))
+    with pytest.raises(OrderRejectedError, match="order b rejected"):
+        runner.on_message(snapshot(), 100)
+    assert [s.order_id for s, _, _ in fake_engine.submits] == ["a", "b"]
+
+
+def _bars_1m(count: int) -> tuple[Bar, ...]:
+    return tuple(
+        Bar(
+            time_s=i * 60,
+            open=100.0,
+            high=100.5,
+            low=99.5,
+            close=100.0 + (0.05 if i % 2 == 0 else -0.05) + 0.01 * i,
+            vwap=100.0,
+            volume=1.0,
+            count=1,
+        )
+        for i in range(count)
+    )
+
+
+def _bars_15m(count: int) -> tuple[Bar, ...]:
+    return tuple(
+        Bar(
+            time_s=i * 900,
+            open=100.0,
+            high=101.0,
+            low=99.0,
+            close=100.0,
+            vwap=100.0,
+            volume=10.0,
+            count=5,
+        )
+        for i in range(count)
+    )
+
+
+def test_calibrates_every_spec_before_submitting_any(fake_engine: FakeEngine) -> None:
+    calibration = CalibrationData(_bars_15m(4), _bars_1m(61))
+    specs = [
+        OrderSpec("v", "buy", 1.0, 4, 4, algo="twap"),
+        OrderSpec("ac", "buy", 1.0, 4, 4, algo="almgren_chriss"),
+    ]
+    runner = ExecutionRunner(fake_engine, specs, "BTC/USD", logging.getLogger("test"), calibration)
+    # snapshot() has only 1 ask level, too thin to calibrate Almgren-Chriss impact.
     with pytest.raises(CalibrationError):
         runner.on_message(snapshot(), 100)
     assert fake_engine.submits == []
