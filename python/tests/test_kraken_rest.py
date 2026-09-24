@@ -1,9 +1,13 @@
+import http.server
+import inspect
 import json
+import threading
 import urllib.error
 from typing import Any
 
 import pytest
 
+from slipstream import kraken_rest
 from slipstream.kraken import KrakenMessageError
 from slipstream.kraken_rest import (
     MAX_RESPONSE_BYTES,
@@ -142,3 +146,28 @@ def test_fetch_wraps_network_errors() -> None:
 def test_fetch_rejects_unsupported_interval() -> None:
     with pytest.raises(KrakenRestError, match="interval"):
         fetch_ohlc("BTC/USD", 5)
+
+
+def test_default_opener_refuses_redirects() -> None:
+    class Redirect(http.server.BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            self.send_response(302)
+            self.send_header("Location", "http://127.0.0.1:1/downgraded")
+            self.end_headers()
+
+        def log_message(self, *args: object) -> None:
+            return None
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), Redirect)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        url = f"http://127.0.0.1:{server.server_address[1]}/"
+        with pytest.raises(urllib.error.HTTPError, match="redirect"):
+            kraken_rest.NO_REDIRECT_OPENER.open(url, timeout=5)
+    finally:
+        server.shutdown()
+        server.server_close()
+    assert inspect.signature(fetch_ohlc).parameters["opener"].default == (
+        kraken_rest.NO_REDIRECT_OPENER.open
+    )

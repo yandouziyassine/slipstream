@@ -23,6 +23,23 @@ class KrakenRestError(KrakenMessageError):
     pass
 
 
+class _RefuseRedirects(urllib.request.HTTPRedirectHandler):
+    # urllib follows redirects by default, including https -> http downgrades and other hosts.
+    def redirect_request(
+        self,
+        req: urllib.request.Request,
+        fp: Any,
+        code: int,
+        msg: str,
+        headers: Any,
+        newurl: str,
+    ) -> urllib.request.Request | None:
+        raise urllib.error.HTTPError(req.full_url, code, "redirect refused", headers, fp)
+
+
+NO_REDIRECT_OPENER = urllib.request.build_opener(_RefuseRedirects)
+
+
 @dataclass(frozen=True)
 class Bar:
     time_s: int
@@ -45,7 +62,7 @@ def rest_pair(symbol: str) -> str:
 def fetch_ohlc(
     symbol: str,
     interval_min: int,
-    opener: Callable[..., Any] = urllib.request.urlopen,
+    opener: Callable[..., Any] = NO_REDIRECT_OPENER.open,
     timeout_s: float = 10.0,
 ) -> bytes:
     if interval_min not in SUPPORTED_INTERVALS:
