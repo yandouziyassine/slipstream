@@ -1,0 +1,14 @@
+services:
+  dev:
+    build:
+      context: .
+      dockerfile: docker/dev.Dockerfile
+    working_dir: /work
+    volumes:
+      - .:/work
+      - build:/work/build
+    environment:
+      PYTHONPATH: /work/python
+
+volumes:
+  build:

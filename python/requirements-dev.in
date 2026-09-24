@@ -1,0 +1,9 @@
+grpcio>=1.66
+grpcio-tools>=1.66
+protobuf>=5.27
+websockets>=13.0
+pytest>=8.3
+ruff>=0.6
+mypy>=1.11
+types-protobuf>=5.27
+pip-audit>=2.7
