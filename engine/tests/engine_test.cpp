@@ -45,7 +45,8 @@ TEST_F(EngineTest, SubmitRecordsArrivalMidAndImmediateCost) {
 TEST_F(EngineTest, RejectsDuplicateAndInvalidOrderIds) {
     ASSERT_TRUE(engine.submit(buy(0.1, 1)).accepted);
     EXPECT_EQ(engine.submit(buy(0.1, 1)).reason, "duplicate order id");
-    for (const auto& id : {std::string(""), std::string("bad id!"), std::string(65, 'a')}) {
+    for (const auto& id : {std::string(""), std::string("bad id!"), std::string(65, 'a'),
+                           std::string("caf\xC3\xA9"), std::string("id\xB2")}) {
         auto request = buy(0.1, 1);
         request.order_id = id;
         EXPECT_EQ(engine.submit(request).reason, "invalid order id");

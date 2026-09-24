@@ -59,14 +59,14 @@ TEST(Config, RejectsBadLimits) {
 }
 
 TEST(Config, RejectsBadBookDepth) {
-    for (const char* value : {"0", "1001", "-1", "ten"}) {
+    for (const char* value : {"0", "1001", "-1", "ten", "1\xB2"}) {
         EXPECT_FALSE(parse_args({"--book-depth", value}).config) << value;
     }
 }
 
 TEST(Config, RejectsBadSymbol) {
     for (const auto& value : {std::string("btc/usd"), std::string(""), std::string("BTC USD"),
-                              std::string(33, 'A')}) {
+                              std::string(33, 'A'), std::string("BTC/\xC3\x89UR")}) {
         EXPECT_FALSE(parse_args({"--symbol", value}).config) << value;
     }
 }

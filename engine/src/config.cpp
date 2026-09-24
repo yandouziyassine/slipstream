@@ -2,10 +2,11 @@
 
 #include <algorithm>
 #include <array>
-#include <cctype>
 #include <cmath>
 #include <stdexcept>
 #include <string_view>
+
+#include "ascii.h"
 
 namespace slipstream {
 namespace {
@@ -14,7 +15,7 @@ constexpr std::array<std::string_view, 3> kLoopbackPrefixes{"127.0.0.1:", "local
 
 bool all_digits(const std::string& s) {
     return !s.empty() &&
-           std::all_of(s.begin(), s.end(), [](unsigned char c) { return std::isdigit(c) != 0; });
+           std::all_of(s.begin(), s.end(), [](char c) { return is_ascii_digit(c); });
 }
 
 bool is_loopback(const std::string& address) {
@@ -28,8 +29,8 @@ bool is_loopback(const std::string& address) {
 
 bool valid_symbol(const std::string& symbol) {
     if (symbol.empty() || symbol.size() > 32) return false;
-    return std::all_of(symbol.begin(), symbol.end(), [](unsigned char c) {
-        return std::isupper(c) != 0 || std::isdigit(c) != 0 || c == '/';
+    return std::all_of(symbol.begin(), symbol.end(), [](char c) {
+        return is_ascii_upper(c) || is_ascii_digit(c) || c == '/';
     });
 }
 

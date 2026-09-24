@@ -1,8 +1,8 @@
 #include "engine.h"
 
 #include <algorithm>
-#include <cctype>
 
+#include "ascii.h"
 #include "fill_simulator.h"
 
 namespace slipstream {
@@ -12,8 +12,8 @@ constexpr double kDustFraction = 1e-9;
 
 bool valid_order_id(const std::string& id) {
     if (id.empty() || id.size() > Engine::kMaxOrderIdLength) return false;
-    return std::all_of(id.begin(), id.end(), [](unsigned char c) {
-        return std::isalnum(c) != 0 || c == '-' || c == '_';
+    return std::all_of(id.begin(), id.end(), [](char c) {
+        return is_ascii_alnum(c) || c == '-' || c == '_';
     });
 }
 
