@@ -68,11 +68,28 @@ PYTHONPATH=python .venv/bin/python -m slipstream.cli replay \
   --side buy --qty 0.06 --duration 6 --slices 3
 ```
 
-Run against the live Kraken book (public data, simulated fills):
+Run against the live Kraken book (public data, simulated fills). `scripts/demo_live.sh` starts the engine with conservative limits and runs the CLI:
 
 ```bash
-PYTHONPATH=python .venv/bin/python -m slipstream.cli live --side buy --qty 0.005 --duration 60 --slices 6
+PATH="$PWD/.venv/bin:$PATH" bash scripts/demo_live.sh --side buy --qty 0.005 --duration 60 --slices 6
 ```
+
+Output of a real run (2026-09-24, Kraken BTC/USD). JSON fill logs go to stderr and the summary to stdout:
+
+```
+{"ts": "2026-09-24T02:30:28.627362+00:00", "level": "INFO", "msg": "fill", "order_id": "demo-twap-1", "qty": 0.000833, "price": 84145.8, ...}
+... 5 more fills, one every ~10 s ...
+order        demo-twap-1
+state        COMPLETED
+filled       0.005 / 0.005
+avg price    84155.26
+arrival mid  84145.75
+slippage     1.13 bps
+one-shot     0.01 bps (single market order at arrival)
+saved        -1.12 bps
+```
+
+**Reading this honestly:** a 0.005 BTC order (about 420 USD) is tiny next to Kraken's top-of-book depth. A single market order only pays the spread, while the TWAP slices carry about a minute of price drift. In this run the price moved up, so slicing cost 1.12 bps more. TWAP pays off when the order is large relative to displayed depth. The engine reports both numbers on every run so that this trade-off can be measured rather than assumed. Impact-aware scheduling (Almgren-Chriss) and statistics over many runs are on the roadmap.
 
 ## Security
 
