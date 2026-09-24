@@ -64,7 +64,7 @@ If the field is unset, the order is TWAP, so v0.1 clients keep working. `OrderSt
 ### 4.2 `calibration.py` (pure functions)
 - **`vwap_weights(bars_15m, start_ns, duration_s, slices)`.** Builds a 96-bucket average volume by UTC time of day, and gives each slice the bucket average at its midpoint. Executions shorter than one bucket get near-equal weights; this is documented, not hidden.
 - **`estimate_sigma(bars_1m)`.** The standard deviation of 1-minute close-to-close changes divided by √60, in $/√s. It needs at least 60 bars.
-- **`estimate_eta(book, side, slice_qty, tau)`.** Walks the arrival book for sizes of 0.5×, 1×, 2× and 4× the slice, fits a least-squares line of average fill cost above the touch against size, and sets η = slope × τ. It needs at least 3 fill points and a positive slope.
+- **`estimate_eta(liquidity, tau)`.** Fits impact from the arrival book's own depth curve: for each of the first ≤ 10 visible levels, takes the cumulative quantity through that level and the average fill cost above the touch for buying/selling exactly that much, fits a least-squares line of cost against cumulative size, and sets η = slope × τ. It needs at least 3 levels and a positive slope. (Earlier versions probed costs at 0.5×/1×/2×/4× the slice size; on real Kraken books the touch alone holds many multiples of a slice, so every probe filled at zero cost and calibration always failed. Fitting the book's own level-by-level depth curve instead needs no slice size and reflects real liquidity.)
 - **Failure.** Any calibration failure means the order is not submitted and the process exits 1 with a clear reason.
 
 ### 4.3 Trade channel

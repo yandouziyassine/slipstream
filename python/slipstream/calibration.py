@@ -21,7 +21,7 @@ SECONDS_PER_DAY = 86_400
 BUCKET_S = 900
 BUCKETS_PER_DAY = SECONDS_PER_DAY // BUCKET_S
 MIN_SIGMA_BARS = 60
-IMPACT_MULTIPLIERS = (0.5, 1.0, 2.0, 4.0)
+MAX_IMPACT_LEVELS = 10
 MIN_IMPACT_POINTS = 3
 URGENCY_RISK_AVERSION = {"low": 3e-6, "medium": 3e-5, "high": 3e-4}
 
@@ -67,20 +67,24 @@ def estimate_sigma(bars_1m: Sequence[Bar]) -> float:
     return sigma
 
 
-def estimate_eta(liquidity: Sequence[tuple[float, float]], slice_qty: float, tau_s: float) -> float:
+def estimate_eta(liquidity: Sequence[tuple[float, float]], tau_s: float) -> float:
     if not liquidity:
         raise CalibrationError("empty book side")
-    if not (math.isfinite(slice_qty) and slice_qty > 0 and math.isfinite(tau_s) and tau_s > 0):
-        raise CalibrationError("invalid slice size or interval")
+    if not math.isfinite(tau_s) or tau_s <= 0:
+        raise CalibrationError("invalid interval")
+    for price, qty in liquidity:
+        if not (math.isfinite(price) and price > 0 and math.isfinite(qty) and qty > 0):
+            raise CalibrationError("invalid book level")
     touch = liquidity[0][0]
+    cum_qty = 0.0
+    cum_notional = 0.0
     sizes: list[float] = []
     costs: list[float] = []
-    for multiplier in IMPACT_MULTIPLIERS:
-        qty = slice_qty * multiplier
-        filled, avg_price = _walk(liquidity, qty)
-        if filled < qty * (1 - 1e-9):
-            break
-        sizes.append(qty)
+    for price, qty in liquidity[:MAX_IMPACT_LEVELS]:
+        cum_qty += qty
+        cum_notional += price * qty
+        avg_price = cum_notional / cum_qty
+        sizes.append(cum_qty)
         costs.append(abs(avg_price - touch))
     if len(sizes) < MIN_IMPACT_POINTS:
         raise CalibrationError("book too thin to estimate impact")
@@ -109,7 +113,7 @@ def schedule_params(
         return VwapParams(vwap_weights(data.bars_15m, start_ns, spec.duration_s, spec.num_slices))
     liquidity = sorted(book.asks) if spec.side == "buy" else sorted(book.bids, reverse=True)
     tau_s = spec.duration_s / spec.num_slices
-    eta = estimate_eta(liquidity, spec.qty / spec.num_slices, tau_s)
+    eta = estimate_eta(liquidity, tau_s)
     sigma = estimate_sigma(data.bars_1m)
     risk_aversion = (
         spec.risk_aversion
@@ -117,17 +121,3 @@ def schedule_params(
         else URGENCY_RISK_AVERSION[spec.urgency]
     )
     return AlmgrenChrissParams(sigma, eta, risk_aversion)
-
-
-def _walk(liquidity: Sequence[tuple[float, float]], qty: float) -> tuple[float, float]:
-    remaining = qty
-    filled = 0.0
-    notional = 0.0
-    for price, level_qty in liquidity:
-        if remaining <= 0:
-            break
-        take = min(remaining, level_qty)
-        filled += take
-        notional += take * price
-        remaining -= take
-    return filled, (notional / filled if filled > 0 else 0.0)

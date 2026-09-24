@@ -85,7 +85,7 @@ def test_four_schedules_end_to_end(engine_address: str, tmp_path: Path) -> None:
     calibration = CalibrationData(bars[15], bars[1])
 
     sigma = estimate_sigma(calibration.bars_1m)
-    eta = estimate_eta(ASKS, 0.01, 1.0)
+    eta = estimate_eta(ASKS, 1.0)
     risk_aversion = (math.cosh(0.5) - 1.0) * 2.0 * eta / sigma**2
 
     specs = [
