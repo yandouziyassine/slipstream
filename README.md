@@ -17,6 +17,11 @@ Kraken WS v2 (public) ──► Python orchestrator ──gRPC (loopback)──�
                           JSON logs + summary                      risk gate ──► simulated fills
 ```
 
+- **Four execution schedules** behind one C++ `Schedule` interface:
+  - **TWAP:** equal slices over time.
+  - **VWAP:** follows the historical time-of-day volume profile, built from Kraken 15-minute candles.
+  - **POV:** trades a fixed share of live market volume.
+  - **Almgren-Chriss:** the closed-form optimal trade-off between market impact and price risk. It is calibrated live: σ from 1-minute candles, η from the order book's depth curve, and λ from an urgency preset.
 - **Deterministic engine.** The caller supplies the clock (`now_ns`), so live runs, replays, and tests all exercise one code path.
 - **Risk before every fill.** The engine enforces a per-order notional budget (slippage included) and a maximum absolute position. A breach halts the order; it never skips the check.
 - **Measured outcome.** Each order reports its average fill price and its slippage against the arrival mid. It also reports the cost one market order for the full size would have paid at arrival (the "one-shot" benchmark).
@@ -91,6 +96,31 @@ saved        -1.12 bps
 
 **Reading this honestly:** a 0.005 BTC order (about 420 USD) is tiny next to Kraken's top-of-book depth. A single market order only pays the spread, while the TWAP slices carry about a minute of price drift. In this run the price moved up, so slicing cost 1.12 bps more. TWAP pays off when the order is large relative to displayed depth. The engine reports both numbers on every run so that this trade-off can be measured rather than assumed. Impact-aware scheduling (Almgren-Chriss) and statistics over many runs are on the roadmap.
 
+## Compare algorithms
+
+`compare` submits the same parent order once per algorithm and runs them all side by side on the same feed. Paper fills do not consume liquidity, so the orders do not compete for it.
+
+```bash
+PATH="$PWD/.venv/bin:$PATH" bash scripts/demo_compare.sh --side buy --qty 0.005 --duration 1200 --slices 20
+```
+
+Output of a real run (2026-09-24 14:10–14:30 UTC, Kraken BTC/USD, buy 0.005 BTC over 20 minutes):
+
+```
+algo            state          filled      avg px  slip bps  1-shot bps  saved bps  fills
+twap            COMPLETED       0.005    84343.27      8.89        0.01      -8.88     20
+vwap            COMPLETED       0.005    84338.38      8.31        0.01      -8.30     20
+pov             COMPLETED       0.005    84253.45     -1.77        0.01       1.77      5
+almgren_chriss  COMPLETED       0.005    84264.39     -0.47        0.01       0.48     20
+```
+
+Calibrated live: σ = 5.68 $/√s and η = 166 $·s/BTC², so medium urgency gives κT ≈ 2.9 and the Almgren-Chriss schedule is front-loaded.
+
+**Reading this honestly:**
+- **Price drift decided the ranking.** BTC rose during the window, so the schedules that traded early paid less. POV finished in 5 fills because market volume was high, and Almgren-Chriss was front-loaded by design. In a falling market the same logic would rank them the other way.
+- **VWAP barely moved off TWAP.** Its time-of-day profile was nearly flat across these 20 minutes.
+- **One run is one sample.** Measuring each algorithm's cost distribution over many recorded sessions is the next milestone. Until then, treat this table as a demonstration of the tooling, not as evidence that one schedule beats another.
+
 ## Security
 
 - **Paper trading is enforced.** `SLIPSTREAM_PAPER_MODE` must be `true`, and v0.1 contains no live order path.
@@ -101,7 +131,7 @@ saved        -1.12 bps
 
 ## Roadmap
 
-- VWAP and implementation-shortfall (Almgren-Chriss) algorithms
+- Batch statistics across recorded sessions (`record` + `compare --file`)
 - Second venue and smart routing across venues
 - Property-based and fuzz tests; Kraken book checksum verification
 - Backtest scenarios (e.g. flash-crash windows)
