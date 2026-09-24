@@ -41,3 +41,13 @@ Large orders move the price against the trader (market impact). Institutions pay
 - Python orchestrator (`feat/orchestrator-core`, then `feat/replay-live-cli`): Kraken v2 parser, settings with a paper-mode gate, typed gRPC client, execution runner, JSONL replay, live WebSocket loop, JSON logging, and CLI. 79 tests; `mypy --strict` and `ruff` clean.
 - Review findings fixed (test-first): hostile Kraken messages could crash the parser with non-domain exceptions. The triggers were deeply nested JSON (`RecursionError`), integers over 4300 digits (`ValueError`), invalid UTF-8 (`UnicodeDecodeError`), and huge prices or quantities overflowing `float()` (`OverflowError`). All now surface as `KrakenMessageError`. The replay reader got the same treatment.
 - mypy strict now skips generated gRPC stubs (`exclude` plus scoped overrides) but still checks all project modules.
+- C++ engine (`feat/engine-core`) built in WSL Ubuntu 24.04 with the same apt packages as the dev container: order book, TWAP, risk gate, fill simulator, engine, config, and gRPC service. 52 GoogleTest cases pass under `-Werror` with ASan + UBSan.
+- Engine review findings fixed: a signed int64 overflow in `TwapSchedule::target_qty_at` at extreme `now_ns` (reachable via gRPC `Step`; UBSan abort). Locale-dependent `<cctype>` checks were replaced with explicit ASCII checks for ids, symbols, and numbers.
+- `/security-review` on both code branches: no findings.
+- Published to GitHub (MIT). Four stacked PRs were merged into `main`. Commits use the GitHub noreply address to keep the author's email private.
+
+### 2026-09-24 — Day 2
+- End-to-end test: the recorded Kraken-format replay runs through the real C++ engine over gRPC and matches the hand-computed fills (0.83 bps TWAP vs 1.67 bps one-shot).
+- CI: `scripts/ci.sh` covers codegen, sanitizer build, ctest, ruff, mypy, pytest, and pip-audit. GitHub Actions runs it on Ubuntu 24.04 with the same apt toolchain.
+- Docker fixed: deleted the stale sockets from WSL (Windows could not remove the AF_UNIX reparse points). The dev image now builds.
+- First live paper run on Kraken BTC/USD (0.005 BTC, 6 slices over 60 s): TWAP 1.13 bps vs one-shot 0.01 bps. A small order next to deep top-of-book liquidity only pays the spread when sent at once, while slicing adds exposure to price drift. This is expected, and it motivates impact-aware scheduling (Almgren-Chriss) and multi-run statistics in week 2.
