@@ -2,6 +2,7 @@
 .env.*
 input.md
 .worktrees/
+.venv/
 build/
 __pycache__/
 *.pyc
