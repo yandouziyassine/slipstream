@@ -19,6 +19,7 @@ add_library(slipstream_core STATIC
   src/twap.cpp
   src/vwap.cpp
   src/almgren_chriss.cpp
+  src/pov.cpp
   src/risk.cpp
   src/fill_simulator.cpp
   src/engine.cpp
@@ -74,6 +75,8 @@ add_executable(engine_tests
   tests/twap_test.cpp
   tests/vwap_test.cpp
   tests/almgren_chriss_test.cpp
+  tests/pov_test.cpp
+  tests/schedule_invariants_test.cpp
   tests/risk_test.cpp
   tests/fill_simulator_test.cpp
   tests/engine_test.cpp
