@@ -29,6 +29,22 @@ message BookUpdate {
 
 message BookAck {}
 
+message TwapParams {}
+
+message VwapParams {
+  repeated double weights = 1;
+}
+
+message AlmgrenChrissParams {
+  double sigma = 1;
+  double eta = 2;
+  double risk_aversion = 3;
+}
+
+message PovParams {
+  double participation = 1;
+}
+
 message ParentOrder {
   string order_id = 1;
   Side side = 2;
@@ -36,6 +52,13 @@ message ParentOrder {
   int64 start_ns = 4;
   int64 duration_ns = 5;
   int32 num_slices = 6;
+
+  oneof schedule {
+    TwapParams twap = 7;
+    VwapParams vwap = 8;
+    AlmgrenChrissParams almgren_chriss = 9;
+    PovParams pov = 10;
+  }
 }
 
 message SubmitReply {
@@ -71,6 +94,7 @@ message OrderStatus {
   double slippage_bps = 8;
   double immediate_cost_bps = 9;
   string halt_reason = 10;
+  string algo = 11;
 }
 
 message StatusReply {
@@ -80,9 +104,23 @@ message StatusReply {
   repeated OrderStatus orders = 4;
 }
 
+message Trade {
+  double price = 1;
+  double qty = 2;
+  int64 ts_ns = 3;
+}
+
+message TradeBatch {
+  string symbol = 1;
+  repeated Trade trades = 2;
+}
+
+message TradeAck {}
+
 service ExecutionEngine {
   rpc ApplyBookUpdate(BookUpdate) returns (BookAck);
   rpc SubmitParentOrder(ParentOrder) returns (SubmitReply);
   rpc Step(StepRequest) returns (StepReply);
   rpc GetStatus(StatusRequest) returns (StatusReply);
+  rpc ApplyTrades(TradeBatch) returns (TradeAck);
 }

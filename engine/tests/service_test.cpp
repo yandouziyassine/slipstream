@@ -4,6 +4,8 @@
 
 #include <string>
 
+#include "slicing.h"
+
 using namespace slipstream;
 
 namespace {
@@ -108,4 +110,88 @@ TEST_F(ServiceTest, SubmitStepAndStatusRoundTrip) {
     ASSERT_EQ(status.orders_size(), 1);
     EXPECT_EQ(status.orders(0).order_id(), "o-1");
     EXPECT_EQ(status.orders(0).state(), v1::ORDER_STATE_COMPLETED);
+    EXPECT_EQ(status.orders(0).algo(), "twap");
+}
+
+TEST_F(ServiceTest, VwapScheduleMapsThroughOneof) {
+    const auto update = snapshot();
+    v1::BookAck ack;
+    ASSERT_TRUE(service.ApplyBookUpdate(nullptr, &update, &ack).ok());
+    auto request = order(v1::SIDE_BUY);
+    request.set_num_slices(2);
+    request.mutable_vwap()->add_weights(1.0);
+    request.mutable_vwap()->add_weights(3.0);
+    v1::SubmitReply reply;
+    ASSERT_TRUE(service.SubmitParentOrder(nullptr, &request, &reply).ok());
+    ASSERT_TRUE(reply.accepted()) << reply.reason();
+    v1::StatusRequest status_request;
+    v1::StatusReply status;
+    ASSERT_TRUE(service.GetStatus(nullptr, &status_request, &status).ok());
+    EXPECT_EQ(status.orders(0).algo(), "vwap");
+}
+
+TEST_F(ServiceTest, TooManyVwapWeightsIsInvalidArgument) {
+    auto request = order(v1::SIDE_BUY);
+    for (int i = 0; i <= kMaxSlices; ++i) request.mutable_vwap()->add_weights(1.0);
+    v1::SubmitReply reply;
+    EXPECT_EQ(service.SubmitParentOrder(nullptr, &request, &reply).error_code(),
+              grpc::StatusCode::INVALID_ARGUMENT);
+}
+
+TEST_F(ServiceTest, ApplyTradesValidatesBoundary) {
+    v1::TradeAck ack;
+    v1::TradeBatch wrong_symbol;
+    wrong_symbol.set_symbol("ETH/USD");
+    EXPECT_EQ(service.ApplyTrades(nullptr, &wrong_symbol, &ack).error_code(),
+              grpc::StatusCode::INVALID_ARGUMENT);
+
+    v1::TradeBatch too_many;
+    too_many.set_symbol("BTC/USD");
+    for (int i = 0; i <= ExecutionService::kMaxTradesPerBatch; ++i) {
+        auto* trade = too_many.add_trades();
+        trade->set_price(100.0);
+        trade->set_qty(1.0);
+    }
+    EXPECT_EQ(service.ApplyTrades(nullptr, &too_many, &ack).error_code(),
+              grpc::StatusCode::INVALID_ARGUMENT);
+
+    v1::TradeBatch bad;
+    bad.set_symbol("BTC/USD");
+    auto* negative = bad.add_trades();
+    negative->set_price(100.0);
+    negative->set_qty(-1.0);
+    EXPECT_EQ(service.ApplyTrades(nullptr, &bad, &ack).error_code(),
+              grpc::StatusCode::INVALID_ARGUMENT);
+
+    v1::TradeBatch good;
+    good.set_symbol("BTC/USD");
+    auto* trade = good.add_trades();
+    trade->set_price(100.0);
+    trade->set_qty(2.5);
+    EXPECT_TRUE(service.ApplyTrades(nullptr, &good, &ack).ok());
+    EXPECT_DOUBLE_EQ(engine.market_volume(), 2.5);
+}
+
+TEST_F(ServiceTest, PovOrderFillsFromReportedTrades) {
+    const auto update = snapshot();
+    v1::BookAck book_ack;
+    ASSERT_TRUE(service.ApplyBookUpdate(nullptr, &update, &book_ack).ok());
+    auto request = order(v1::SIDE_BUY);
+    request.mutable_pov()->set_participation(0.5);
+    v1::SubmitReply reply;
+    ASSERT_TRUE(service.SubmitParentOrder(nullptr, &request, &reply).ok());
+    ASSERT_TRUE(reply.accepted()) << reply.reason();
+    v1::TradeBatch trades;
+    trades.set_symbol("BTC/USD");
+    auto* trade = trades.add_trades();
+    trade->set_price(100.0);
+    trade->set_qty(1.0);
+    v1::TradeAck trade_ack;
+    ASSERT_TRUE(service.ApplyTrades(nullptr, &trades, &trade_ack).ok());
+    v1::StepRequest step;
+    step.set_now_ns(0);
+    v1::StepReply step_reply;
+    ASSERT_TRUE(service.Step(nullptr, &step, &step_reply).ok());
+    ASSERT_EQ(step_reply.fills_size(), 1);
+    EXPECT_DOUBLE_EQ(step_reply.fills(0).qty(), 0.5);
 }
