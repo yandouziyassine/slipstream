@@ -1,0 +1,113 @@
+#include "service.h"
+
+#include <optional>
+#include <utility>
+#include <vector>
+
+namespace slipstream {
+namespace {
+
+std::vector<Level> to_levels(const google::protobuf::RepeatedPtrField<v1::PriceLevel>& levels) {
+    std::vector<Level> out;
+    out.reserve(static_cast<std::size_t>(levels.size()));
+    for (const auto& level : levels) out.push_back({level.price(), level.qty()});
+    return out;
+}
+
+std::optional<Side> from_proto(v1::Side side) {
+    switch (side) {
+        case v1::SIDE_BUY:
+            return Side::Buy;
+        case v1::SIDE_SELL:
+            return Side::Sell;
+        default:
+            return std::nullopt;
+    }
+}
+
+v1::Side to_proto(Side side) { return side == Side::Buy ? v1::SIDE_BUY : v1::SIDE_SELL; }
+
+v1::OrderState to_proto(OrderState state) {
+    switch (state) {
+        case OrderState::Working:
+            return v1::ORDER_STATE_WORKING;
+        case OrderState::Completed:
+            return v1::ORDER_STATE_COMPLETED;
+        case OrderState::Halted:
+            return v1::ORDER_STATE_HALTED;
+    }
+    return v1::ORDER_STATE_UNSPECIFIED;
+}
+
+grpc::Status invalid(const char* message) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, message);
+}
+
+}  // namespace
+
+ExecutionService::ExecutionService(Engine& engine, std::string symbol)
+    : engine_(engine), symbol_(std::move(symbol)) {}
+
+grpc::Status ExecutionService::ApplyBookUpdate(grpc::ServerContext*, const v1::BookUpdate* request,
+                                               v1::BookAck*) {
+    if (request->symbol() != symbol_) return invalid("unexpected symbol");
+    if (request->bids_size() > kMaxLevelsPerUpdate || request->asks_size() > kMaxLevelsPerUpdate) {
+        return invalid("too many levels");
+    }
+    const auto bids = to_levels(request->bids());
+    const auto asks = to_levels(request->asks());
+    const bool ok = request->is_snapshot() ? engine_.apply_book_snapshot(bids, asks)
+                                           : engine_.apply_book_update(bids, asks);
+    if (!ok) return invalid("invalid price level");
+    return grpc::Status::OK;
+}
+
+grpc::Status ExecutionService::SubmitParentOrder(grpc::ServerContext*,
+                                                 const v1::ParentOrder* request,
+                                                 v1::SubmitReply* reply) {
+    const auto side = from_proto(request->side());
+    if (!side) return invalid("invalid side");
+    const auto result = engine_.submit({request->order_id(), *side, request->qty(),
+                                        request->start_ns(), request->duration_ns(),
+                                        request->num_slices()});
+    reply->set_accepted(result.accepted);
+    reply->set_reason(result.reason);
+    return grpc::Status::OK;
+}
+
+grpc::Status ExecutionService::Step(grpc::ServerContext*, const v1::StepRequest* request,
+                                    v1::StepReply* reply) {
+    for (const auto& fill : engine_.step(request->now_ns())) {
+        auto* out = reply->add_fills();
+        out->set_order_id(fill.order_id);
+        out->set_ts_ns(fill.ts_ns);
+        out->set_qty(fill.qty);
+        out->set_price(fill.price);
+    }
+    return grpc::Status::OK;
+}
+
+grpc::Status ExecutionService::GetStatus(grpc::ServerContext*, const v1::StatusRequest*,
+                                         v1::StatusReply* reply) {
+    reply->set_position(engine_.position());
+    if (const auto mid = engine_.mid()) {
+        reply->set_has_mid(true);
+        reply->set_mid(*mid);
+    }
+    for (const auto& status : engine_.statuses()) {
+        auto* out = reply->add_orders();
+        out->set_order_id(status.order_id);
+        out->set_side(to_proto(status.side));
+        out->set_state(to_proto(status.state));
+        out->set_total_qty(status.total_qty);
+        out->set_filled_qty(status.filled_qty);
+        out->set_avg_fill_price(status.avg_fill_price);
+        out->set_arrival_mid(status.arrival_mid);
+        out->set_slippage_bps(status.slippage_bps);
+        out->set_immediate_cost_bps(status.immediate_cost_bps);
+        out->set_halt_reason(status.halt_reason);
+    }
+    return grpc::Status::OK;
+}
+
+}  // namespace slipstream
