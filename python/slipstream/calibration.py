@@ -4,8 +4,18 @@ import itertools
 import math
 import statistics
 from collections.abc import Sequence
+from dataclasses import dataclass
 
 from slipstream.kraken_rest import Bar
+from slipstream.models import (
+    AlmgrenChrissParams,
+    BookUpdate,
+    OrderSpec,
+    PovParams,
+    ScheduleParams,
+    TwapParams,
+    VwapParams,
+)
 
 SECONDS_PER_DAY = 86_400
 BUCKET_S = 900
@@ -78,6 +88,35 @@ def estimate_eta(liquidity: Sequence[tuple[float, float]], slice_qty: float, tau
     if not math.isfinite(slope) or slope <= 0:
         raise CalibrationError("non-positive impact slope")
     return slope * tau_s
+
+
+@dataclass(frozen=True)
+class CalibrationData:
+    bars_15m: tuple[Bar, ...]
+    bars_1m: tuple[Bar, ...]
+
+
+def schedule_params(
+    spec: OrderSpec, book: BookUpdate, start_ns: int, data: CalibrationData | None
+) -> ScheduleParams:
+    if spec.algo == "twap":
+        return TwapParams()
+    if spec.algo == "pov":
+        return PovParams(spec.participation)
+    if data is None:
+        raise CalibrationError(f"{spec.algo} needs OHLC calibration data")
+    if spec.algo == "vwap":
+        return VwapParams(vwap_weights(data.bars_15m, start_ns, spec.duration_s, spec.num_slices))
+    liquidity = sorted(book.asks) if spec.side == "buy" else sorted(book.bids, reverse=True)
+    tau_s = spec.duration_s / spec.num_slices
+    eta = estimate_eta(liquidity, spec.qty / spec.num_slices, tau_s)
+    sigma = estimate_sigma(data.bars_1m)
+    risk_aversion = (
+        spec.risk_aversion
+        if spec.risk_aversion is not None
+        else URGENCY_RISK_AVERSION[spec.urgency]
+    )
+    return AlmgrenChrissParams(sigma, eta, risk_aversion)
 
 
 def _walk(liquidity: Sequence[tuple[float, float]], qty: float) -> tuple[float, float]:
