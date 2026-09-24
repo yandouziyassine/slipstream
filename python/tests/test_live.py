@@ -66,7 +66,27 @@ def test_streams_until_order_done(fake_engine: FakeEngine) -> None:
         "depth": 10,
         "snapshot": True,
     }
+    assert received[0]["params"]["channel"] == "book"  # type: ignore[index]
     assert len(fake_engine.steps) == 2
+
+
+def test_subscribes_to_book_then_trades(fake_engine: FakeEngine) -> None:
+    fake_engine.done_after_steps = 1
+    received: list[dict[str, object]] = []
+
+    async def handler(ws: ServerConnection) -> None:
+        received.append(json.loads(await ws.recv()))
+        received.append(json.loads(await ws.recv()))
+        await ws.send(SNAPSHOT)
+        await ws.wait_closed()
+
+    async def scenario() -> None:
+        async with serve(handler, "127.0.0.1", 0) as server:
+            url = f"ws://127.0.0.1:{port_of(server)}"
+            await run_live(make_runner(fake_engine), "BTC/USD", 10, deadline_s=5, url=url)
+
+    asyncio.run(scenario())
+    assert [r["params"]["channel"] for r in received] == ["book", "trade"]  # type: ignore[index]
 
 
 def test_deadline_raises_when_no_data(fake_engine: FakeEngine) -> None:

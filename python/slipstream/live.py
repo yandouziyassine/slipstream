@@ -6,7 +6,12 @@ import time
 from websockets.asyncio.client import connect
 from websockets.exceptions import WebSocketException
 
-from slipstream.kraken import KRAKEN_WS_URL, MAX_MESSAGE_BYTES, subscribe_message
+from slipstream.kraken import (
+    KRAKEN_WS_URL,
+    MAX_MESSAGE_BYTES,
+    subscribe_message,
+    subscribe_trades_message,
+)
 from slipstream.runner import ExecutionRunner
 
 
@@ -27,6 +32,7 @@ async def run_live(
     try:
         async with connect(url, max_size=MAX_MESSAGE_BYTES, open_timeout=10) as ws:
             await ws.send(subscribe_message(symbol, depth))
+            await ws.send(subscribe_trades_message(symbol))
             while not runner.is_done():
                 remaining = deadline - loop.time()
                 if remaining <= 0:
