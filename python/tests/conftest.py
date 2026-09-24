@@ -73,7 +73,7 @@ def engine_address() -> Iterator[str]:
             "--max-order-notional",
             "10000",
             "--max-position",
-            "0.1",
+            "1.0",
         ],
         stdout=subprocess.PIPE,
         text=True,
