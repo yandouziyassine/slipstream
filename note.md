@@ -31,6 +31,7 @@ Large orders move the price against the trader (market impact). Institutions pay
 - Prices and quantities are `double`. Fixed-point decimals are planned before any live trading.
 - The Kraken book checksum is not verified yet (planned for week 2).
 - The slippage comparison includes market drift during the execution window. It illustrates one run; it does not prove an edge statistically.
+- If one of several orders submitted together is rejected by the engine, the orders accepted before it keep working in that engine process; the CLI exits with an error. The demo scripts start a fresh engine per run and stop it on exit. A cancel RPC is planned.
 
 ## Dev log
 ### 2026-09-23 — Day 1
@@ -51,3 +52,12 @@ Large orders move the price against the trader (market impact). Institutions pay
 - CI: `scripts/ci.sh` covers codegen, sanitizer build, ctest, ruff, mypy, pytest, and pip-audit. GitHub Actions runs it on Ubuntu 24.04 with the same apt toolchain.
 - Docker fixed: deleted the stale sockets from WSL (Windows could not remove the AF_UNIX reparse points). The dev image now builds.
 - First live paper run on Kraken BTC/USD (0.005 BTC, 6 slices over 60 s): TWAP 1.13 bps vs one-shot 0.01 bps. A small order next to deep top-of-book liquidity only pays the spread when sent at once, while slicing adds exposure to price drift. This is expected, and it motivates impact-aware scheduling (Almgren-Chriss) and multi-run statistics in week 2.
+
+### 2026-09-24 — Week 2: execution schedules
+- Spec, plan, and three PRs (#7 market data, #8 engine, PR 3 integration). The engine and Python tracks were built in parallel worktrees.
+- Engine: one `Schedule` interface with TWAP, VWAP (normalized volume weights), POV (share of live volume, halts at the deadline), and Almgren-Chriss. For Almgren-Chriss, κ uses the exact discrete-time solution (acosh), the trajectory is evaluated with only non-positive exponents so it cannot overflow, and it falls back to linear as κT → 0. A randomized test checks that every schedule's target never decreases and stays within [0, X].
+- Calibration: the VWAP profile comes from Kraken 15-minute candles, σ from 1-minute candles, and η from the book's depth curve. The recorder saves the candle responses so replays reproduce calibration exactly.
+- Live bug found by the first real comparison: the original η estimator probed costs at multiples of the slice size. Kraken's best level holds far more than a slice, so the measured impact was zero and calibration refused to run. The fail-safe worked, and no order was submitted. It was replaced with the depth-curve fit and a regression test built from a realistic deep book.
+- Security review fix: the OHLC client refuses HTTP redirects, because urllib would otherwise follow an https-to-http downgrade.
+- Four-algorithm end-to-end test against the real engine: every fill matches a hand derivation, including VWAP weights across a 15-minute bucket boundary, POV volume timing, and Almgren-Chriss at κτ = 0.5.
+- First live comparison (20 min, 0.005 BTC): POV −1.77 bps, Almgren-Chriss −0.47, VWAP +8.31, TWAP +8.89. BTC drifted up during the window, which rewarded the schedules that traded early. Calibrated values: σ = 5.68 $/√s, which matches the 5.7 assumed in the spec, and η = 166. One run is not evidence of an edge; batch statistics come next.

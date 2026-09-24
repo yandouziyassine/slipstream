@@ -1,8 +1,22 @@
 import pytest
 
 from slipstream.config import ConfigError
-from slipstream.engine_client import EngineClient, EngineError, book_update_to_proto, order_to_proto
-from slipstream.models import BookUpdate, OrderSpec
+from slipstream.engine_client import (
+    EngineClient,
+    EngineError,
+    book_update_to_proto,
+    order_to_proto,
+    trade_batch_to_proto,
+)
+from slipstream.models import (
+    AlmgrenChrissParams,
+    BookUpdate,
+    OrderSpec,
+    PovParams,
+    TradeBatch,
+    TwapParams,
+    VwapParams,
+)
 from slipstream.v1 import execution_pb2 as pb
 
 
@@ -44,3 +58,32 @@ def test_wait_ready_times_out_when_engine_absent() -> None:
             client.wait_ready(timeout_s=0.5)
     finally:
         client.close()
+
+
+def test_order_defaults_to_twap_schedule() -> None:
+    msg = order_to_proto(OrderSpec("o-1", "buy", 1.0, 4, 4), start_ns=0)
+    assert msg.WhichOneof("schedule") == "twap"
+
+
+def test_order_carries_schedule_params() -> None:
+    spec = OrderSpec("o-1", "buy", 1.0, 4, 2)
+    vwap = order_to_proto(spec, 0, VwapParams((1.0, 3.0)))
+    assert vwap.WhichOneof("schedule") == "vwap"
+    assert list(vwap.vwap.weights) == [1.0, 3.0]
+    ac = order_to_proto(spec, 0, AlmgrenChrissParams(0.5, 2.0, 3e-5))
+    assert ac.WhichOneof("schedule") == "almgren_chriss"
+    assert (ac.almgren_chriss.sigma, ac.almgren_chriss.eta, ac.almgren_chriss.risk_aversion) == (
+        0.5,
+        2.0,
+        3e-5,
+    )
+    pov = order_to_proto(spec, 0, PovParams(0.25))
+    assert pov.WhichOneof("schedule") == "pov"
+    assert pov.pov.participation == 0.25
+    assert order_to_proto(spec, 0, TwapParams()).WhichOneof("schedule") == "twap"
+
+
+def test_trade_batch_to_proto() -> None:
+    msg = trade_batch_to_proto(TradeBatch("BTC/USD", False, ((100.5, 0.2), (100.4, 0.3))))
+    assert msg.symbol == "BTC/USD"
+    assert [(t.price, t.qty) for t in msg.trades] == [(100.5, 0.2), (100.4, 0.3)]
