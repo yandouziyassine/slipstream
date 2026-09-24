@@ -15,6 +15,7 @@ set(SLIPSTREAM_WARNINGS -Wall -Wextra -Wpedantic -Wshadow -Werror)
 
 add_library(slipstream_core STATIC
   src/order_book.cpp
+  src/slicing.cpp
   src/twap.cpp
   src/risk.cpp
   src/fill_simulator.cpp

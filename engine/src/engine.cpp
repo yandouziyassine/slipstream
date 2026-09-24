@@ -80,7 +80,7 @@ std::vector<Fill> Engine::step(std::int64_t now_ns) {
     for (auto& order : orders_) {
         if (order.state != OrderState::Working) continue;
         const double dust = order.request.qty * kDustFraction;
-        const double child = order.schedule.target_qty_at(now_ns) - order.filled_qty;
+        const double child = order.schedule.target_qty_at(now_ns, MarketState{}) - order.filled_qty;
         if (child <= dust || !ref_price) continue;
 
         const auto decision = risk_.check_child(order.request.side, child, *ref_price, position_,
