@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import logging
 import math
 import re
 import sys
@@ -12,9 +13,11 @@ from pathlib import Path
 from slipstream.config import ConfigError, load_settings
 from slipstream.engine_client import EngineClient, EngineError
 from slipstream.kraken import KrakenMessageError
+from slipstream.kraken_rest import fetch_ohlc
 from slipstream.live import LiveFeedError, run_live
 from slipstream.logging_setup import configure_logging
 from slipstream.models import OrderSpec
+from slipstream.recorder import RecordError, open_new_file, record_stream, write_ohlc_header
 from slipstream.replay import ReplayError, read_replay, run_replay
 from slipstream.runner import ExecutionRunner, OrderRejectedError
 from slipstream.v1 import execution_pb2 as pb
@@ -66,6 +69,11 @@ def build_parser() -> argparse.ArgumentParser:
     live.add_argument("--depth", type=int, choices=[10, 25, 100], default=10)
     replay = commands.add_parser("replay", help="replay a recorded JSONL order book file")
     replay.add_argument("--file", type=Path, required=True)
+    record = commands.add_parser("record", help="record the live Kraken book + trades to JSONL")
+    record.add_argument("--duration", type=_positive_int, required=True, help="seconds")
+    record.add_argument("--out", type=Path, required=True)
+    record.add_argument("--symbol", type=_symbol, default="BTC/USD")
+    record.add_argument("--depth", type=int, choices=[10, 25, 100], default=10)
     for sub in (live, replay):
         sub.add_argument("--side", choices=["buy", "sell"], required=True)
         sub.add_argument("--qty", type=_positive_float, required=True)
@@ -94,9 +102,27 @@ def format_summary(status: pb.OrderStatus) -> str:
     return "\n".join(lines)
 
 
+def _record(args: argparse.Namespace, log: logging.Logger) -> int:
+    try:
+        with open_new_file(args.out) as handle:
+            for interval in (15, 1):
+                write_ohlc_header(handle, interval, fetch_ohlc(args.symbol, interval))
+            count = asyncio.run(record_stream(handle, args.symbol, args.depth, args.duration))
+    except (RecordError, KrakenMessageError, OSError) as exc:
+        log.error(str(exc))
+        return 1
+    log.info(
+        "recording complete",
+        extra={"fields": {"event": "record", "messages": count, "path": str(args.out)}},
+    )
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     log = configure_logging()
+    if args.command == "record":
+        return _record(args, log)
     try:
         settings = load_settings()
         client = EngineClient(args.engine or settings.engine_address)

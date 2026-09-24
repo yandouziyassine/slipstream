@@ -15,6 +15,13 @@ class BookUpdate:
 
 
 @dataclass(frozen=True)
+class TradeBatch:
+    symbol: str
+    is_snapshot: bool
+    trades: tuple[tuple[float, float], ...]
+
+
+@dataclass(frozen=True)
 class OrderSpec:
     order_id: str
     side: Side
