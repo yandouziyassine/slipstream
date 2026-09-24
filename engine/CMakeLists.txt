@@ -15,7 +15,12 @@ set(SLIPSTREAM_WARNINGS -Wall -Wextra -Wpedantic -Wshadow -Werror)
 
 add_library(slipstream_core STATIC
   src/order_book.cpp
+  src/slicing.cpp
   src/twap.cpp
+  src/vwap.cpp
+  src/almgren_chriss.cpp
+  src/pov.cpp
+  src/schedule_factory.cpp
   src/risk.cpp
   src/fill_simulator.cpp
   src/engine.cpp
@@ -69,11 +74,16 @@ include(GoogleTest)
 add_executable(engine_tests
   tests/order_book_test.cpp
   tests/twap_test.cpp
+  tests/vwap_test.cpp
+  tests/almgren_chriss_test.cpp
+  tests/pov_test.cpp
+  tests/schedule_invariants_test.cpp
   tests/risk_test.cpp
   tests/fill_simulator_test.cpp
   tests/engine_test.cpp
   tests/config_test.cpp
   tests/service_test.cpp
+  tests/engine_schedules_test.cpp
 )
 target_link_libraries(engine_tests PRIVATE slipstream_service GTest::gtest_main)
 target_compile_options(engine_tests PRIVATE ${SLIPSTREAM_WARNINGS})

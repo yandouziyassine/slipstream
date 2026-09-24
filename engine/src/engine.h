@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -9,7 +10,8 @@
 
 #include "order_book.h"
 #include "risk.h"
-#include "twap.h"
+#include "schedule.h"
+#include "schedule_spec.h"
 #include "types.h"
 
 namespace slipstream {
@@ -48,6 +50,7 @@ struct OrderStatus {
     double slippage_bps;
     double immediate_cost_bps;
     std::string halt_reason;
+    std::string algo;
 };
 
 class Engine {
@@ -59,18 +62,20 @@ public:
 
     bool apply_book_snapshot(const std::vector<Level>& bids, const std::vector<Level>& asks);
     bool apply_book_update(const std::vector<Level>& bids, const std::vector<Level>& asks);
+    bool apply_trades(const std::vector<Trade>& trades);
 
-    SubmitResult submit(const ParentOrderRequest& request);
+    SubmitResult submit(const ParentOrderRequest& request, const ScheduleSpec& spec = TwapSpec{});
     std::vector<Fill> step(std::int64_t now_ns);
 
     std::vector<OrderStatus> statuses() const;
     double position() const;
     std::optional<double> mid() const;
+    double market_volume() const;
 
 private:
     struct ParentOrder {
         ParentOrderRequest request;
-        TwapSchedule schedule;
+        std::unique_ptr<Schedule> schedule;
         OrderState state;
         double filled_qty;
         double filled_notional;
@@ -80,11 +85,14 @@ private:
     };
 
     double projected_position_locked() const;
+    void advance_locked(ParentOrder& order, std::int64_t now_ns, std::optional<double> ref_price,
+                        const MarketState& market, std::vector<Fill>& fills);
 
     mutable std::mutex mu_;
     OrderBook book_;
     RiskCheck risk_;
     double position_ = 0.0;
+    double market_volume_ = 0.0;
     std::vector<ParentOrder> orders_;
 };
 

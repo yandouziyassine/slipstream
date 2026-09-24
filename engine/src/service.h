@@ -12,6 +12,7 @@ namespace slipstream {
 class ExecutionService final : public v1::ExecutionEngine::Service {
 public:
     static constexpr int kMaxLevelsPerUpdate = 1000;
+    static constexpr int kMaxTradesPerBatch = 1000;
 
     ExecutionService(Engine& engine, std::string symbol);
 
@@ -23,6 +24,8 @@ public:
                       v1::StepReply* reply) override;
     grpc::Status GetStatus(grpc::ServerContext*, const v1::StatusRequest*,
                            v1::StatusReply* reply) override;
+    grpc::Status ApplyTrades(grpc::ServerContext*, const v1::TradeBatch* request,
+                             v1::TradeAck*) override;
 
 private:
     Engine& engine_;

@@ -4,6 +4,9 @@
 #include <utility>
 #include <vector>
 
+#include "schedule_spec.h"
+#include "slicing.h"
+
 namespace slipstream {
 namespace {
 
@@ -43,6 +46,25 @@ grpc::Status invalid(const char* message) {
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, message);
 }
 
+std::optional<ScheduleSpec> schedule_from_proto(const v1::ParentOrder& order) {
+    switch (order.schedule_case()) {
+        case v1::ParentOrder::SCHEDULE_NOT_SET:
+        case v1::ParentOrder::kTwap:
+            return TwapSpec{};
+        case v1::ParentOrder::kVwap: {
+            const auto& weights = order.vwap().weights();
+            if (weights.size() > kMaxSlices) return std::nullopt;
+            return VwapSpec{std::vector<double>(weights.begin(), weights.end())};
+        }
+        case v1::ParentOrder::kAlmgrenChriss:
+            return AlmgrenChrissSpec{order.almgren_chriss().sigma(), order.almgren_chriss().eta(),
+                                     order.almgren_chriss().risk_aversion()};
+        case v1::ParentOrder::kPov:
+            return PovSpec{order.pov().participation()};
+    }
+    return std::nullopt;
+}
+
 }  // namespace
 
 ExecutionService::ExecutionService(Engine& engine, std::string symbol)
@@ -67,9 +89,12 @@ grpc::Status ExecutionService::SubmitParentOrder(grpc::ServerContext*,
                                                  v1::SubmitReply* reply) {
     const auto side = from_proto(request->side());
     if (!side) return invalid("invalid side");
+    const auto spec = schedule_from_proto(*request);
+    if (!spec) return invalid("too many vwap weights");
     const auto result = engine_.submit({request->order_id(), *side, request->qty(),
                                         request->start_ns(), request->duration_ns(),
-                                        request->num_slices()});
+                                        request->num_slices()},
+                                       *spec);
     reply->set_accepted(result.accepted);
     reply->set_reason(result.reason);
     return grpc::Status::OK;
@@ -106,7 +131,19 @@ grpc::Status ExecutionService::GetStatus(grpc::ServerContext*, const v1::StatusR
         out->set_slippage_bps(status.slippage_bps);
         out->set_immediate_cost_bps(status.immediate_cost_bps);
         out->set_halt_reason(status.halt_reason);
+        out->set_algo(status.algo);
     }
+    return grpc::Status::OK;
+}
+
+grpc::Status ExecutionService::ApplyTrades(grpc::ServerContext*, const v1::TradeBatch* request,
+                                           v1::TradeAck*) {
+    if (request->symbol() != symbol_) return invalid("unexpected symbol");
+    if (request->trades_size() > kMaxTradesPerBatch) return invalid("too many trades");
+    std::vector<Trade> trades;
+    trades.reserve(static_cast<std::size_t>(request->trades_size()));
+    for (const auto& trade : request->trades()) trades.push_back({trade.price(), trade.qty()});
+    if (!engine_.apply_trades(trades)) return invalid("invalid trade");
     return grpc::Status::OK;
 }
 
