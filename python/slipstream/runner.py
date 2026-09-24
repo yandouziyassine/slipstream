@@ -34,7 +34,7 @@ class ExecutionRunner:
 
     def on_message(self, raw: str | bytes, now_ns: int) -> None:
         update = parse_message(raw)
-        if update is not None:
+        if isinstance(update, BookUpdate):
             if update.symbol != self._symbol:
                 raise KrakenMessageError(f"unexpected symbol {update.symbol!r}")
             self._engine.apply_book(update)

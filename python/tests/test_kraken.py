@@ -3,7 +3,13 @@ from typing import Any
 
 import pytest
 
-from slipstream.kraken import KrakenMessageError, parse_message, subscribe_message
+from slipstream.kraken import (
+    KrakenMessageError,
+    parse_message,
+    subscribe_message,
+    subscribe_trades_message,
+)
+from slipstream.models import TradeBatch
 
 
 def book_msg(
@@ -131,3 +137,79 @@ HUGE_INT = "1" + "0" * 400
 def test_hostile_input_only_raises_kraken_error(raw: str | bytes) -> None:
     with pytest.raises(KrakenMessageError):
         parse_message(raw)
+
+
+def trade_msg(msg_type: str = "update", data: Any = None) -> str:
+    rows = (
+        data
+        if data is not None
+        else [
+            {
+                "symbol": "BTC/USD",
+                "side": "buy",
+                "price": 100.5,
+                "qty": 0.2,
+                "ord_type": "market",
+                "trade_id": 1,
+                "timestamp": "2026-09-24T00:00:00.000000Z",
+            },
+            {
+                "symbol": "BTC/USD",
+                "side": "sell",
+                "price": 100.4,
+                "qty": 0.3,
+                "ord_type": "limit",
+                "trade_id": 2,
+                "timestamp": "2026-09-24T00:00:00.100000Z",
+            },
+        ]
+    )
+    return json.dumps({"channel": "trade", "type": msg_type, "data": rows})
+
+
+def test_parses_trade_update() -> None:
+    assert parse_message(trade_msg()) == TradeBatch("BTC/USD", False, ((100.5, 0.2), (100.4, 0.3)))
+
+
+def test_trade_snapshot_is_flagged() -> None:
+    batch = parse_message(trade_msg("snapshot"))
+    assert isinstance(batch, TradeBatch)
+    assert batch.is_snapshot
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        trade_msg(data=[]),
+        trade_msg(data=[{"symbol": "BTC/USD", "price": 100.0, "qty": 0}]),
+        trade_msg(data=[{"symbol": "BTC/USD", "price": -1, "qty": 1}]),
+        trade_msg(
+            data=[
+                {"symbol": "BTC/USD", "price": 1, "qty": 1},
+                {"symbol": "ETH/USD", "price": 1, "qty": 1},
+            ]
+        ),
+        trade_msg(data=[{"symbol": "BTC/USD", "price": 1, "qty": 1}] * 1001),
+        trade_msg("weird"),
+        json.dumps({"channel": "trade", "type": "update", "data": "x"}),
+    ],
+    ids=[
+        "empty",
+        "zero-qty",
+        "negative-price",
+        "mixed-symbols",
+        "too-many",
+        "bad-type",
+        "data-not-list",
+    ],
+)
+def test_malformed_trade_messages_raise(raw: str) -> None:
+    with pytest.raises(KrakenMessageError):
+        parse_message(raw)
+
+
+def test_subscribe_trades_message_disables_snapshot() -> None:
+    assert json.loads(subscribe_trades_message("BTC/USD")) == {
+        "method": "subscribe",
+        "params": {"channel": "trade", "symbol": ["BTC/USD"], "snapshot": False},
+    }

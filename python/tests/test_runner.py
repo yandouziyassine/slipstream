@@ -78,3 +78,16 @@ def test_records_fills_and_reports_done(fake_engine: FakeEngine) -> None:
     assert not runner.is_done()
     fake_engine.state = pb.ORDER_STATE_COMPLETED
     assert runner.is_done()
+
+
+def test_trade_messages_do_not_touch_book_or_submit(fake_engine: FakeEngine) -> None:
+    trade = json.dumps(
+        {
+            "channel": "trade",
+            "type": "update",
+            "data": [{"symbol": "BTC/USD", "price": 100.0, "qty": 1.0}],
+        }
+    )
+    make_runner(fake_engine).on_message(trade, 1)
+    assert fake_engine.books == []
+    assert fake_engine.submits == []
