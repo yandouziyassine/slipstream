@@ -18,10 +18,15 @@ select = ["E", "F", "W", "I", "B", "UP", "S", "RUF"]
 [tool.mypy]
 python_version = "3.12"
 strict = true
+exclude = ["^slipstream/v1/"]
 
 [[tool.mypy.overrides]]
 module = ["grpc", "grpc.*"]
 ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["slipstream.v1.execution_pb2"]
+ignore_errors = true
 
 [[tool.mypy.overrides]]
 module = ["slipstream.v1.execution_pb2_grpc"]
