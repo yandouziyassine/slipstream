@@ -172,6 +172,81 @@ TEST_F(ServiceTest, ApplyTradesValidatesBoundary) {
     EXPECT_DOUBLE_EQ(engine.market_volume(), 2.5);
 }
 
+TEST_F(ServiceTest, EmptyVenueMeansTheOnlyVenue) {
+    const auto update = snapshot();  // venue unset
+    v1::BookAck ack;
+    EXPECT_TRUE(service.ApplyBookUpdate(nullptr, &update, &ack).ok());
+}
+
+TEST(ServiceMultiVenue, VenueNamesAreValidated) {
+    Engine engine(RiskLimits{1'000'000.0, 100.0}, 10, {{"kraken", 40.0}, {"coinbase", 0.0}},
+                  2'000'000'000);
+    ExecutionService service{engine, "BTC/USD"};
+    v1::BookUpdate update;
+    update.set_symbol("BTC/USD");
+    update.set_is_snapshot(true);
+    auto* bid = update.add_bids();
+    bid->set_price(99.0);
+    bid->set_qty(1.0);
+    auto* ask = update.add_asks();
+    ask->set_price(100.0);
+    ask->set_qty(1.0);
+    v1::BookAck ack;
+    EXPECT_EQ(service.ApplyBookUpdate(nullptr, &update, &ack).error_code(),
+              grpc::StatusCode::INVALID_ARGUMENT);  // empty venue with two registered
+    update.set_venue("binance");
+    EXPECT_EQ(service.ApplyBookUpdate(nullptr, &update, &ack).error_code(),
+              grpc::StatusCode::INVALID_ARGUMENT);
+    update.set_venue("coinbase");
+    update.set_recv_ns(-5);
+    EXPECT_EQ(service.ApplyBookUpdate(nullptr, &update, &ack).error_code(),
+              grpc::StatusCode::INVALID_ARGUMENT);
+    update.set_recv_ns(5);
+    EXPECT_TRUE(service.ApplyBookUpdate(nullptr, &update, &ack).ok());
+
+    v1::TradeBatch trades;
+    trades.set_symbol("BTC/USD");
+    trades.set_venue("binance");
+    auto* trade = trades.add_trades();
+    trade->set_price(100.0);
+    trade->set_qty(1.0);
+    v1::TradeAck trade_ack;
+    EXPECT_EQ(service.ApplyTrades(nullptr, &trades, &trade_ack).error_code(),
+              grpc::StatusCode::INVALID_ARGUMENT);
+    trades.set_venue("kraken");
+    EXPECT_TRUE(service.ApplyTrades(nullptr, &trades, &trade_ack).ok());
+}
+
+TEST(ServiceMultiVenue, StepAndStatusCarryVenueFields) {
+    Engine engine(RiskLimits{1'000'000.0, 100.0}, 10, {{"kraken", 40.0}, {"coinbase", 0.0}},
+                  2'000'000'000);
+    ExecutionService service{engine, "BTC/USD"};
+    ASSERT_TRUE(engine.apply_book_snapshot(0, {{99.0, 5.0}}, {{100.0, 1.0}}, 0));
+    ASSERT_TRUE(engine.apply_book_snapshot(1, {{99.5, 5.0}}, {{100.3, 0.5}, {100.6, 5.0}}, 0));
+    v1::ParentOrder order;
+    order.set_order_id("o-1");
+    order.set_side(v1::SIDE_BUY);
+    order.set_qty(1.0);
+    order.set_duration_ns(1'000'000'000);
+    order.set_num_slices(1);
+    v1::SubmitReply reply;
+    ASSERT_TRUE(service.SubmitParentOrder(nullptr, &order, &reply).ok());
+    ASSERT_TRUE(reply.accepted()) << reply.reason();
+    v1::StepRequest step;
+    v1::StepReply step_reply;
+    ASSERT_TRUE(service.Step(nullptr, &step, &step_reply).ok());
+    ASSERT_EQ(step_reply.fills_size(), 2);
+    EXPECT_EQ(step_reply.fills(0).venue(), "kraken");
+    EXPECT_DOUBLE_EQ(step_reply.fills(0).fee(), 0.2);
+    v1::StatusRequest status_request;
+    v1::StatusReply status;
+    ASSERT_TRUE(service.GetStatus(nullptr, &status_request, &status).ok());
+    EXPECT_DOUBLE_EQ(status.orders(0).fees_paid(), 0.2);
+    ASSERT_EQ(status.orders(0).venue_costs_size(), 2);
+    EXPECT_EQ(status.orders(0).venue_costs(1).venue(), "coinbase");
+    EXPECT_TRUE(status.orders(0).venue_costs(1).available());
+}
+
 TEST_F(ServiceTest, PovOrderFillsFromReportedTrades) {
     const auto update = snapshot();
     v1::BookAck book_ack;

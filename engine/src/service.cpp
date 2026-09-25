@@ -70,16 +70,27 @@ std::optional<ScheduleSpec> schedule_from_proto(const v1::ParentOrder& order) {
 ExecutionService::ExecutionService(Engine& engine, std::string symbol)
     : engine_(engine), symbol_(std::move(symbol)) {}
 
+std::optional<std::size_t> ExecutionService::resolve_venue(const std::string& name) const {
+    if (name.empty()) {
+        return engine_.venue_count() == 1 ? std::optional<std::size_t>{0} : std::nullopt;
+    }
+    return engine_.venue_index(name);
+}
+
 grpc::Status ExecutionService::ApplyBookUpdate(grpc::ServerContext*, const v1::BookUpdate* request,
                                                v1::BookAck*) {
     if (request->symbol() != symbol_) return invalid("unexpected symbol");
     if (request->bids_size() > kMaxLevelsPerUpdate || request->asks_size() > kMaxLevelsPerUpdate) {
         return invalid("too many levels");
     }
+    const auto venue = resolve_venue(request->venue());
+    if (!venue) return invalid("unknown venue");
+    if (request->recv_ns() < 0) return invalid("invalid recv_ns");
     const auto bids = to_levels(request->bids());
     const auto asks = to_levels(request->asks());
-    const bool ok = request->is_snapshot() ? engine_.apply_book_snapshot(bids, asks)
-                                           : engine_.apply_book_update(bids, asks);
+    const bool ok = request->is_snapshot()
+                        ? engine_.apply_book_snapshot(*venue, bids, asks, request->recv_ns())
+                        : engine_.apply_book_update(*venue, bids, asks, request->recv_ns());
     if (!ok) return invalid("invalid price level");
     return grpc::Status::OK;
 }
@@ -108,6 +119,8 @@ grpc::Status ExecutionService::Step(grpc::ServerContext*, const v1::StepRequest*
         out->set_ts_ns(fill.ts_ns);
         out->set_qty(fill.qty);
         out->set_price(fill.price);
+        out->set_venue(fill.venue);
+        out->set_fee(fill.fee);
     }
     return grpc::Status::OK;
 }
@@ -132,6 +145,15 @@ grpc::Status ExecutionService::GetStatus(grpc::ServerContext*, const v1::StatusR
         out->set_immediate_cost_bps(status.immediate_cost_bps);
         out->set_halt_reason(status.halt_reason);
         out->set_algo(status.algo);
+        out->set_fees_paid(status.fees_paid);
+        out->set_fees_bps(status.fees_bps);
+        out->set_routed_all_in_bps(status.routed_all_in_bps);
+        for (const auto& venue_cost : status.venue_costs) {
+            auto* out_cost = out->add_venue_costs();
+            out_cost->set_venue(venue_cost.venue);
+            out_cost->set_all_in_bps(venue_cost.all_in_bps);
+            out_cost->set_available(venue_cost.available);
+        }
     }
     return grpc::Status::OK;
 }
@@ -140,6 +162,7 @@ grpc::Status ExecutionService::ApplyTrades(grpc::ServerContext*, const v1::Trade
                                            v1::TradeAck*) {
     if (request->symbol() != symbol_) return invalid("unexpected symbol");
     if (request->trades_size() > kMaxTradesPerBatch) return invalid("too many trades");
+    if (!resolve_venue(request->venue())) return invalid("unknown venue");
     std::vector<Trade> trades;
     trades.reserve(static_cast<std::size_t>(request->trades_size()));
     for (const auto& trade : request->trades()) trades.push_back({trade.price(), trade.qty()});
