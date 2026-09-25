@@ -94,9 +94,10 @@ double Engine::projected_position_locked() const {
 
 bool Engine::fresh_locked(std::size_t venue, std::int64_t now_ns) const {
     if (venues_.size() < 2) return true;
-    const std::int64_t last = venues_[venue].last_update_ns;
-    if (now_ns < last) return true;
-    return now_ns - last <= stale_ns_;
+    // The engine's clock never moves backwards, so an old or negative caller time cannot make a
+    // stale book fresh again. latest_ns_ >= last_update_ns >= 0, so the subtraction cannot overflow.
+    const std::int64_t effective_now = std::max(now_ns, latest_ns_);
+    return effective_now - venues_[venue].last_update_ns <= stale_ns_;
 }
 
 std::optional<double> Engine::consolidated_mid_locked(std::int64_t now_ns) const {

@@ -102,3 +102,38 @@ TEST(RoutingSingleVenue, LegacyEngineIsUnchangedAndNeverStale) {
     const auto status = engine.statuses().at(0);
     EXPECT_DOUBLE_EQ(status.routed_all_in_bps, status.slippage_bps);
 }
+
+TEST_F(RoutingTest, BackwardClockCannotReviveStaleVenue) {
+    ASSERT_TRUE(engine.apply_book_snapshot(1, {{99.5, 5.0}}, {{100.3, 0.5}, {100.6, 5.0}}, 4 * kSec));
+    ASSERT_TRUE(engine.submit({"o", Side::Buy, 1.0, 0, kSec, 1}).accepted);
+    EXPECT_DOUBLE_EQ(engine.statuses().at(0).arrival_mid, (99.5 + 100.3) / 2.0);
+    // kraken was last updated at 1 s and the engine has already seen 4 s: an older caller
+    // clock must not make the kraken book fresh again.
+    const auto fills = engine.step(kSec);
+    ASSERT_EQ(fills.size(), 1u);
+    EXPECT_EQ(fills[0].venue, "coinbase");
+}
+
+TEST_F(RoutingTest, SellSplitsAcrossVenuesByFeeAdjustedBids) {
+    ASSERT_TRUE(engine.apply_book_snapshot(1, {{99.5, 0.5}, {98.0, 5.0}}, {{100.3, 0.5}}, kSec));
+    ASSERT_TRUE(engine.submit({"s", Side::Sell, 1.0, kSec, kSec, 1}).accepted);
+    const auto fills = engine.step(kSec);
+    ASSERT_EQ(fills.size(), 2u);
+    EXPECT_EQ(fills[0].venue, "kraken");
+    EXPECT_DOUBLE_EQ(fills[0].qty, 0.5);
+    EXPECT_DOUBLE_EQ(fills[0].price, 99.0);
+    EXPECT_NEAR(fills[0].fee, 0.5 * 99.0 * 0.004, 1e-12);
+    EXPECT_EQ(fills[1].venue, "coinbase");
+    EXPECT_DOUBLE_EQ(fills[1].qty, 0.5);
+    EXPECT_DOUBLE_EQ(fills[1].price, 99.5);
+    EXPECT_DOUBLE_EQ(engine.position(), -1.0);
+}
+
+TEST_F(RoutingTest, VenueWithEmptyAskSideIsSkippedForBuys) {
+    ASSERT_TRUE(engine.apply_book_snapshot(1, {{99.5, 5.0}}, {}, kSec));
+    ASSERT_TRUE(engine.submit({"o", Side::Buy, 0.5, kSec, kSec, 1}).accepted);
+    const auto fills = engine.step(kSec);
+    ASSERT_EQ(fills.size(), 1u);
+    EXPECT_EQ(fills[0].venue, "kraken");
+    EXPECT_FALSE(engine.statuses().at(0).venue_costs[1].available);
+}
