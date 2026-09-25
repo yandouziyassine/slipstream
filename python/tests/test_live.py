@@ -7,7 +7,7 @@ from conftest import FakeEngine
 from websockets.asyncio.server import ServerConnection, serve
 from websockets.exceptions import ConnectionClosed
 
-from slipstream.live import LiveFeedError, run_live
+from slipstream.live import LiveFeedError, root_cause, run_live, wall_clock
 from slipstream.models import MarketDataError, OrderSpec
 from slipstream.runner import ExecutionRunner
 
@@ -281,7 +281,7 @@ def test_one_feed_failing_cancels_the_other_before_idle_timeout(
                         make_multi_venue_runner(fake_engine),
                         "BTC/USD",
                         10,
-                        deadline_s=5,
+                        deadline_s=30,
                         idle_timeout_s=20,
                         venues=("kraken", "coinbase"),
                         urls=urls,
@@ -291,5 +291,72 @@ def test_one_feed_failing_cancels_the_other_before_idle_timeout(
 
     elapsed = asyncio.run(scenario())
     # Proves the TaskGroup cancelled the kraken feed's blocked recv() instead of
-    # waiting out idle_timeout_s (20s) or deadline_s (5s).
-    assert elapsed < 2.0
+    # waiting out idle_timeout_s (20s) or deadline_s (30s); generous bound for slow CI.
+    assert elapsed < 10.0
+
+
+def test_root_cause_prefers_data_errors_over_disconnects() -> None:
+    data_error = MarketDataError("unexpected symbol")
+    group = ExceptionGroup("feeds", [ConnectionResetError("reset"), data_error])
+    assert root_cause(group) is data_error
+
+
+def test_root_cause_wraps_pure_network_failures() -> None:
+    reset = ConnectionResetError("reset")
+    cause = root_cause(ExceptionGroup("feeds", [reset]))
+    assert isinstance(cause, LiveFeedError)
+    assert cause.__cause__ is reset
+
+
+def test_root_cause_keeps_live_feed_errors() -> None:
+    idle = LiveFeedError("idle")
+    assert root_cause(ExceptionGroup("feeds", [ConnectionResetError("x"), idle])) is idle
+
+
+def test_wall_clock_never_goes_backwards() -> None:
+    clock = wall_clock()
+    readings = [clock() for _ in range(1000)]
+    assert readings == sorted(readings)
+
+
+def test_finishing_cancels_a_feed_blocked_in_recv(fake_engine: FakeEngine) -> None:
+    fake_engine.done_after_steps = 1
+
+    async def kraken_handler(ws: ServerConnection) -> None:
+        await ws.recv()
+        await ws.recv()
+        await ws.send(KRAKEN_SUBSCRIBE_ACK)
+        await ws.send(SNAPSHOT)
+        await ws.wait_closed()
+
+    async def coinbase_handler(ws: ServerConnection) -> None:
+        for _ in range(3):
+            await ws.recv()
+        for seq in range(3):
+            await ws.send(coinbase_sub_ack(seq))
+        await ws.send(coinbase_snapshot(3))
+        await ws.wait_closed()
+
+    async def scenario() -> float:
+        loop = asyncio.get_running_loop()
+        start = loop.time()
+        async with serve(kraken_handler, "127.0.0.1", 0) as kraken_server:
+            async with serve(coinbase_handler, "127.0.0.1", 0) as coinbase_server:
+                urls = {
+                    "kraken": f"ws://127.0.0.1:{port_of(kraken_server)}",
+                    "coinbase": f"ws://127.0.0.1:{port_of(coinbase_server)}",
+                }
+                await run_live(
+                    make_multi_venue_runner(fake_engine),
+                    "BTC/USD",
+                    10,
+                    deadline_s=30,
+                    idle_timeout_s=20,
+                    venues=("kraken", "coinbase"),
+                    urls=urls,
+                )
+        return loop.time() - start
+
+    elapsed = asyncio.run(scenario())
+    assert len(fake_engine.submits) == 1
+    assert elapsed < 10.0

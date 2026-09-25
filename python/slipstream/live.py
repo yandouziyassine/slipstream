@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 
 from websockets.asyncio.client import connect
 from websockets.exceptions import WebSocketException
@@ -21,6 +21,28 @@ from slipstream.runner import ExecutionRunner
 
 class LiveFeedError(RuntimeError):
     pass
+
+
+def wall_clock() -> Callable[[], int]:
+    """Wall-clock nanoseconds that never go backwards: anchored once, advanced monotonically."""
+    wall_start = time.time_ns()
+    mono_start = time.monotonic_ns()
+    return lambda: wall_start + (time.monotonic_ns() - mono_start)
+
+
+def root_cause(errors: ExceptionGroup[Exception]) -> Exception:
+    """Pick the error that explains a multi-feed failure: data/engine errors beat disconnects."""
+    network = (WebSocketException, OSError)
+    for error in errors.exceptions:
+        if not isinstance(error, (*network, LiveFeedError)):
+            return error
+    for error in errors.exceptions:
+        if isinstance(error, LiveFeedError):
+            return error
+    first = errors.exceptions[0]
+    wrapped = LiveFeedError(f"market data connection failed: {first}")
+    wrapped.__cause__ = first
+    return wrapped
 
 
 def _subscriptions(venue: Venue, symbol: str, depth: int) -> list[str]:
@@ -43,6 +65,8 @@ async def run_live(
     loop = asyncio.get_running_loop()
     deadline = loop.time() + deadline_s
     finished = asyncio.Event()
+    clock = wall_clock()
+    tasks: list[asyncio.Task[None]] = []
 
     async def feed(venue: Venue) -> None:
         max_size = COINBASE_MAX_BYTES if venue == "coinbase" else MAX_MESSAGE_BYTES
@@ -59,16 +83,17 @@ async def run_live(
                     if loop.time() >= deadline:
                         raise LiveFeedError("order did not finish before the deadline") from exc
                     raise LiveFeedError(f"no market data from {venue} (idle timeout)") from exc
-                runner.on_message(raw, time.time_ns(), venue)
+                runner.on_message(raw, clock(), venue)
                 if runner.is_done():
                     finished.set()
+                    current = asyncio.current_task()
+                    for task in tasks:
+                        if task is not current:
+                            task.cancel()
 
     try:
         async with asyncio.TaskGroup() as group:
             for venue in venues:
-                group.create_task(feed(venue))
+                tasks.append(group.create_task(feed(venue)))
     except ExceptionGroup as errors:
-        first = errors.exceptions[0]
-        if isinstance(first, (WebSocketException, OSError)):
-            raise LiveFeedError(f"market data connection failed: {first}") from first
-        raise first from None
+        raise root_cause(errors) from errors
