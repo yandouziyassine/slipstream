@@ -194,3 +194,38 @@ def test_calibrates_every_spec_before_submitting_any(fake_engine: FakeEngine) ->
     with pytest.raises(CalibrationError):
         runner.on_message(snapshot(), 100)
     assert fake_engine.submits == []
+
+
+def cb_snapshot(seq: int = 0) -> str:
+    return json.dumps(
+        {
+            "channel": "l2_data",
+            "sequence_num": seq,
+            "events": [
+                {
+                    "type": "snapshot",
+                    "product_id": "BTC-USD",
+                    "updates": [
+                        {"side": "bid", "price_level": "99", "new_quantity": "1"},
+                        {"side": "offer", "price_level": "101", "new_quantity": "1"},
+                    ],
+                }
+            ],
+        }
+    )
+
+
+def test_waits_for_a_snapshot_from_every_venue(fake_engine: FakeEngine) -> None:
+    runner = ExecutionRunner(
+        fake_engine, SPEC, "BTC/USD", logging.getLogger("t"), venues=("kraken", "coinbase")
+    )
+    runner.on_message(snapshot(), 100, "kraken")
+    assert fake_engine.submits == []
+    runner.on_message(cb_snapshot(), 200, "coinbase")
+    assert [s.order_id for s, _, _ in fake_engine.submits] == ["o-1"]
+    assert [book.venue for book in fake_engine.books] == ["kraken", "coinbase"]
+
+
+def test_messages_from_unconfigured_venue_are_rejected(fake_engine: FakeEngine) -> None:
+    with pytest.raises(ValueError, match="venue"):
+        make_runner(fake_engine).on_message(cb_snapshot(), 1, "coinbase")
