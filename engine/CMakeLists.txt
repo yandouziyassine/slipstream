@@ -86,6 +86,7 @@ add_executable(engine_tests
   tests/service_test.cpp
   tests/engine_schedules_test.cpp
   tests/router_test.cpp
+  tests/engine_routing_test.cpp
 )
 target_link_libraries(engine_tests PRIVATE slipstream_service GTest::gtest_main)
 target_compile_options(engine_tests PRIVATE ${SLIPSTREAM_WARNINGS})
