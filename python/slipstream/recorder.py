@@ -2,13 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import json
-import time
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import TextIO
 
 from websockets.asyncio.client import connect
-from websockets.exceptions import WebSocketException
 
 from slipstream.coinbase import COINBASE_WS_URL, CoinbaseStream, subscribe_messages
 from slipstream.coinbase import MAX_MESSAGE_BYTES as COINBASE_MAX_BYTES
@@ -20,6 +18,7 @@ from slipstream.kraken import (
     subscribe_trades_message,
 )
 from slipstream.kraken_rest import parse_ohlc
+from slipstream.live import root_cause, wall_clock
 from slipstream.models import Venue
 
 IDLE_TIMEOUT_S = 30.0
@@ -63,17 +62,18 @@ async def record_stream(
     duration_s: float,
     venues: Sequence[Venue] = ("kraken",),
     urls: Mapping[Venue, str] | None = None,
-    clock: Callable[[], int] = time.time_ns,
+    clock: Callable[[], int] | None = None,
 ) -> int:
     endpoints: dict[Venue, str] = {"kraken": KRAKEN_WS_URL, "coinbase": COINBASE_WS_URL}
     endpoints.update(urls or {})
     loop = asyncio.get_running_loop()
     deadline = loop.time() + duration_s
+    now = clock or wall_clock()
     written = 0
 
     def write(venue: Venue, raw: str | bytes) -> None:
         nonlocal written
-        record = {"recv_ns": clock(), "venue": venue, "msg": json.loads(raw)}
+        record = {"recv_ns": now(), "venue": venue, "msg": json.loads(raw)}
         handle.write(json.dumps(record) + "\n")
         written += 1
 
@@ -98,8 +98,5 @@ async def record_stream(
             for venue in venues:
                 group.create_task(feed(venue))
     except ExceptionGroup as errors:
-        first = errors.exceptions[0]
-        if isinstance(first, (WebSocketException, OSError)):
-            raise RecordError(f"market data connection failed: {first}") from first
-        raise first from None
+        raise root_cause(errors, RecordError) from errors
     return written

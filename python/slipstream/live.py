@@ -30,17 +30,19 @@ def wall_clock() -> Callable[[], int]:
     return lambda: wall_start + (time.monotonic_ns() - mono_start)
 
 
-def root_cause(errors: ExceptionGroup[Exception]) -> Exception:
+def root_cause(
+    errors: ExceptionGroup[Exception], feed_error: type[Exception] = LiveFeedError
+) -> Exception:
     """Pick the error that explains a multi-feed failure: data/engine errors beat disconnects."""
     network = (WebSocketException, OSError)
     for error in errors.exceptions:
-        if not isinstance(error, (*network, LiveFeedError)):
+        if not isinstance(error, (*network, feed_error)):
             return error
     for error in errors.exceptions:
-        if isinstance(error, LiveFeedError):
+        if isinstance(error, feed_error):
             return error
     first = errors.exceptions[0]
-    wrapped = LiveFeedError(f"market data connection failed: {first}")
+    wrapped = feed_error(f"market data connection failed: {first}")
     wrapped.__cause__ = first
     return wrapped
 

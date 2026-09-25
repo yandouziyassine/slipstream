@@ -7,6 +7,7 @@ from test_kraken_rest import ohlc_body
 from test_live import coinbase_sub_ack
 from websockets.asyncio.server import ServerConnection, serve
 
+from slipstream import recorder
 from slipstream.coinbase import CoinbaseMessageError
 from slipstream.kraken import KrakenMessageError
 from slipstream.recorder import RecordError, open_new_file, record_stream, write_ohlc_header
@@ -178,3 +179,25 @@ def test_hostile_coinbase_message_aborts_recording(tmp_path: Path) -> None:
 
     with pytest.raises(CoinbaseMessageError):
         asyncio.run(scenario())
+
+
+def test_default_clock_is_the_monotonic_wall_clock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ticks = iter(range(5_000, 6_000, 7))
+    monkeypatch.setattr(recorder, "wall_clock", lambda: lambda: next(ticks))
+    path = tmp_path / "session.jsonl"
+
+    async def scenario() -> int:
+        async with serve_messages([BOOK, TRADE], []) as server:
+            with open_new_file(path) as handle:
+                return await record_stream(
+                    handle,
+                    "BTC/USD",
+                    10,
+                    duration_s=0.5,
+                    urls={"kraken": f"ws://127.0.0.1:{port_of(server)}"},
+                )
+
+    assert asyncio.run(scenario()) == 2
+    assert [ns for ns, _, _ in read_replay(path)] == [5_000, 5_007]
