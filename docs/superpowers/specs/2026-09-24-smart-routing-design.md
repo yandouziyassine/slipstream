@@ -68,7 +68,9 @@ It also measures the router's value on every run. For each child, the engine pri
 - **Symbols.** `BTC/USD` maps to `BTC-USD`.
 - **Book.** `level2` snapshot and update events are parsed from string `price_level` / `new_quantity`. A quantity of `0` deletes the level.
   - The full-book snapshot is size-capped at 16 MiB and truncated to the engine's book depth, best levels first, before it is sent to the engine.
-  - Updates are passed through as deltas.
+  - *Amended 2026-09-25 (PR 3).* The parser keeps the full book and emits a top-N snapshot after every level2 message. It no longer passes updates through as deltas.
+    - Why: Coinbase sends deltas for the whole book, but the engine keeps only the top N levels. When a top level was deleted, the engine could never refill it, so the book thinned out over a session.
+    - The level count is capped at 200 000 per side, and an update that arrives before any snapshot raises an error.
 - **Trades.** `market_trades` update events become a `TradeBatch`. Snapshots are ignored, as on Kraken.
 - **Sequence numbers.** A gap in the per-connection `sequence_num` raises `CoinbaseMessageError("sequence gap")`. That stops the session safely instead of trading on a desynced book.
 - **Exact field names.** They are pinned in the implementation plan from Coinbase's AsyncAPI reference, and every field is validated: types, finiteness, ranges, list sizes.
@@ -87,6 +89,9 @@ It also measures the router's value on every run. For each child, the engine pri
 
 ### 4.4 CLI
 - `--venues kraken,coinbase` (default `kraken`) is added to `live`, `replay`, `compare`, and `record`, validated against the allowlist.
+- *Amended 2026-09-25 (PR 3).* Fees are configured once, on the engine.
+  - `GetStatus` reports each registered venue with its fee (`StatusReply.venues`).
+  - The CLI reads that list, refuses to run when it differs from `--venues`, and passes the fees to the η calibration. No second fee config can drift.
 - Fees are engine flags. `scripts/demo_*.sh` pass `--venue kraken:fee_bps=… --venue coinbase:fee_bps=…` with clearly labeled illustrative values, and the README tells users to set their own tier.
 - `format_summary` and `format_comparison` gain columns for fees (bps), routed all-in (bps), each venue's all-in (bps, or `n/a`), and saved vs best single venue (bps).
 
