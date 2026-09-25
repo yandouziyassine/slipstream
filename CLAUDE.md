@@ -26,7 +26,8 @@ Design: `docs/superpowers/specs/2026-09-23-smart-execution-router-design.md`. Pl
 | Executing a plan | `/superpowers:subagent-driven-development` |
 | 2+ independent tasks (e.g. C++ and Python tracks) | `/superpowers:dispatching-parallel-agents` |
 | Small bounded edits and code lookups | `/caveman:cavecrew` |
-| Before merging code touching execution, risk, config, network, or secrets | `/security-review` |
+| After **every** implementation task (not only before merge) | `/security-review`: the code must be secure before moving on |
+| After **every** implementation task | `/caveman:caveman-review`: look for anomalies, current problems, and likely future problems |
 | After receiving review findings | `/superpowers:receiving-code-review` |
 | Before claiming anything is done | `/superpowers:verification-before-completion` |
 
