@@ -14,7 +14,7 @@ MAX_TRADES = 1000
 MAX_DEPTH = 1000
 MAX_FIELD_CHARS = 64
 _PRODUCTS = {"BTC/USD": "BTC-USD", "ETH/USD": "ETH-USD"}
-_SIDES = {"bid", "offer"}
+_SIDES = ("bid", "offer")
 
 
 class CoinbaseMessageError(ValueError):
@@ -57,7 +57,9 @@ class CoinbaseStream:
         if not isinstance(msg, dict):
             raise CoinbaseMessageError("message is not an object")
         if msg.get("type") == "error":
-            raise CoinbaseMessageError(f"coinbase error: {str(msg.get('message'))[:200]!r}")
+            message = msg.get("message")
+            detail = message[:200] if isinstance(message, str) else type(message).__name__
+            raise CoinbaseMessageError(f"coinbase error: {detail!r}")
         self._check_sequence(msg.get("sequence_num"))
         channel = msg.get("channel")
         if channel == "l2_data":
@@ -74,9 +76,14 @@ class CoinbaseStream:
         self._last_sequence = sequence
 
     def _book(self, events: list[dict[str, Any]]) -> BookUpdate:
-        kinds = {event.get("type") for event in events}
+        kinds: set[str] = set()
+        for event in events:
+            kind = event.get("type")
+            if not isinstance(kind, str):
+                raise CoinbaseMessageError("level2 event type must be a string")
+            kinds.add(kind)
         if kinds - {"snapshot", "update"} or len(kinds) != 1:
-            raise CoinbaseMessageError(f"unexpected level2 event types: {sorted(map(str, kinds))}")
+            raise CoinbaseMessageError(f"unexpected level2 event types: {sorted(kinds)}")
         bids: list[tuple[float, float]] = []
         asks: list[tuple[float, float]] = []
         for event in events:

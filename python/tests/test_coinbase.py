@@ -151,6 +151,9 @@ def test_error_message_raises() -> None:
         json.dumps({"channel": "l2_data", "sequence_num": 0, "events": "x"}),
         trades(0, "update", [trade("100", "0")]),
         trades(0, "update", [trade("100", "1", product="ETH-USD")]),
+        json.dumps({"channel": "l2_data", "sequence_num": 0, "events": [{"type": []}]}),
+        l2(0, "update", [{"side": [], "price_level": "1", "new_quantity": "1"}]),
+        l2(0, "update", [{"side": {"a": 1}, "price_level": "1", "new_quantity": "1"}]),
     ],
     ids=[
         "not-json",
@@ -170,6 +173,9 @@ def test_error_message_raises() -> None:
         "events-not-list",
         "zero-trade",
         "trade-wrong-product",
+        "unhashable-event-type",
+        "unhashable-side-list",
+        "unhashable-side-dict",
     ],
 )
 def test_hostile_input_only_raises_coinbase_error(raw: str) -> None:
