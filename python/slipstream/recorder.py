@@ -3,13 +3,15 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import TextIO
 
 from websockets.asyncio.client import connect
 from websockets.exceptions import WebSocketException
 
+from slipstream.coinbase import COINBASE_WS_URL, CoinbaseStream, subscribe_messages
+from slipstream.coinbase import MAX_MESSAGE_BYTES as COINBASE_MAX_BYTES
 from slipstream.kraken import (
     KRAKEN_WS_URL,
     MAX_MESSAGE_BYTES,
@@ -18,8 +20,11 @@ from slipstream.kraken import (
     subscribe_trades_message,
 )
 from slipstream.kraken_rest import parse_ohlc
+from slipstream.models import Venue
 
 IDLE_TIMEOUT_S = 30.0
+
+_Validator = Callable[[str | bytes], object]
 
 
 class RecordError(RuntimeError):
@@ -39,31 +44,62 @@ def write_ohlc_header(handle: TextIO, interval_min: int, raw: bytes) -> None:
     handle.write(json.dumps(record) + "\n")
 
 
+def _subscriptions(venue: Venue, symbol: str, depth: int) -> list[str]:
+    if venue == "coinbase":
+        return subscribe_messages(symbol)
+    return [subscribe_message(symbol, depth), subscribe_trades_message(symbol)]
+
+
+def _validator(venue: Venue, symbol: str, depth: int) -> _Validator:
+    if venue == "coinbase":
+        return CoinbaseStream(symbol, depth).parse
+    return parse_message
+
+
 async def record_stream(
     handle: TextIO,
     symbol: str,
     depth: int,
     duration_s: float,
-    url: str = KRAKEN_WS_URL,
+    venues: Sequence[Venue] = ("kraken",),
+    urls: Mapping[Venue, str] | None = None,
     clock: Callable[[], int] = time.time_ns,
 ) -> int:
+    endpoints: dict[Venue, str] = {"kraken": KRAKEN_WS_URL, "coinbase": COINBASE_WS_URL}
+    endpoints.update(urls or {})
     loop = asyncio.get_running_loop()
     deadline = loop.time() + duration_s
     written = 0
-    try:
-        async with connect(url, max_size=MAX_MESSAGE_BYTES, open_timeout=10) as ws:
-            await ws.send(subscribe_message(symbol, depth))
-            await ws.send(subscribe_trades_message(symbol))
+
+    def write(venue: Venue, raw: str | bytes) -> None:
+        nonlocal written
+        record = {"recv_ns": clock(), "venue": venue, "msg": json.loads(raw)}
+        handle.write(json.dumps(record) + "\n")
+        written += 1
+
+    async def feed(venue: Venue) -> None:
+        max_size = COINBASE_MAX_BYTES if venue == "coinbase" else MAX_MESSAGE_BYTES
+        validate = _validator(venue, symbol, depth)
+        async with connect(endpoints[venue], max_size=max_size, open_timeout=10) as ws:
+            for message in _subscriptions(venue, symbol, depth):
+                await ws.send(message)
             while (remaining := deadline - loop.time()) > 0:
                 try:
                     raw = await asyncio.wait_for(ws.recv(), timeout=min(IDLE_TIMEOUT_S, remaining))
                 except TimeoutError:
                     if loop.time() >= deadline:
-                        break
-                    raise RecordError("no market data received (idle timeout)") from None
-                parse_message(raw)
-                handle.write(json.dumps({"recv_ns": clock(), "msg": json.loads(raw)}) + "\n")
-                written += 1
-    except (WebSocketException, OSError) as exc:
-        raise RecordError(f"market data connection failed: {exc}") from exc
+                        return
+                    raise RecordError(f"no market data from {venue} (idle timeout)") from None
+                validate(raw)
+                write(venue, raw)
+
+    try:
+        async with asyncio.TaskGroup() as group:
+            for venue in venues:
+                group.create_task(feed(venue))
+    except ExceptionGroup as errors:
+        first = errors.exceptions[0]
+        if isinstance(first, (WebSocketException, OSError)):
+            raise RecordError(f"market data connection failed: {first}") from first
+        raise first from None
     return written
