@@ -70,3 +70,39 @@ TEST(Config, RejectsBadSymbol) {
         EXPECT_FALSE(parse_args({"--symbol", value}).config) << value;
     }
 }
+
+TEST(Config, DefaultsToSingleFeeFreeKraken) {
+    const auto result = parse_args({});
+    ASSERT_TRUE(result.config);
+    ASSERT_EQ(result.config->venues.size(), 1u);
+    EXPECT_EQ(result.config->venues[0].name, "kraken");
+    EXPECT_DOUBLE_EQ(result.config->venues[0].fee_bps, 0.0);
+    EXPECT_EQ(result.config->stale_ns, 2'000'000'000);
+}
+
+TEST(Config, ParsesVenuesInOrderAndStaleness) {
+    const auto result = parse_args({"--venue", "coinbase:fee_bps=60", "--venue", "kraken:fee_bps=40",
+                                    "--stale-ms", "500"});
+    ASSERT_TRUE(result.config) << result.error;
+    ASSERT_EQ(result.config->venues.size(), 2u);
+    EXPECT_EQ(result.config->venues[0].name, "coinbase");
+    EXPECT_DOUBLE_EQ(result.config->venues[0].fee_bps, 60.0);
+    EXPECT_EQ(result.config->venues[1].name, "kraken");
+    EXPECT_DOUBLE_EQ(result.config->venues[1].fee_bps, 40.0);
+    EXPECT_EQ(result.config->stale_ns, 500'000'000);
+}
+
+TEST(Config, RejectsBadVenues) {
+    for (const char* value : {"binance:fee_bps=10", "kraken", "kraken:fee=10", "kraken:fee_bps=",
+                              "kraken:fee_bps=-1", "kraken:fee_bps=1001", "kraken:fee_bps=nan",
+                              "kraken:fee_bps=10x", ":fee_bps=10"}) {
+        EXPECT_FALSE(parse_args({"--venue", value}).config) << value;
+    }
+    EXPECT_FALSE(parse_args({"--venue", "kraken:fee_bps=1", "--venue", "kraken:fee_bps=2"}).config);
+}
+
+TEST(Config, RejectsBadStaleness) {
+    for (const char* value : {"0", "-1", "abc", "600001", "1.5"}) {
+        EXPECT_FALSE(parse_args({"--stale-ms", value}).config) << value;
+    }
+}

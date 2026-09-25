@@ -52,10 +52,43 @@ std::optional<std::size_t> parse_depth(const std::string& text) {
     return value;
 }
 
+bool is_known_venue(std::string_view name) {
+    return std::find(kKnownVenues.begin(), kKnownVenues.end(), name) != kKnownVenues.end();
+}
+
+std::optional<VenueConfig> parse_venue(const std::string& value) {
+    const auto colon = value.find(':');
+    if (colon == std::string::npos) return std::nullopt;
+    const std::string name = value.substr(0, colon);
+    if (!is_known_venue(name)) return std::nullopt;
+    const std::string rest = value.substr(colon + 1);
+    constexpr std::string_view prefix = "fee_bps=";
+    if (rest.size() < prefix.size() || rest.compare(0, prefix.size(), prefix) != 0) return std::nullopt;
+    const std::string number = rest.substr(prefix.size());
+    try {
+        std::size_t consumed = 0;
+        const double fee_bps = std::stod(number, &consumed);
+        if (consumed != number.size() || !std::isfinite(fee_bps) || fee_bps < 0.0 || fee_bps > 1000.0) {
+            return std::nullopt;
+        }
+        return VenueConfig{name, fee_bps};
+    } catch (const std::exception&) {
+        return std::nullopt;
+    }
+}
+
+std::optional<std::int64_t> parse_stale_ms(const std::string& text) {
+    if (!all_digits(text) || text.size() > 6) return std::nullopt;
+    const auto value = std::stoul(text);
+    if (value < 1 || value > 600000) return std::nullopt;
+    return static_cast<std::int64_t>(value) * 1'000'000;
+}
+
 }  // namespace
 
 ParseResult parse_args(const std::vector<std::string>& args) {
     EngineConfig config;
+    bool venue_flag_seen = false;
     for (std::size_t i = 0; i < args.size(); i += 2) {
         const std::string& flag = args[i];
         if (i + 1 >= args.size()) return {std::nullopt, "missing value for " + flag};
@@ -79,6 +112,25 @@ ParseResult parse_args(const std::vector<std::string>& args) {
             const auto parsed = parse_depth(value);
             if (!parsed) return {std::nullopt, "invalid --book-depth (1-1000)"};
             config.book_depth = *parsed;
+        } else if (flag == "--venue") {
+            const auto parsed = parse_venue(value);
+            if (!parsed) {
+                return {std::nullopt,
+                        "invalid --venue (name:fee_bps=N, name in kraken|coinbase, 0<=N<=1000)"};
+            }
+            if (!venue_flag_seen) {
+                config.venues.clear();
+                venue_flag_seen = true;
+            }
+            const bool duplicate = std::any_of(
+                config.venues.begin(), config.venues.end(),
+                [&](const VenueConfig& registered) { return registered.name == parsed->name; });
+            if (duplicate) return {std::nullopt, "duplicate --venue"};
+            config.venues.push_back(*parsed);
+        } else if (flag == "--stale-ms") {
+            const auto parsed = parse_stale_ms(value);
+            if (!parsed) return {std::nullopt, "invalid --stale-ms (1-600000)"};
+            config.stale_ns = *parsed;
         } else {
             return {std::nullopt, "unknown flag " + flag};
         }
