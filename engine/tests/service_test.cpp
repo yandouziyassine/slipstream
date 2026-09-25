@@ -194,6 +194,9 @@ TEST(ServiceMultiVenue, VenueNamesAreValidated) {
     v1::BookAck ack;
     EXPECT_EQ(service.ApplyBookUpdate(nullptr, &update, &ack).error_code(),
               grpc::StatusCode::INVALID_ARGUMENT);  // empty venue with two registered
+    update.set_venue("Kraken");  // venue names are exact, case-sensitive allowlist entries
+    EXPECT_EQ(service.ApplyBookUpdate(nullptr, &update, &ack).error_code(),
+              grpc::StatusCode::INVALID_ARGUMENT);
     update.set_venue("binance");
     EXPECT_EQ(service.ApplyBookUpdate(nullptr, &update, &ack).error_code(),
               grpc::StatusCode::INVALID_ARGUMENT);
