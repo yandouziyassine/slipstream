@@ -25,6 +25,8 @@ message BookUpdate {
   bool is_snapshot = 2;
   repeated PriceLevel bids = 3;
   repeated PriceLevel asks = 4;
+  string venue = 5;
+  int64 recv_ns = 6;
 }
 
 message BookAck {}
@@ -75,6 +77,8 @@ message Fill {
   int64 ts_ns = 2;
   double qty = 3;
   double price = 4;
+  string venue = 5;
+  double fee = 6;
 }
 
 message StepReply {
@@ -82,6 +86,12 @@ message StepReply {
 }
 
 message StatusRequest {}
+
+message VenueCost {
+  string venue = 1;
+  double all_in_bps = 2;
+  bool available = 3;
+}
 
 message OrderStatus {
   string order_id = 1;
@@ -95,6 +105,10 @@ message OrderStatus {
   double immediate_cost_bps = 9;
   string halt_reason = 10;
   string algo = 11;
+  double fees_paid = 12;
+  double fees_bps = 13;
+  double routed_all_in_bps = 14;
+  repeated VenueCost venue_costs = 15;
 }
 
 message StatusReply {
@@ -113,6 +127,7 @@ message Trade {
 message TradeBatch {
   string symbol = 1;
   repeated Trade trades = 2;
+  string venue = 3;
 }
 
 message TradeAck {}

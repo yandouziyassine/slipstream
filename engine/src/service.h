@@ -2,6 +2,8 @@
 
 #include <grpcpp/grpcpp.h>
 
+#include <cstddef>
+#include <optional>
 #include <string>
 
 #include "engine.h"
@@ -28,6 +30,8 @@ public:
                              v1::TradeAck*) override;
 
 private:
+    std::optional<std::size_t> resolve_venue(const std::string& name) const;
+
     Engine& engine_;
     std::string symbol_;
 };

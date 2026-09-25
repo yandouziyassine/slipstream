@@ -3,9 +3,9 @@
 #include <algorithm>
 #include <cmath>
 #include <memory>
+#include <utility>
 
 #include "ascii.h"
-#include "fill_simulator.h"
 #include "schedule_factory.h"
 
 namespace slipstream {
@@ -29,16 +29,45 @@ double cost_bps(Side side, double avg_price, double reference) {
 
 }  // namespace
 
-Engine::Engine(RiskLimits limits, std::size_t book_depth) : book_(book_depth), risk_(limits) {}
+Engine::Engine(RiskLimits limits, std::size_t book_depth)
+    : Engine(limits, book_depth, {{"kraken", 0.0}}, 0) {}
+
+Engine::Engine(RiskLimits limits, std::size_t book_depth, std::vector<VenueSettings> venues,
+              std::int64_t stale_ns)
+    : stale_ns_(stale_ns), risk_(limits) {
+    venues_.reserve(venues.size());
+    for (auto& venue : venues) {
+        venues_.push_back(Venue{std::move(venue.name), venue.fee_bps / 1e4, OrderBook(book_depth),
+                                0});
+    }
+}
 
 bool Engine::apply_book_snapshot(const std::vector<Level>& bids, const std::vector<Level>& asks) {
-    std::lock_guard lock(mu_);
-    return book_.apply_snapshot(bids, asks);
+    return apply_book_snapshot(0, bids, asks, 0);
 }
 
 bool Engine::apply_book_update(const std::vector<Level>& bids, const std::vector<Level>& asks) {
+    return apply_book_update(0, bids, asks, 0);
+}
+
+bool Engine::apply_book_snapshot(std::size_t venue, const std::vector<Level>& bids,
+                                 const std::vector<Level>& asks, std::int64_t recv_ns) {
     std::lock_guard lock(mu_);
-    return book_.apply_update(bids, asks);
+    if (venue >= venues_.size() || recv_ns < 0) return false;
+    if (!venues_[venue].book.apply_snapshot(bids, asks)) return false;
+    venues_[venue].last_update_ns = std::max(venues_[venue].last_update_ns, recv_ns);
+    latest_ns_ = std::max(latest_ns_, recv_ns);
+    return true;
+}
+
+bool Engine::apply_book_update(std::size_t venue, const std::vector<Level>& bids,
+                               const std::vector<Level>& asks, std::int64_t recv_ns) {
+    std::lock_guard lock(mu_);
+    if (venue >= venues_.size() || recv_ns < 0) return false;
+    if (!venues_[venue].book.apply_update(bids, asks)) return false;
+    venues_[venue].last_update_ns = std::max(venues_[venue].last_update_ns, recv_ns);
+    latest_ns_ = std::max(latest_ns_, recv_ns);
+    return true;
 }
 
 bool Engine::apply_trades(const std::vector<Trade>& trades) {
@@ -63,6 +92,41 @@ double Engine::projected_position_locked() const {
     return projected;
 }
 
+bool Engine::fresh_locked(std::size_t venue, std::int64_t now_ns) const {
+    if (venues_.size() < 2) return true;
+    // The engine's clock never moves backwards, so an old or negative caller time cannot make a
+    // stale book fresh again. latest_ns_ >= last_update_ns >= 0, so the subtraction cannot overflow.
+    const std::int64_t effective_now = std::max(now_ns, latest_ns_);
+    return effective_now - venues_[venue].last_update_ns <= stale_ns_;
+}
+
+std::optional<double> Engine::consolidated_mid_locked(std::int64_t now_ns) const {
+    std::optional<double> best_bid;
+    std::optional<double> best_ask;
+    for (std::size_t v = 0; v < venues_.size(); ++v) {
+        if (!fresh_locked(v, now_ns)) continue;
+        if (const auto bid = venues_[v].book.best_bid()) {
+            if (!best_bid || bid->price > *best_bid) best_bid = bid->price;
+        }
+        if (const auto ask = venues_[v].book.best_ask()) {
+            if (!best_ask || ask->price < *best_ask) best_ask = ask->price;
+        }
+    }
+    if (!best_bid || !best_ask || *best_bid >= *best_ask) return std::nullopt;
+    return (*best_bid + *best_ask) / 2.0;
+}
+
+std::vector<VenueLiquidity> Engine::liquidity_locked(Side side, std::int64_t now_ns,
+                                                     std::optional<std::size_t> only) const {
+    std::vector<VenueLiquidity> out;
+    for (std::size_t v = 0; v < venues_.size(); ++v) {
+        if (only && *only != v) continue;
+        if (!fresh_locked(v, now_ns)) continue;
+        out.push_back({v, venues_[v].fee_rate, venues_[v].book.liquidity_for(side)});
+    }
+    return out;
+}
+
 SubmitResult Engine::submit(const ParentOrderRequest& request, const ScheduleSpec& spec) {
     std::lock_guard lock(mu_);
     if (!valid_order_id(request.order_id)) return {false, "invalid order id"};
@@ -77,24 +141,30 @@ SubmitResult Engine::submit(const ParentOrderRequest& request, const ScheduleSpe
         MarketState{market_volume_});
     if (!schedule) return {false, "invalid schedule"};
 
-    const auto arrival_mid = book_.mid();
+    const auto arrival_mid = consolidated_mid_locked(request.start_ns);
     if (!arrival_mid) return {false, "no market data"};
 
     const auto decision =
         risk_.check_parent(request.side, request.qty, *arrival_mid, projected_position_locked());
     if (!decision.ok) return {false, decision.reason};
 
-    const auto immediate = simulate_market_fill(book_.liquidity_for(request.side), request.qty);
-    orders_.push_back(ParentOrder{request, std::move(schedule), OrderState::Working, 0.0, 0.0,
-                                  *arrival_mid,
-                                  cost_bps(request.side, immediate.avg_price, *arrival_mid), ""});
+    const auto immediate =
+        route(request.side, request.qty, liquidity_locked(request.side, request.start_ns, std::nullopt));
+    const double immediate_avg =
+        immediate.filled_qty > 0.0 ? immediate.gross_notional / immediate.filled_qty : 0.0;
+
+    orders_.push_back(ParentOrder{request, std::move(schedule), OrderState::Working, 0.0, 0.0, 0.0,
+                                  *arrival_mid, cost_bps(request.side, immediate_avg, *arrival_mid),
+                                  "", std::vector<double>(venues_.size(), 0.0),
+                                  std::vector<char>(venues_.size(), 1)});
     return {true, ""};
 }
 
 std::vector<Fill> Engine::step(std::int64_t now_ns) {
     std::lock_guard lock(mu_);
+    latest_ns_ = std::max(latest_ns_, now_ns);
     std::vector<Fill> fills;
-    const auto ref_price = book_.mid();
+    const auto ref_price = consolidated_mid_locked(now_ns);
     const MarketState market{market_volume_};
     for (auto& order : orders_) {
         if (order.state != OrderState::Working) continue;
@@ -122,13 +192,35 @@ void Engine::advance_locked(ParentOrder& order, std::int64_t now_ns,
         return;
     }
 
-    const auto result = simulate_market_fill(book_.liquidity_for(order.request.side), child);
+    const auto result =
+        route(order.request.side, child, liquidity_locked(order.request.side, now_ns, std::nullopt));
     if (result.filled_qty <= 0.0) return;
 
+    for (const auto& leg : result.legs) {
+        fills.push_back({order.request.order_id, now_ns, leg.qty, leg.gross_notional / leg.qty,
+                         venues_[leg.venue].name, leg.fee});
+    }
+
     order.filled_qty += result.filled_qty;
-    order.filled_notional += result.filled_qty * result.avg_price;
+    order.filled_notional += result.gross_notional;
+    order.fees += result.fees;
     position_ += signed_qty(order.request.side, result.filled_qty);
-    fills.push_back({order.request.order_id, now_ns, result.filled_qty, result.avg_price});
+
+    for (std::size_t v = 0; v < venues_.size(); ++v) {
+        if (!order.venue_available[v]) continue;
+        if (!fresh_locked(v, now_ns)) {
+            order.venue_available[v] = 0;
+            continue;
+        }
+        const auto alone = route(order.request.side, result.filled_qty,
+                                 liquidity_locked(order.request.side, now_ns, v));
+        if (alone.filled_qty < result.filled_qty * (1.0 - 1e-9)) {
+            order.venue_available[v] = 0;
+        } else {
+            order.venue_all_in_notional[v] += all_in_notional(order.request.side, alone);
+        }
+    }
+
     if (order.request.qty - order.filled_qty <= dust) order.state = OrderState::Completed;
 }
 
@@ -138,10 +230,33 @@ std::vector<OrderStatus> Engine::statuses() const {
     out.reserve(orders_.size());
     for (const auto& order : orders_) {
         const double avg = order.filled_qty > 0.0 ? order.filled_notional / order.filled_qty : 0.0;
+        const double fees_bps =
+            order.filled_notional > 0.0 ? order.fees / order.filled_notional * 1e4 : 0.0;
+        const double all_in_avg =
+            order.filled_qty > 0.0
+                ? (order.request.side == Side::Buy ? order.filled_notional + order.fees
+                                                   : order.filled_notional - order.fees) /
+                      order.filled_qty
+                : 0.0;
+        const double routed_all_in_bps = cost_bps(order.request.side, all_in_avg, order.arrival_mid);
+
+        std::vector<VenueCost> venue_costs;
+        venue_costs.reserve(venues_.size());
+        for (std::size_t v = 0; v < venues_.size(); ++v) {
+            const bool available = order.venue_available[v] != 0 && order.filled_qty > 0.0;
+            const double all_in_bps =
+                available ? cost_bps(order.request.side,
+                                     order.venue_all_in_notional[v] / order.filled_qty,
+                                     order.arrival_mid)
+                          : 0.0;
+            venue_costs.push_back({venues_[v].name, all_in_bps, available});
+        }
+
         out.push_back({order.request.order_id, order.request.side, order.state, order.request.qty,
                        order.filled_qty, avg, order.arrival_mid,
                        cost_bps(order.request.side, avg, order.arrival_mid),
-                       order.immediate_cost_bps, order.halt_reason, order.schedule->name()});
+                       order.immediate_cost_bps, order.halt_reason, order.schedule->name(),
+                       order.fees, fees_bps, routed_all_in_bps, std::move(venue_costs)});
     }
     return out;
 }
@@ -153,12 +268,25 @@ double Engine::position() const {
 
 std::optional<double> Engine::mid() const {
     std::lock_guard lock(mu_);
-    return book_.mid();
+    return consolidated_mid_locked(latest_ns_);
 }
 
 double Engine::market_volume() const {
     std::lock_guard lock(mu_);
     return market_volume_;
+}
+
+std::optional<std::size_t> Engine::venue_index(std::string_view name) const {
+    std::lock_guard lock(mu_);
+    for (std::size_t v = 0; v < venues_.size(); ++v) {
+        if (std::string_view(venues_[v].name) == name) return v;
+    }
+    return std::nullopt;
+}
+
+std::size_t Engine::venue_count() const {
+    std::lock_guard lock(mu_);
+    return venues_.size();
 }
 
 }  // namespace slipstream

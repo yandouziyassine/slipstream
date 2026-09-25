@@ -29,7 +29,11 @@ int main(int argc, char** argv) {
     }
     const auto& config = *parsed.config;
 
-    slipstream::Engine engine(config.limits, config.book_depth);
+    std::vector<slipstream::VenueSettings> venues;
+    venues.reserve(config.venues.size());
+    for (const auto& venue : config.venues) venues.push_back({venue.name, venue.fee_bps});
+
+    slipstream::Engine engine(config.limits, config.book_depth, venues, config.stale_ns);
     slipstream::ExecutionService service(engine, config.symbol);
 
     int bound_port = 0;
@@ -46,7 +50,11 @@ int main(int argc, char** argv) {
     std::signal(SIGINT, handle_signal);
     std::signal(SIGTERM, handle_signal);
     std::cout << "slipstream engine listening on port " << bound_port << " (paper mode, symbol "
-              << config.symbol << ")" << std::endl;
+              << config.symbol << ", venues";
+    for (const auto& venue : config.venues) {
+        std::cout << ' ' << venue.name << ':' << venue.fee_bps << "bps";
+    }
+    std::cout << ")" << std::endl;
 
     while (!g_stop.load()) std::this_thread::sleep_for(std::chrono::milliseconds(100));
     server->Shutdown();
