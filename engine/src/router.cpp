@@ -16,6 +16,7 @@ struct Candidate {
 }  // namespace
 
 RouteResult route(Side taker_side, double qty, const std::vector<VenueLiquidity>& venues) {
+    if (!(qty > 0.0)) return {};
     std::vector<Candidate> candidates;
     for (const auto& venue : venues) {
         const double multiplier =

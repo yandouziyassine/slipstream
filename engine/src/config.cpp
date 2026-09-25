@@ -65,6 +65,11 @@ std::optional<VenueConfig> parse_venue(const std::string& value) {
     constexpr std::string_view prefix = "fee_bps=";
     if (rest.size() < prefix.size() || rest.compare(0, prefix.size(), prefix) != 0) return std::nullopt;
     const std::string number = rest.substr(prefix.size());
+    const auto dots = std::count(number.begin(), number.end(), '.');
+    const bool plain_decimal =
+        dots <= 1 && number.find_first_not_of("0123456789.") == std::string::npos &&
+        number.find_first_of("0123456789") != std::string::npos;
+    if (!plain_decimal) return std::nullopt;
     try {
         std::size_t consumed = 0;
         const double fee_bps = std::stod(number, &consumed);

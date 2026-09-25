@@ -3,6 +3,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <cmath>
 #include <random>
 #include <vector>
 
@@ -49,6 +50,15 @@ TEST(Router, PartialFillWhenLiquidityRunsOut) {
     const auto result = route(Side::Buy, 3.0, {{0, 0.0, {{100.0, 1.0}}}, {1, 0.0, {{101.0, 1.0}}}});
     EXPECT_DOUBLE_EQ(result.filled_qty, 2.0);
     EXPECT_DOUBLE_EQ(route(Side::Buy, 1.0, {}).filled_qty, 0.0);
+}
+
+TEST(Router, NonPositiveOrNanQuantityFillsNothing) {
+    const std::vector<VenueLiquidity> venues{{0, 0.0, {{100.0, 1.0}}}};
+    for (const double qty : {0.0, -1.0, std::nan("")}) {
+        const auto result = route(Side::Buy, qty, venues);
+        EXPECT_DOUBLE_EQ(result.filled_qty, 0.0) << qty;
+        EXPECT_TRUE(result.legs.empty()) << qty;
+    }
 }
 
 TEST(Router, FeeFreeSingleVenueMatchesFillSimulator) {

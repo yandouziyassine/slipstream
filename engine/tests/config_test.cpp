@@ -95,7 +95,9 @@ TEST(Config, ParsesVenuesInOrderAndStaleness) {
 TEST(Config, RejectsBadVenues) {
     for (const char* value : {"binance:fee_bps=10", "kraken", "kraken:fee=10", "kraken:fee_bps=",
                               "kraken:fee_bps=-1", "kraken:fee_bps=1001", "kraken:fee_bps=nan",
-                              "kraken:fee_bps=10x", ":fee_bps=10"}) {
+                              "kraken:fee_bps=10x", ":fee_bps=10", "kraken:fee_bps= 50",
+                              "kraken:fee_bps=+5", "kraken:fee_bps=5e2", "kraken:fee_bps=1.2.3",
+                              "kraken:fee_bps=."}) {
         EXPECT_FALSE(parse_args({"--venue", value}).config) << value;
     }
     EXPECT_FALSE(parse_args({"--venue", "kraken:fee_bps=1", "--venue", "kraken:fee_bps=2"}).config);
