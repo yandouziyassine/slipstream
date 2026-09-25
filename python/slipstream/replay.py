@@ -7,7 +7,10 @@ from typing import Any
 
 from slipstream.kraken import KrakenMessageError
 from slipstream.kraken_rest import SUPPORTED_INTERVALS, Bar, parse_ohlc
+from slipstream.models import Venue
 from slipstream.runner import ExecutionRunner
+
+_VALID_VENUES: frozenset[Venue] = frozenset({"kraken", "coinbase"})
 
 
 class ReplayError(ValueError):
@@ -41,7 +44,7 @@ def _is_ohlc(record: dict[str, Any]) -> bool:
     return record.get("kind") == "ohlc"
 
 
-def read_replay(path: Path) -> Iterator[tuple[int, str]]:
+def read_replay(path: Path) -> Iterator[tuple[int, str, Venue]]:
     for lineno, record in _records(path):
         if _is_ohlc(record):
             continue
@@ -50,7 +53,10 @@ def read_replay(path: Path) -> Iterator[tuple[int, str]]:
             raise ReplayError(f"line {lineno}: malformed replay record")
         if isinstance(recv_ns, bool) or not isinstance(recv_ns, int) or recv_ns < 0:
             raise ReplayError(f"line {lineno}: recv_ns must be a non-negative integer")
-        yield recv_ns, json.dumps(record["msg"])
+        venue = record.get("venue", "kraken")
+        if isinstance(venue, bool) or not isinstance(venue, str) or venue not in _VALID_VENUES:
+            raise ReplayError(f"line {lineno}: unsupported venue {venue!r}")
+        yield recv_ns, json.dumps(record["msg"]), venue
 
 
 def read_calibration(path: Path) -> dict[int, tuple[Bar, ...]]:
@@ -68,12 +74,12 @@ def read_calibration(path: Path) -> dict[int, tuple[Bar, ...]]:
     return bars
 
 
-def run_replay(runner: ExecutionRunner, records: Iterable[tuple[int, str]]) -> None:
+def run_replay(runner: ExecutionRunner, records: Iterable[tuple[int, str, Venue]]) -> None:
     last_ns = 0
-    for recv_ns, raw in records:
+    for recv_ns, raw, venue in records:
         if recv_ns < last_ns:
             raise ReplayError("replay timestamps must be non-decreasing")
         last_ns = recv_ns
-        runner.on_message(raw, recv_ns)
+        runner.on_message(raw, recv_ns, venue)
         if runner.is_done():
             return

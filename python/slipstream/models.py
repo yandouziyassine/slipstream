@@ -6,6 +6,11 @@ from typing import Literal
 Side = Literal["buy", "sell"]
 Algo = Literal["twap", "vwap", "pov", "almgren_chriss"]
 Urgency = Literal["low", "medium", "high"]
+Venue = Literal["kraken", "coinbase"]
+
+
+class MarketDataError(ValueError):
+    """Base for every venue parser error: hostile or malformed market data."""
 
 
 @dataclass(frozen=True)
@@ -14,6 +19,7 @@ class BookUpdate:
     is_snapshot: bool
     bids: tuple[tuple[float, float], ...]
     asks: tuple[tuple[float, float], ...]
+    venue: Venue = "kraken"
 
 
 @dataclass(frozen=True)
@@ -21,6 +27,7 @@ class TradeBatch:
     symbol: str
     is_snapshot: bool
     trades: tuple[tuple[float, float], ...]
+    venue: Venue = "kraken"
 
 
 @dataclass(frozen=True)

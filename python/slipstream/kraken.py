@@ -4,14 +4,14 @@ import json
 import math
 from typing import Any
 
-from slipstream.models import BookUpdate, TradeBatch
+from slipstream.models import BookUpdate, MarketDataError, TradeBatch
 
 KRAKEN_WS_URL = "wss://ws.kraken.com/v2"
 MAX_LEVELS = 1000
 MAX_MESSAGE_BYTES = 1 << 20
 
 
-class KrakenMessageError(ValueError):
+class KrakenMessageError(MarketDataError):
     pass
 
 

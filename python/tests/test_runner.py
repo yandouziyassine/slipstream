@@ -5,9 +5,10 @@ import pytest
 from conftest import FakeEngine
 
 from slipstream.calibration import CalibrationData, CalibrationError
+from slipstream.coinbase import CoinbaseMessageError
 from slipstream.kraken import KrakenMessageError
 from slipstream.kraken_rest import Bar
-from slipstream.models import Fill, OrderSpec, PovParams, TwapParams
+from slipstream.models import Fill, MarketDataError, OrderSpec, PovParams, TwapParams
 from slipstream.runner import ExecutionRunner, OrderRejectedError
 from slipstream.v1 import execution_pb2 as pb
 
@@ -67,7 +68,7 @@ def test_rejected_order_raises(fake_engine: FakeEngine) -> None:
 
 
 def test_symbol_mismatch_raises(fake_engine: FakeEngine) -> None:
-    with pytest.raises(KrakenMessageError, match="symbol"):
+    with pytest.raises(MarketDataError, match="symbol"):
         make_runner(fake_engine).on_message(snapshot("ETH/USD"), 1)
 
 
@@ -102,7 +103,7 @@ def test_trade_updates_are_forwarded_but_snapshots_ignored(fake_engine: FakeEngi
 
 
 def test_trade_symbol_mismatch_raises(fake_engine: FakeEngine) -> None:
-    with pytest.raises(KrakenMessageError, match="symbol"):
+    with pytest.raises(MarketDataError, match="symbol"):
         make_runner(fake_engine).on_message(trade(symbol="ETH/USD"), 1)
 
 
@@ -194,3 +195,57 @@ def test_calibrates_every_spec_before_submitting_any(fake_engine: FakeEngine) ->
     with pytest.raises(CalibrationError):
         runner.on_message(snapshot(), 100)
     assert fake_engine.submits == []
+
+
+def cb_snapshot(seq: int = 0) -> str:
+    return json.dumps(
+        {
+            "channel": "l2_data",
+            "sequence_num": seq,
+            "events": [
+                {
+                    "type": "snapshot",
+                    "product_id": "BTC-USD",
+                    "updates": [
+                        {"side": "bid", "price_level": "99", "new_quantity": "1"},
+                        {"side": "offer", "price_level": "101", "new_quantity": "1"},
+                    ],
+                }
+            ],
+        }
+    )
+
+
+def test_waits_for_a_snapshot_from_every_venue(fake_engine: FakeEngine) -> None:
+    runner = ExecutionRunner(
+        fake_engine, SPEC, "BTC/USD", logging.getLogger("t"), venues=("kraken", "coinbase")
+    )
+    runner.on_message(snapshot(), 100, "kraken")
+    assert fake_engine.submits == []
+    runner.on_message(cb_snapshot(), 200, "coinbase")
+    assert [s.order_id for s, _, _ in fake_engine.submits] == ["o-1"]
+    assert [book.venue for book in fake_engine.books] == ["kraken", "coinbase"]
+
+
+def test_messages_from_unconfigured_venue_are_rejected(fake_engine: FakeEngine) -> None:
+    with pytest.raises(ValueError, match="venue"):
+        make_runner(fake_engine).on_message(cb_snapshot(), 1, "coinbase")
+
+
+def test_venue_errors_share_a_market_data_base() -> None:
+    assert issubclass(KrakenMessageError, MarketDataError)
+    assert issubclass(CoinbaseMessageError, MarketDataError)
+
+
+def test_trades_flow_while_waiting_for_a_late_venue(fake_engine: FakeEngine) -> None:
+    runner = ExecutionRunner(
+        fake_engine, SPEC, "BTC/USD", logging.getLogger("t"), venues=("kraken", "coinbase")
+    )
+    runner.on_message(snapshot(), 100, "kraken")
+    runner.on_message(trade(), 150, "kraken")
+    assert len(fake_engine.trades) == 1
+    assert fake_engine.submits == []
+    assert fake_engine.steps == []
+    runner.on_message(cb_snapshot(), 300, "coinbase")
+    assert [(s.order_id, start) for s, start, _ in fake_engine.submits] == [("o-1", 300)]
+    assert fake_engine.steps == [300]

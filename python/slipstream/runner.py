@@ -1,15 +1,27 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from typing import Protocol
 
 from slipstream.calibration import CalibrationData, schedule_params
-from slipstream.kraken import KrakenMessageError, parse_message
-from slipstream.models import BookUpdate, Fill, OrderSpec, ScheduleParams, TradeBatch
+from slipstream.coinbase import CoinbaseStream
+from slipstream.kraken import parse_message
+from slipstream.models import (
+    BookUpdate,
+    Fill,
+    MarketDataError,
+    OrderSpec,
+    ScheduleParams,
+    TradeBatch,
+    Venue,
+)
 from slipstream.v1 import execution_pb2 as pb
 
 _TERMINAL_STATES = (pb.ORDER_STATE_COMPLETED, pb.ORDER_STATE_HALTED)
+_VALID_VENUES: frozenset[Venue] = frozenset({"kraken", "coinbase"})
+
+_Parser = Callable[[str | bytes], BookUpdate | TradeBatch | None]
 
 
 class Engine(Protocol):
@@ -34,22 +46,43 @@ class ExecutionRunner:
         symbol: str,
         logger: logging.Logger,
         calibration: CalibrationData | None = None,
+        venues: Sequence[Venue] = ("kraken",),
+        book_depth: int = 10,
     ) -> None:
+        if not venues:
+            raise ValueError("venues must not be empty")
+        if len(set(venues)) != len(venues):
+            raise ValueError(f"duplicate venue in {venues!r}")
+        unknown = [venue for venue in venues if venue not in _VALID_VENUES]
+        if unknown:
+            raise ValueError(f"unknown venue(s) {unknown!r}")
         self._engine = engine
         self._specs = (specs,) if isinstance(specs, OrderSpec) else tuple(specs)
         self._symbol = symbol
         self._log = logger
         self._calibration = calibration
+        self._venues: frozenset[Venue] = frozenset(venues)
+        self._parsers: dict[Venue, _Parser] = {}
+        if "kraken" in self._venues:
+            self._parsers["kraken"] = parse_message
+        if "coinbase" in self._venues:
+            self._parsers["coinbase"] = CoinbaseStream(symbol, book_depth).parse
+        self._snapshot_venues: set[Venue] = set()
         self._submitted = False
         self.fills: list[Fill] = []
 
-    def on_message(self, raw: str | bytes, now_ns: int) -> None:
-        update = parse_message(raw)
+    def on_message(self, raw: str | bytes, now_ns: int, venue: Venue = "kraken") -> None:
+        parser = self._parsers.get(venue)
+        if parser is None:
+            raise ValueError(f"unconfigured venue {venue!r}")
+        update = parser(raw)
         if isinstance(update, BookUpdate):
             self._check_symbol(update.symbol)
             self._engine.apply_book(update)
             if update.is_snapshot and not self._submitted:
-                self._submit_all(update, now_ns)
+                self._snapshot_venues.add(update.venue)
+                if self._snapshot_venues >= self._venues:
+                    self._submit_all(update, now_ns)
         elif isinstance(update, TradeBatch):
             self._check_symbol(update.symbol)
             if not update.is_snapshot:
@@ -73,7 +106,7 @@ class ExecutionRunner:
 
     def _check_symbol(self, symbol: str) -> None:
         if symbol != self._symbol:
-            raise KrakenMessageError(f"unexpected symbol {symbol!r}")
+            raise MarketDataError(f"unexpected symbol {symbol!r}")
 
     def _submit_all(self, book: BookUpdate, now_ns: int) -> None:
         planned = [
