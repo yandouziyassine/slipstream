@@ -9,6 +9,10 @@ Urgency = Literal["low", "medium", "high"]
 Venue = Literal["kraken", "coinbase"]
 
 
+class MarketDataError(ValueError):
+    """Base for every venue parser error: hostile or malformed market data."""
+
+
 @dataclass(frozen=True)
 class BookUpdate:
     symbol: str

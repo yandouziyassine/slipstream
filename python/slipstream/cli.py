@@ -13,11 +13,10 @@ from pathlib import Path
 from slipstream.calibration import CalibrationData, CalibrationError
 from slipstream.config import ConfigError, load_settings
 from slipstream.engine_client import EngineClient, EngineError
-from slipstream.kraken import KrakenMessageError
 from slipstream.kraken_rest import fetch_ohlc, parse_ohlc
 from slipstream.live import LiveFeedError, run_live
 from slipstream.logging_setup import configure_logging
-from slipstream.models import Fill, OrderSpec
+from slipstream.models import Fill, MarketDataError, OrderSpec
 from slipstream.recorder import RecordError, open_new_file, record_stream, write_ohlc_header
 from slipstream.replay import ReplayError, read_calibration, read_replay, run_replay
 from slipstream.runner import ExecutionRunner, OrderRejectedError
@@ -197,7 +196,7 @@ def _record(args: argparse.Namespace, log: logging.Logger) -> int:
             for interval in (15, 1):
                 write_ohlc_header(handle, interval, fetch_ohlc(args.symbol, interval))
             count = asyncio.run(record_stream(handle, args.symbol, args.depth, args.duration))
-    except (RecordError, KrakenMessageError, OSError) as exc:
+    except (RecordError, MarketDataError, OSError) as exc:
         log.error(str(exc))
         return 1
     log.info(
@@ -217,7 +216,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         specs = _order_specs(args)
         calibration = _load_calibration(args, specs)
         client = EngineClient(args.engine or settings.engine_address)
-    except (ConfigError, CalibrationError, KrakenMessageError, ReplayError, OSError) as exc:
+    except (ConfigError, CalibrationError, MarketDataError, ReplayError, OSError) as exc:
         log.error(str(exc))
         return 1
     try:
@@ -240,7 +239,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     except (
         EngineError,
-        KrakenMessageError,
+        MarketDataError,
         ReplayError,
         OrderRejectedError,
         LiveFeedError,

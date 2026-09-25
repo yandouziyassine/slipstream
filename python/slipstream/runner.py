@@ -6,8 +6,16 @@ from typing import Protocol
 
 from slipstream.calibration import CalibrationData, schedule_params
 from slipstream.coinbase import CoinbaseStream
-from slipstream.kraken import KrakenMessageError, parse_message
-from slipstream.models import BookUpdate, Fill, OrderSpec, ScheduleParams, TradeBatch, Venue
+from slipstream.kraken import parse_message
+from slipstream.models import (
+    BookUpdate,
+    Fill,
+    MarketDataError,
+    OrderSpec,
+    ScheduleParams,
+    TradeBatch,
+    Venue,
+)
 from slipstream.v1 import execution_pb2 as pb
 
 _TERMINAL_STATES = (pb.ORDER_STATE_COMPLETED, pb.ORDER_STATE_HALTED)
@@ -98,7 +106,7 @@ class ExecutionRunner:
 
     def _check_symbol(self, symbol: str) -> None:
         if symbol != self._symbol:
-            raise KrakenMessageError(f"unexpected symbol {symbol!r}")
+            raise MarketDataError(f"unexpected symbol {symbol!r}")
 
     def _submit_all(self, book: BookUpdate, now_ns: int) -> None:
         planned = [

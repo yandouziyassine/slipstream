@@ -4,7 +4,7 @@ import json
 import math
 from typing import Any
 
-from slipstream.models import BookUpdate, TradeBatch
+from slipstream.models import BookUpdate, MarketDataError, TradeBatch
 
 COINBASE_WS_URL = "wss://advanced-trade-ws.coinbase.com"
 MAX_MESSAGE_BYTES = 16 << 20
@@ -17,7 +17,7 @@ _PRODUCTS = {"BTC/USD": "BTC-USD", "ETH/USD": "ETH-USD"}
 _SIDES = ("bid", "offer")
 
 
-class CoinbaseMessageError(ValueError):
+class CoinbaseMessageError(MarketDataError):
     pass
 
 
