@@ -25,6 +25,7 @@ add_library(slipstream_core STATIC
   src/fill_simulator.cpp
   src/engine.cpp
   src/config.cpp
+  src/router.cpp
 )
 target_include_directories(slipstream_core PUBLIC src)
 target_compile_options(slipstream_core PRIVATE ${SLIPSTREAM_WARNINGS})
@@ -84,6 +85,7 @@ add_executable(engine_tests
   tests/config_test.cpp
   tests/service_test.cpp
   tests/engine_schedules_test.cpp
+  tests/router_test.cpp
 )
 target_link_libraries(engine_tests PRIVATE slipstream_service GTest::gtest_main)
 target_compile_options(engine_tests PRIVATE ${SLIPSTREAM_WARNINGS})
