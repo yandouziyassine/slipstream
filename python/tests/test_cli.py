@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from slipstream.cli import build_parser, format_comparison, format_summary, main
+from slipstream.cli import build_parser, format_comparison, format_summary, main, routing_gain_bps
 from slipstream.models import Fill
 from slipstream.v1 import execution_pb2 as pb
 
@@ -165,6 +165,10 @@ def test_format_comparison_table() -> None:
         "bps",
         "saved",
         "bps",
+        "fee",
+        "bps",
+        "all-in",
+        "bps",
         "fills",
     ]
     assert lines[1].split() == [
@@ -175,9 +179,22 @@ def test_format_comparison_table() -> None:
         "100.00",
         "150.00",
         "50.00",
+        "0.00",
+        "0.00",
         "2",
     ]
-    assert lines[2].split() == ["pov", "HALTED", "0.5", "101.00", "100.00", "150.00", "50.00", "1"]
+    assert lines[2].split() == [
+        "pov",
+        "HALTED",
+        "0.5",
+        "101.00",
+        "100.00",
+        "150.00",
+        "50.00",
+        "0.00",
+        "0.00",
+        "1",
+    ]
 
 
 def test_summary_shows_algo() -> None:
@@ -321,3 +338,87 @@ def test_venue_mismatch_with_engine_is_refused(
     monkeypatch.setattr("slipstream.cli.EngineClient", _FakeClient)
     assert main([*BASE, "--qty", "1", "--venues", "kraken,coinbase"]) == 1
     assert "do not match" in capsys.readouterr().err
+
+
+def two_venue_status() -> pb.OrderStatus:
+    return pb.OrderStatus(
+        order_id="o-1",
+        algo="twap",
+        state=pb.ORDER_STATE_COMPLETED,
+        total_qty=0.05,
+        filled_qty=0.05,
+        avg_fill_price=100019.0,
+        arrival_mid=100002.5,
+        slippage_bps=1.65,
+        immediate_cost_bps=1.65,
+        fees_paid=0.100015,
+        fees_bps=0.2,
+        routed_all_in_bps=1.85,
+        venue_costs=[
+            pb.VenueCost(venue="kraken", all_in_bps=1.95, available=True),
+            pb.VenueCost(venue="coinbase", all_in_bps=3.05, available=True),
+        ],
+    )
+
+
+def test_routing_gain_is_best_available_venue_minus_routed() -> None:
+    assert routing_gain_bps(two_venue_status()) == pytest.approx(0.10)
+
+
+def test_routing_gain_ignores_unavailable_venues_and_is_none_without_any() -> None:
+    status = two_venue_status()
+    status.venue_costs[0].available = False
+    assert routing_gain_bps(status) == pytest.approx(1.20)
+    status.venue_costs[1].available = False
+    assert routing_gain_bps(status) is None
+
+
+def test_summary_shows_fees_all_in_venues_and_gain() -> None:
+    text = format_summary(two_venue_status())
+    assert "fees         0.20 bps (0.10 paid)" in text
+    assert "all-in       1.85 bps" in text
+    assert "  kraken     1.95 bps" in text
+    assert "  coinbase   3.05 bps" in text
+    assert "routing gain 0.10 bps" in text
+
+
+def test_summary_marks_unavailable_venue_na() -> None:
+    status = two_venue_status()
+    status.venue_costs[1].available = False
+    assert "  coinbase   n/a" in format_summary(status)
+
+
+def test_single_venue_summary_has_no_venue_breakdown() -> None:
+    status = pb.OrderStatus(
+        order_id="o",
+        venue_costs=[pb.VenueCost(venue="kraken", all_in_bps=1.0, available=True)],
+    )
+    text = format_summary(status)
+    assert "fees" in text
+    assert "routing gain" not in text
+    assert "  kraken" not in text
+
+
+def test_comparison_table_adds_venue_columns_for_two_venues() -> None:
+    header, row = format_comparison([two_venue_status()], []).splitlines()
+    assert header.split()[-11:] == [
+        "fee",
+        "bps",
+        "all-in",
+        "bps",
+        "kraken",
+        "bps",
+        "coinbase",
+        "bps",
+        "gain",
+        "bps",
+        "fills",
+    ]
+    assert row.split()[-6:] == ["0.20", "1.85", "1.95", "3.05", "0.10", "0"]
+
+
+def test_comparison_table_marks_unavailable_venue_na() -> None:
+    status = two_venue_status()
+    status.venue_costs[1].available = False
+    row = format_comparison([status], []).splitlines()[1]
+    assert row.split()[-4:] == ["1.95", "n/a", "0.10", "0"]

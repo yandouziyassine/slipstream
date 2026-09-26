@@ -132,6 +132,21 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def routing_gain_bps(status: pb.OrderStatus) -> float | None:
+    available = [cost.all_in_bps for cost in status.venue_costs if cost.available]
+    if not available:
+        return None
+    return min(available) - status.routed_all_in_bps
+
+
+def _num(value: float | None) -> str:
+    return "n/a" if value is None else f"{value:.2f}"
+
+
+def _bps(value: float | None) -> str:
+    return "n/a" if value is None else f"{value:.2f} bps"
+
+
 def format_summary(status: pb.OrderStatus) -> str:
     state = pb.OrderState.Name(status.state).removeprefix("ORDER_STATE_")
     lines = [
@@ -145,25 +160,47 @@ def format_summary(status: pb.OrderStatus) -> str:
         f"one-shot     {status.immediate_cost_bps:.2f} bps (single market order at arrival)",
         f"saved        {status.immediate_cost_bps - status.slippage_bps:.2f} bps",
     ]
+    lines += [
+        f"fees         {status.fees_bps:.2f} bps ({status.fees_paid:.2f} paid)",
+        f"all-in       {status.routed_all_in_bps:.2f} bps (slippage + fees, routed)",
+    ]
+    if len(status.venue_costs) > 1:
+        for cost in status.venue_costs:
+            alone = cost.all_in_bps if cost.available else None
+            lines.append(f"{'  ' + cost.venue:<13}{_bps(alone)} (all-in on this venue alone)")
+        lines.append(f"routing gain {_bps(routing_gain_bps(status))} (vs best single venue)")
     if status.halt_reason:
         lines.append(f"halt reason  {status.halt_reason}")
     return "\n".join(lines)
 
 
 def format_comparison(statuses: Sequence[pb.OrderStatus], fills: Sequence[Fill]) -> str:
-    rows = [
+    venues = [cost.venue for cost in statuses[0].venue_costs] if statuses else []
+    multi = len(venues) > 1
+    header = (
         f"{'algo':<16}{'state':<11}{'filled':>10}{'avg px':>12}{'slip bps':>10}"
-        f"{'1-shot bps':>12}{'saved bps':>11}{'fills':>7}"
-    ]
+        f"{'1-shot bps':>12}{'saved bps':>11}{'fee bps':>9}{'all-in bps':>12}"
+    )
+    if multi:
+        header += "".join(f"{venue + ' bps':>14}" for venue in venues) + f"{'gain bps':>10}"
+    rows = [header + f"{'fills':>7}"]
     for status in statuses:
         state = pb.OrderState.Name(status.state).removeprefix("ORDER_STATE_")
         count = sum(1 for fill in fills if fill.order_id == status.order_id)
         saved = status.immediate_cost_bps - status.slippage_bps
-        rows.append(
+        row = (
             f"{status.algo:<16}{state:<11}{status.filled_qty:>10.8g}"
             f"{status.avg_fill_price:>12.2f}{status.slippage_bps:>10.2f}"
-            f"{status.immediate_cost_bps:>12.2f}{saved:>11.2f}{count:>7}"
+            f"{status.immediate_cost_bps:>12.2f}{saved:>11.2f}"
+            f"{status.fees_bps:>9.2f}{status.routed_all_in_bps:>12.2f}"
         )
+        if multi:
+            row += "".join(
+                f"{_num(cost.all_in_bps if cost.available else None):>14}"
+                for cost in status.venue_costs
+            )
+            row += f"{_num(routing_gain_bps(status)):>10}"
+        rows.append(row + f"{count:>7}")
     return "\n".join(rows)
 
 
