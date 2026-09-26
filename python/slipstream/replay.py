@@ -80,6 +80,8 @@ def run_replay(runner: ExecutionRunner, records: Iterable[tuple[int, str, Venue]
         if recv_ns < last_ns:
             raise ReplayError("replay timestamps must be non-decreasing")
         last_ns = recv_ns
+        if venue not in runner.venues:
+            continue
         runner.on_message(raw, recv_ns, venue)
         if runner.is_done():
             return

@@ -270,3 +270,54 @@ def test_replay_without_ohlc_fails_before_connecting(
     )
     assert code == 1
     assert "OHLC" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("value", ["", "binance", "kraken,binance", ","])
+def test_rejects_bad_venues(value: str) -> None:
+    with pytest.raises(SystemExit):
+        build_parser().parse_args([*BASE, "--qty", "1", "--venues", value])
+
+
+def test_parses_and_dedupes_venues() -> None:
+    args = build_parser().parse_args([*BASE, "--qty", "1", "--venues", "coinbase, kraken,coinbase"])
+    assert args.venues == ("coinbase", "kraken")
+
+
+def test_venues_default_to_kraken() -> None:
+    assert build_parser().parse_args([*BASE, "--qty", "1"]).venues == ("kraken",)
+
+
+@pytest.mark.parametrize("command", ["live", "compare", "record"])
+def test_every_feed_command_accepts_venues(command: str) -> None:
+    base = {
+        "live": ["live", "--side", "buy", "--qty", "1", "--duration", "6", "--slices", "3"],
+        "compare": ["compare", "--side", "buy", "--qty", "1", "--duration", "6", "--slices", "3"],
+        "record": ["record", "--duration", "5", "--out", "x.jsonl"],
+    }[command]
+    assert build_parser().parse_args([*base, "--venues", "kraken,coinbase"]).venues == (
+        "kraken",
+        "coinbase",
+    )
+
+
+class _FakeClient:
+    def __init__(self, address: str) -> None:
+        self.closed = False
+
+    def wait_ready(self) -> None:
+        pass
+
+    def venue_fees(self) -> dict[str, float]:
+        return {"kraken": 40.0}
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def test_venue_mismatch_with_engine_is_refused(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.delenv("SLIPSTREAM_PAPER_MODE", raising=False)
+    monkeypatch.setattr("slipstream.cli.EngineClient", _FakeClient)
+    assert main([*BASE, "--qty", "1", "--venues", "kraken,coinbase"]) == 1
+    assert "do not match" in capsys.readouterr().err

@@ -9,6 +9,7 @@ import sys
 import time
 from collections.abc import Sequence
 from pathlib import Path
+from typing import cast
 
 from slipstream.calibration import CalibrationData, CalibrationError
 from slipstream.config import ConfigError, load_settings
@@ -16,7 +17,7 @@ from slipstream.engine_client import EngineClient, EngineError
 from slipstream.kraken_rest import fetch_ohlc, parse_ohlc
 from slipstream.live import LiveFeedError, run_live
 from slipstream.logging_setup import configure_logging
-from slipstream.models import Fill, MarketDataError, OrderSpec
+from slipstream.models import VENUES, Fill, MarketDataError, OrderSpec, Venue
 from slipstream.recorder import RecordError, open_new_file, record_stream, write_ohlc_header
 from slipstream.replay import ReplayError, read_calibration, read_replay, run_replay
 from slipstream.runner import ExecutionRunner, OrderRejectedError
@@ -76,19 +77,28 @@ def _algos(value: str) -> list[str]:
     return list(dict.fromkeys(names))
 
 
+def _venues(value: str) -> tuple[Venue, ...]:
+    names = [name.strip() for name in value.split(",") if name.strip()]
+    unknown = [name for name in names if name not in VENUES]
+    if not names or unknown:
+        raise argparse.ArgumentTypeError(f"venues must be a comma list of {', '.join(VENUES)}")
+    return tuple(cast(Venue, name) for name in dict.fromkeys(names))
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="slipstream",
         description=(
-            "Paper-trade execution schedules against the live or a recorded Kraken order book."
+            "Paper-trade execution schedules across Kraken and Coinbase public order books "
+            "(live or recorded)."
         ),
     )
     commands = parser.add_subparsers(dest="command", required=True)
-    live = commands.add_parser("live", help="stream the live Kraken book (paper fills only)")
+    live = commands.add_parser("live", help="stream live public order books (paper fills only)")
     live.add_argument("--depth", type=int, choices=[10, 25, 100], default=10)
     replay = commands.add_parser("replay", help="replay a recorded JSONL order book file")
     replay.add_argument("--file", type=Path, required=True)
-    record = commands.add_parser("record", help="record the live Kraken book + trades to JSONL")
+    record = commands.add_parser("record", help="record live public order books + trades to JSONL")
     record.add_argument("--duration", type=_positive_int, required=True, help="seconds")
     record.add_argument("--out", type=Path, required=True)
     record.add_argument("--symbol", type=_symbol, default="BTC/USD")
@@ -112,6 +122,13 @@ def build_parser() -> argparse.ArgumentParser:
     for sub in (live, replay):
         sub.add_argument("--algo", choices=ALGOS, default="twap")
         sub.add_argument("--order-id", type=_order_id, default=None)
+    for sub in (live, replay, compare, record):
+        sub.add_argument(
+            "--venues",
+            type=_venues,
+            default=("kraken",),
+            help="comma list of venues; must match the engine's --venue flags",
+        )
     return parser
 
 
@@ -195,7 +212,9 @@ def _record(args: argparse.Namespace, log: logging.Logger) -> int:
         with open_new_file(args.out) as handle:
             for interval in (15, 1):
                 write_ohlc_header(handle, interval, fetch_ohlc(args.symbol, interval))
-            count = asyncio.run(record_stream(handle, args.symbol, args.depth, args.duration))
+            count = asyncio.run(
+                record_stream(handle, args.symbol, args.depth, args.duration, venues=args.venues)
+            )
     except (RecordError, MarketDataError, OSError) as exc:
         log.error(str(exc))
         return 1
@@ -221,13 +240,31 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
     try:
         client.wait_ready()
-        runner = ExecutionRunner(client, specs, args.symbol, log, calibration)
+        fees = client.venue_fees()
+        if set(fees) != set(args.venues):
+            log.error(
+                f"engine venues {sorted(fees)} do not match --venues {sorted(args.venues)}; "
+                "start the engine with one --venue flag per venue"
+            )
+            return 1
+        runner = ExecutionRunner(
+            client,
+            specs,
+            args.symbol,
+            log,
+            calibration,
+            venues=args.venues,
+            book_depth=getattr(args, "depth", 10),
+            fee_bps=fees,
+        )
         replay_file = getattr(args, "file", None)
         if replay_file is not None:
             run_replay(runner, read_replay(replay_file))
         else:
             deadline_s = args.duration + _DEADLINE_GRACE_S
-            asyncio.run(run_live(runner, args.symbol, args.depth, deadline_s=deadline_s))
+            asyncio.run(
+                run_live(runner, args.symbol, args.depth, deadline_s=deadline_s, venues=args.venues)
+            )
         statuses = runner.order_statuses()
         if not statuses:
             log.error("order was never submitted (no order book snapshot received)")
