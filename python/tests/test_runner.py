@@ -400,3 +400,17 @@ def test_local_books_stop_updating_after_submission(
     runner.on_message(json.dumps(delta), 200)
     assert calls == 1  # still only the pre-submission apply; the engine still sees the update
     assert len(fake_engine.books) == 2
+
+
+def test_heartbeat_after_submit_keeps_the_venue_fresh(fake_engine: FakeEngine) -> None:
+    # A heartbeat on a live connection means the book is unchanged, not stale.
+    runner = make_runner(fake_engine)
+    runner.on_message(snapshot(), 100)
+    runner.on_message(HEARTBEAT, 200)
+    assert fake_engine.books[-1] == BookUpdate("BTC/USD", False, (), (), "kraken")
+    assert fake_engine.book_recv_ns[-1] == 200
+
+
+def test_heartbeat_before_submit_sends_no_keepalive(fake_engine: FakeEngine) -> None:
+    make_runner(fake_engine).on_message(HEARTBEAT, 50)
+    assert fake_engine.books == []

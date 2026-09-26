@@ -101,6 +101,10 @@ class ExecutionRunner:
             self._check_symbol(update.symbol)
             if not update.is_snapshot:
                 self._engine.apply_trades(update)
+        elif self._submitted:
+            # A heartbeat on a live connection means this venue's book is unchanged, not stale.
+            # An empty delta refreshes the engine's freshness clock without touching any level.
+            self._engine.apply_book(BookUpdate(self._symbol, False, (), (), venue), now_ns)
         if self._submitted:
             self._step(now_ns)
 
