@@ -29,6 +29,8 @@ _ORDER_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 _DEADLINE_GRACE_S = 60
 ALGOS = ("twap", "vwap", "pov", "almgren_chriss")
 _CALIBRATED = ("vwap", "almgren_chriss")
+_DEPTH_CHECKED_COMMANDS = ("live", "compare")
+_FULL_FILL_TOL = 1e-9
 
 
 def _positive_float(value: str) -> float:
@@ -185,6 +187,25 @@ def _bps(value: float | None) -> str:
     return "n/a" if value is None else f"{_num(value)} bps"
 
 
+def _fully_filled(status: pb.OrderStatus) -> bool:
+    threshold = status.total_qty * (1 - _FULL_FILL_TOL)
+    return status.filled_qty >= threshold and status.immediate_filled_qty >= threshold
+
+
+def saved_bps(status: pb.OrderStatus) -> float | None:
+    """immediate_cost_bps - slippage_bps, but only when both the order and the one-shot
+    benchmark could actually fill in full; a partial fill makes the comparison meaningless."""
+    if not _fully_filled(status):
+        return None
+    return status.immediate_cost_bps - status.slippage_bps
+
+
+def _filled_pct(status: pb.OrderStatus) -> float:
+    if status.total_qty <= 0:
+        return 0.0
+    return status.filled_qty / status.total_qty * 100.0
+
+
 def format_summary(status: pb.OrderStatus) -> str:
     state = pb.OrderState.Name(status.state).removeprefix("ORDER_STATE_")
     lines = [
@@ -192,11 +213,12 @@ def format_summary(status: pb.OrderStatus) -> str:
         f"algo         {status.algo or 'twap'}",
         f"state        {state}",
         f"filled       {status.filled_qty:.8g} / {status.total_qty:.8g}",
+        f"filled %     {_filled_pct(status):.2f}%",
         f"avg price    {status.avg_fill_price:.2f}",
         f"arrival mid  {status.arrival_mid:.2f}",
         f"slippage     {status.slippage_bps:.2f} bps",
         f"one-shot     {status.immediate_cost_bps:.2f} bps (single market order at arrival)",
-        f"saved        {status.immediate_cost_bps - status.slippage_bps:.2f} bps",
+        f"saved        {_bps(saved_bps(status))}",
     ]
     lines += [
         f"fees         {status.fees_bps:.2f} bps ({status.fees_paid:.2f} paid)",
@@ -215,22 +237,25 @@ def format_summary(status: pb.OrderStatus) -> str:
 def format_comparison(statuses: Sequence[pb.OrderStatus], fills: Sequence[Fill]) -> str:
     venues = [cost.venue for cost in statuses[0].venue_costs] if statuses else []
     multi = len(venues) > 1
+    show_reason = any(status.halt_reason for status in statuses)
     header = (
-        f"{'algo':<16}{'state':<11}{'filled':>10}{'avg px':>12}{'slip bps':>10}"
+        f"{'algo':<16}{'state':<11}{'filled':>10}{'filled %':>10}{'avg px':>12}{'slip bps':>10}"
         f"{'1-shot bps':>12}{'saved bps':>11}{'fee bps':>9}{'all-in bps':>12}"
     )
     if multi:
         header += "".join(f"{venue + ' bps':>14}" for venue in venues) + f"{'gain bps':>10}"
-    rows = [header + f"{'fills':>7}"]
+    header += f"{'fills':>7}"
+    if show_reason:
+        header += f"{'reason':>20}"
+    rows = [header]
     for status in statuses:
         state = pb.OrderState.Name(status.state).removeprefix("ORDER_STATE_")
         count = sum(1 for fill in fills if fill.order_id == status.order_id)
-        saved = status.immediate_cost_bps - status.slippage_bps
         row = (
             f"{status.algo:<16}{state:<11}{status.filled_qty:>10.8g}"
-            f"{status.avg_fill_price:>12.2f}{status.slippage_bps:>10.2f}"
-            f"{status.immediate_cost_bps:>12.2f}{saved:>11.2f}"
-            f"{status.fees_bps:>9.2f}{status.routed_all_in_bps:>12.2f}"
+            f"{_filled_pct(status):>9.2f}%{status.avg_fill_price:>12.2f}"
+            f"{status.slippage_bps:>10.2f}{status.immediate_cost_bps:>12.2f}"
+            f"{_num(saved_bps(status)):>11}{status.fees_bps:>9.2f}{status.routed_all_in_bps:>12.2f}"
         )
         if multi:
             row += "".join(
@@ -238,7 +263,10 @@ def format_comparison(statuses: Sequence[pb.OrderStatus], fills: Sequence[Fill])
                 for cost in status.venue_costs
             )
             row += f"{_num(routing_gain_bps(status)):>10}"
-        rows.append(row + f"{count:>7}")
+        row += f"{count:>7}"
+        if show_reason:
+            row += f"{(status.halt_reason or '-'):>20}"
+        rows.append(row)
     return "\n".join(rows)
 
 
@@ -320,6 +348,32 @@ def _venue_flags(args: argparse.Namespace, log: logging.Logger) -> int:
     return 0
 
 
+def _print_result(
+    args: argparse.Namespace, statuses: Sequence[pb.OrderStatus], fills: Sequence[Fill]
+) -> None:
+    if args.command == "compare":
+        print(format_comparison(statuses, fills))
+    else:
+        print(format_summary(statuses[0]))
+
+
+def _print_best_effort(
+    args: argparse.Namespace, runner: ExecutionRunner | None, log: logging.Logger
+) -> None:
+    """Best-effort summary/table after a failure that happened once an order might already be
+    working: show whatever the engine reports rather than nothing. If the status RPC itself
+    fails, just log it and give up."""
+    if runner is None:
+        return
+    try:
+        statuses = runner.order_statuses()
+    except EngineError as exc:
+        log.error(f"could not fetch final order status: {exc}")
+        return
+    if statuses:
+        _print_result(args, statuses, runner.fills)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     log = configure_logging()
@@ -335,6 +389,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     except (ConfigError, CalibrationError, MarketDataError, ReplayError, OSError) as exc:
         log.error(str(exc))
         return 1
+    runner: ExecutionRunner | None = None
     try:
         client.wait_ready()
         fees = client.venue_fees()
@@ -344,6 +399,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "start the engine with one --venue flag per venue"
             )
             return 1
+        if args.command in _DEPTH_CHECKED_COMMANDS:
+            engine_depth = client.book_depth()
+            if engine_depth > args.depth:
+                log.error(
+                    f"engine book depth {engine_depth} exceeds --depth {args.depth}: levels "
+                    "outside the subscribed depth would look like phantom liquidity"
+                )
+                return 1
         runner = ExecutionRunner(
             client,
             specs,
@@ -366,10 +429,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if not statuses:
             log.error("order was never submitted (no order book snapshot received)")
             return 1
-        if args.command == "compare":
-            print(format_comparison(statuses, runner.fills))
-        else:
-            print(format_summary(statuses[0]))
+        _print_result(args, statuses, runner.fills)
         return 0
     except (
         EngineError,
@@ -381,6 +441,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         OSError,
     ) as exc:
         log.error(str(exc))
+        _print_best_effort(args, runner, log)
         return 1
     finally:
         client.close()
