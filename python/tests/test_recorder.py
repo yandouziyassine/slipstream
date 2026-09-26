@@ -201,3 +201,131 @@ def test_default_clock_is_the_monotonic_wall_clock(
 
     assert asyncio.run(scenario()) == 2
     assert [ns for ns, _, _ in read_replay(path)] == [5_000, 5_007]
+
+
+def test_recording_window_starts_when_every_feed_has_delivered(tmp_path: Path) -> None:
+    path = tmp_path / "barrier.jsonl"
+    delay_s = 0.25
+    duration_s = 0.1
+    interval_s = 0.02
+
+    async def kraken_handler(ws: ServerConnection) -> None:
+        await ws.recv()
+        await ws.recv()
+        for _ in range(40):
+            await ws.send(BOOK)
+            await asyncio.sleep(interval_s)
+
+    async def coinbase_handler(ws: ServerConnection) -> None:
+        for _ in range(3):
+            await ws.recv()
+        await asyncio.sleep(delay_s)
+        await ws.send(coinbase_sub_ack(0))
+        await ws.send(coinbase_sub_ack(1))
+        await ws.wait_closed()
+
+    async def scenario() -> int:
+        async with serve(kraken_handler, "127.0.0.1", 0) as kraken_server:
+            async with serve(coinbase_handler, "127.0.0.1", 0) as coinbase_server:
+                urls = {
+                    "kraken": f"ws://127.0.0.1:{port_of(kraken_server)}",
+                    "coinbase": f"ws://127.0.0.1:{port_of(coinbase_server)}",
+                }
+                with open_new_file(path) as handle:
+                    return await record_stream(
+                        handle,
+                        "BTC/USD",
+                        10,
+                        duration_s=duration_s,
+                        venues=("kraken", "coinbase"),
+                        urls=urls,
+                    )
+
+    asyncio.run(scenario())
+    records = list(read_replay(path))
+    coinbase_records = [r for r in records if r[2] == "coinbase"]
+    kraken_records = [r for r in records if r[2] == "kraken"]
+    # Coinbase's first message only arrives after `delay_s`. If the window had
+    # started at connect time (the old bug) instead of at the barrier, the
+    # duration_s deadline would already be gone by then and coinbase would be
+    # recorded with nothing.
+    assert coinbase_records
+    # Kraken messages sent while waiting for coinbase to deliver its first
+    # message are still recorded (pre-barrier), not just the ones inside a
+    # naive duration_s window measured from connect time.
+    assert len(kraken_records) >= int(delay_s / interval_s) - 1
+
+
+def test_raw_message_written_verbatim_round_trips(tmp_path: Path) -> None:
+    path = tmp_path / "verbatim.jsonl"
+    raw = (
+        '{"channel": "trade", "type": "update", '
+        '"data": [{"symbol": "BTC/USD", "price": 100.10000000, "qty": 0.50000000}]}'
+    )
+
+    async def scenario() -> int:
+        async with serve_messages([raw], []) as server:
+            with open_new_file(path) as handle:
+                return await record_stream(
+                    handle,
+                    "BTC/USD",
+                    10,
+                    duration_s=0.2,
+                    urls={"kraken": f"ws://127.0.0.1:{port_of(server)}"},
+                )
+
+    assert asyncio.run(scenario()) == 1
+    line = path.read_text(encoding="utf-8").strip()
+    # The exact decimal text from the exchange is preserved (no re-encode
+    # through float repr, which would drop the trailing zeros).
+    assert "100.10000000" in line
+    assert "0.50000000" in line
+    records = list(read_replay(path))
+    assert len(records) == 1
+    recv_ns, out_raw, venue = records[0]
+    assert isinstance(recv_ns, int)
+    assert venue == "kraken"
+    assert json.loads(out_raw) == json.loads(raw)
+
+
+def test_message_with_embedded_newline_is_re_encoded(tmp_path: Path) -> None:
+    path = tmp_path / "pretty.jsonl"
+    pretty = '{\n  "channel": "heartbeat"\n}'
+
+    async def scenario() -> int:
+        async with serve_messages([pretty], []) as server:
+            with open_new_file(path) as handle:
+                return await record_stream(
+                    handle,
+                    "BTC/USD",
+                    10,
+                    duration_s=0.2,
+                    urls={"kraken": f"ws://127.0.0.1:{port_of(server)}"},
+                )
+
+    assert asyncio.run(scenario()) == 1
+    lines = path.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 1
+    records = list(read_replay(path))
+    assert len(records) == 1
+    _, out_raw, _ = records[0]
+    assert json.loads(out_raw) == {"channel": "heartbeat"}
+
+
+def test_write_failure_surfaces_as_record_error() -> None:
+    class FailingHandle:
+        def write(self, data: str) -> int:
+            raise OSError("disk full")
+
+    async def scenario() -> int:
+        async with serve_messages([BOOK], []) as server:
+            return await record_stream(
+                FailingHandle(),  # type: ignore[arg-type]
+                "BTC/USD",
+                10,
+                duration_s=0.2,
+                urls={"kraken": f"ws://127.0.0.1:{port_of(server)}"},
+            )
+
+    with pytest.raises(RecordError, match="write"):
+        asyncio.run(scenario())
