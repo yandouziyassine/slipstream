@@ -249,3 +249,9 @@ def test_trades_flow_while_waiting_for_a_late_venue(fake_engine: FakeEngine) -> 
     runner.on_message(cb_snapshot(), 300, "coinbase")
     assert [(s.order_id, start) for s, start, _ in fake_engine.submits] == [("o-1", 300)]
     assert fake_engine.steps == [300]
+
+
+def test_book_updates_carry_their_receive_time(fake_engine: FakeEngine) -> None:
+    runner = make_runner(fake_engine)
+    runner.on_message(snapshot(), 1234)
+    assert fake_engine.book_recv_ns == [1234]

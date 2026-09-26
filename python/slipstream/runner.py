@@ -8,6 +8,7 @@ from slipstream.calibration import CalibrationData, schedule_params
 from slipstream.coinbase import CoinbaseStream
 from slipstream.kraken import parse_message
 from slipstream.models import (
+    VENUES,
     BookUpdate,
     Fill,
     MarketDataError,
@@ -19,13 +20,13 @@ from slipstream.models import (
 from slipstream.v1 import execution_pb2 as pb
 
 _TERMINAL_STATES = (pb.ORDER_STATE_COMPLETED, pb.ORDER_STATE_HALTED)
-_VALID_VENUES: frozenset[Venue] = frozenset({"kraken", "coinbase"})
+_VALID_VENUES: frozenset[Venue] = frozenset(VENUES)
 
 _Parser = Callable[[str | bytes], BookUpdate | TradeBatch | None]
 
 
 class Engine(Protocol):
-    def apply_book(self, update: BookUpdate) -> None: ...
+    def apply_book(self, update: BookUpdate, recv_ns: int) -> None: ...
     def apply_trades(self, batch: TradeBatch) -> None: ...
     def submit(
         self, spec: OrderSpec, start_ns: int, params: ScheduleParams | None = None
@@ -78,7 +79,7 @@ class ExecutionRunner:
         update = parser(raw)
         if isinstance(update, BookUpdate):
             self._check_symbol(update.symbol)
-            self._engine.apply_book(update)
+            self._engine.apply_book(update, now_ns)
             if update.is_snapshot and not self._submitted:
                 self._snapshot_venues.add(update.venue)
                 if self._snapshot_venues >= self._venues:

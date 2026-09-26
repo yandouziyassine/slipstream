@@ -7,10 +7,10 @@ from typing import Any
 
 from slipstream.kraken import KrakenMessageError
 from slipstream.kraken_rest import SUPPORTED_INTERVALS, Bar, parse_ohlc
-from slipstream.models import Venue
+from slipstream.models import VENUES, Venue
 from slipstream.runner import ExecutionRunner
 
-_VALID_VENUES: frozenset[Venue] = frozenset({"kraken", "coinbase"})
+_VALID_VENUES: frozenset[Venue] = frozenset(VENUES)
 
 
 class ReplayError(ValueError):

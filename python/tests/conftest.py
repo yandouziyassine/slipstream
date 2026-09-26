@@ -16,6 +16,7 @@ ENGINE_BIN = Path(__file__).resolve().parents[2] / "build" / "engine" / "slipstr
 class FakeEngine:
     def __init__(self) -> None:
         self.books: list[BookUpdate] = []
+        self.book_recv_ns: list[int] = []
         self.submits: list[tuple[OrderSpec, int, ScheduleParams | None]] = []
         self.steps: list[int] = []
         self.accept = True
@@ -26,8 +27,9 @@ class FakeEngine:
         self.trades: list[TradeBatch] = []
         self.reject_ids: set[str] = set()
 
-    def apply_book(self, update: BookUpdate) -> None:
+    def apply_book(self, update: BookUpdate, recv_ns: int) -> None:
         self.books.append(update)
+        self.book_recv_ns.append(recv_ns)
 
     def submit(
         self, spec: OrderSpec, start_ns: int, params: ScheduleParams | None = None
