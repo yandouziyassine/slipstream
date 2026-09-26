@@ -43,6 +43,19 @@ struct Fill {
     double fee;
 };
 
+struct OrderUpdate {
+    std::string order_id;
+    OrderState state;
+    std::string reason;
+    double filled_qty;
+};
+
+// Updates list each order whose state or filled quantity changed during the step.
+struct StepOutput {
+    std::vector<Fill> fills;
+    std::vector<OrderUpdate> updates;
+};
+
 struct VenueSettings {
     std::string name;
     double fee_bps;
@@ -101,7 +114,7 @@ public:
     static constexpr std::int64_t kHeartbeatGraceNs = 30'000'000'000;
 
     SubmitResult submit(const ParentOrderRequest& request, const ScheduleSpec& spec = TwapSpec{});
-    std::vector<Fill> step(std::int64_t now_ns);
+    StepOutput step(std::int64_t now_ns);
 
     std::vector<OrderStatus> statuses() const;
     std::size_t working_orders() const;

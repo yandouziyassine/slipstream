@@ -114,7 +114,7 @@ grpc::Status ExecutionService::SubmitParentOrder(grpc::ServerContext*,
 
 grpc::Status ExecutionService::Step(grpc::ServerContext*, const v1::StepRequest* request,
                                     v1::StepReply* reply) {
-    for (const auto& fill : engine_.step(request->now_ns())) {
+    for (const auto& fill : engine_.step(request->now_ns()).fills) {
         auto* out = reply->add_fills();
         out->set_order_id(fill.order_id);
         out->set_ts_ns(fill.ts_ns);

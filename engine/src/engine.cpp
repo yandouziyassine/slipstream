@@ -243,21 +243,26 @@ SubmitResult Engine::submit(const ParentOrderRequest& request, const ScheduleSpe
     return {true, ""};
 }
 
-std::vector<Fill> Engine::step(std::int64_t now_ns) {
+StepOutput Engine::step(std::int64_t now_ns) {
     std::lock_guard lock(mu_);
     latest_ns_ = std::max(latest_ns_, now_ns);
-    std::vector<Fill> fills;
+    StepOutput out;
     const auto ref_price = consolidated_mid_locked(now_ns);
     const MarketState market{market_volume_};
     for (auto& order : orders_) {
         if (order.state != OrderState::Working) continue;
-        advance_locked(order, now_ns, ref_price, market, fills);
+        const double filled_before = order.filled_qty;
+        advance_locked(order, now_ns, ref_price, market, out.fills);
         if (order.state == OrderState::Working && order.schedule->expired(now_ns)) {
             order.state = OrderState::Halted;
             order.halt_reason = "deadline reached";
         }
+        if (order.state != OrderState::Working || order.filled_qty != filled_before) {
+            out.updates.push_back(
+                {order.request.order_id, order.state, order.halt_reason, order.filled_qty});
+        }
     }
-    return fills;
+    return out;
 }
 
 void Engine::advance_locked(ParentOrder& order, std::int64_t now_ns,
