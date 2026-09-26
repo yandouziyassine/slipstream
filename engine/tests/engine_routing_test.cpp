@@ -301,3 +301,36 @@ TEST(RoutingVenueRules, NeverLeavesARemainderBelowTheVenueMinimum) {
     EXPECT_EQ(status.halt_reason, "");
     EXPECT_NEAR(filled, 0.25, 1e-12);
 }
+
+TEST(RoutingVenueRules, WaitsForTheCheapVenueMinimumInsteadOfPayingMoreElsewhere) {
+    // Kraken: no fee, minimum 1.0. Coinbase: 10 bps fee, minimum 0.1. Children of 0.2 must wait
+    // for Kraken's minimum rather than pay Coinbase's fee.
+    Engine engine(RiskLimits{1'000'000.0, 100.0}, 10,
+                  {{"kraken", 0.0, 1.0, 0.0, 0.0}, {"coinbase", 10.0, 0.1, 0.0, 0.0}}, 100 * kSec);
+    ASSERT_TRUE(engine.apply_book_snapshot(0, {{99.0, 50.0}}, {{100.0, 50.0}}, 0));
+    ASSERT_TRUE(engine.apply_book_snapshot(1, {{99.0, 50.0}}, {{100.0, 50.0}}, 0));
+    ASSERT_TRUE(engine.submit({"t", Side::Buy, 2.0, 0, 10 * kSec, 10}).accepted);
+    double filled = 0.0;
+    for (std::int64_t t = 0; t <= 10 * kSec; t += kSec / 2) {
+        for (const auto& fill : engine.step(t)) {
+            EXPECT_EQ(fill.venue, "kraken");
+            filled += fill.qty;
+        }
+    }
+    EXPECT_NEAR(filled, 2.0, 1e-12);
+}
+
+TEST(RoutingVenueRules, SingleVenueCostIgnoresMinimumOrderSizes) {
+    // The whole 0.5 goes to Coinbase (below Kraken's minimum), but Kraken alone could still have
+    // bought it at the same price, so its counterfactual is available rather than "n/a".
+    Engine engine(RiskLimits{1'000'000.0, 100.0}, 10,
+                  {{"kraken", 0.0, 1.0, 0.0, 0.0}, {"coinbase", 10.0, 0.1, 0.0, 0.0}}, kSec);
+    ASSERT_TRUE(engine.apply_book_snapshot(0, {{99.0, 5.0}}, {{100.0, 5.0}}, 0));
+    ASSERT_TRUE(engine.apply_book_snapshot(1, {{99.0, 5.0}}, {{100.0, 5.0}}, 0));
+    ASSERT_TRUE(engine.submit({"t", Side::Buy, 0.5, 0, 10 * kSec, 1}).accepted);
+    ASSERT_EQ(engine.step(0).size(), 1u);
+    const auto status = engine.statuses().at(0);
+    EXPECT_TRUE(status.venue_costs[0].available);
+    EXPECT_TRUE(status.venue_costs[1].available);
+    EXPECT_LT(status.venue_costs[0].all_in_bps, status.venue_costs[1].all_in_bps);
+}

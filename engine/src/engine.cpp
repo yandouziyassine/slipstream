@@ -30,15 +30,34 @@ double cost_bps(Side side, double avg_price, double reference) {
     return diff / reference * 1e4;
 }
 
-// Smallest quantity some venue with liquidity would accept, or nullopt when none has any.
-std::optional<double> min_executable(const std::vector<VenueLiquidity>& venues, double ref_price) {
+double venue_minimum(const VenueLiquidity& venue, double ref_price) {
+    return std::max(venue.min_qty, venue.min_notional / ref_price);
+}
+
+// The child waits until it reaches the minimum of the venue with the best fee-adjusted top of
+// book, so small children are not pushed to a pricier venue. Only a remainder that can never
+// reach that minimum may use the smallest minimum of any venue. nullopt: no venue has liquidity.
+std::optional<double> child_minimum(const std::vector<VenueLiquidity>& venues, Side side,
+                                    double ref_price, double remaining) {
+    const VenueLiquidity* best = nullptr;
+    double best_price = 0.0;
     std::optional<double> smallest;
     for (const auto& venue : venues) {
         if (venue.levels.empty()) continue;
-        const double minimum = std::max(venue.min_qty, venue.min_notional / ref_price);
+        const double minimum = venue_minimum(venue, ref_price);
         if (!smallest || minimum < *smallest) smallest = minimum;
+        const double top = venue.levels.front().price;
+        const double price = side == Side::Buy ? top * (1.0 + venue.fee_rate)
+                                               : top * (1.0 - venue.fee_rate);
+        const bool better = side == Side::Buy ? price < best_price : price > best_price;
+        if (best == nullptr || better) {
+            best = &venue;
+            best_price = price;
+        }
     }
-    return smallest;
+    if (best == nullptr) return std::nullopt;
+    const double best_minimum = venue_minimum(*best, ref_price);
+    return remaining >= best_minimum ? best_minimum : smallest;
 }
 
 }  // namespace
@@ -237,12 +256,11 @@ void Engine::advance_locked(ParentOrder& order, std::int64_t now_ns,
     // briefly stale cannot make the order give up; the child waits for fresh venues instead.
     const double registered_minimum = registered_minimum_locked(*ref_price);
     if (complete_if_below_minimum(order, registered_minimum)) return;
-    const auto minimum = min_executable(liquidity, *ref_price);
-    if (minimum && child < *minimum) return;
-    // Never strand a stub no venue will accept: if this child would leave less than every
-    // venue's minimum, take the whole remainder now.
     const double remaining = order.request.qty - order.filled_qty;
-    if (remaining - child < registered_minimum) child = remaining;
+    const auto minimum = child_minimum(liquidity, order.request.side, *ref_price, remaining);
+    if (minimum && child < *minimum) return;
+    // Never strand a stub below the minimum this child is sized for: take the whole remainder.
+    if (minimum && remaining - child < *minimum) child = remaining;
 
     const auto result = route(order.request.side, child, liquidity);
     if (result.filled_qty <= 0.0) return;
@@ -272,8 +290,15 @@ void Engine::advance_locked(ParentOrder& order, std::int64_t now_ns,
             order.venue_available[v] = 0;
             continue;
         }
-        const auto alone = route(order.request.side, result.filled_qty,
-                                 liquidity_locked(order.request.side, now_ns, v, *ref_price));
+        // Price and depth only: a venue trading alone would simply wait for its own minimum,
+        // so minimum order sizes must not mark it unavailable.
+        auto alone_liquidity = liquidity_locked(order.request.side, now_ns, v, *ref_price);
+        for (auto& venue : alone_liquidity) {
+            venue.min_qty = 0.0;
+            venue.qty_step = 0.0;
+            venue.min_notional = 0.0;
+        }
+        const auto alone = route(order.request.side, result.filled_qty, alone_liquidity);
         if (alone.filled_qty < result.filled_qty * (1.0 - 1e-9)) {
             order.venue_available[v] = 0;
         } else {
