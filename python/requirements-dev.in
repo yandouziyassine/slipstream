@@ -7,3 +7,4 @@ ruff>=0.6
 mypy>=1.11
 types-protobuf>=5.27
 pip-audit>=2.7
+hypothesis>=6.100
