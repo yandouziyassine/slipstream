@@ -1,0 +1,26 @@
+{"recv_ns": 1700000000000000000, "msg": {"channel": "book", "type": "snapshot", "data": [{"symbol": "BTC/USD", "bids": [{"price": 99990.0, "qty": 0.5}], "asks": [{"price": 100010.0, "qty": 0.01}]}]}}
+{"recv_ns": 1700000001000000000, "msg": {"channel": "trade", "type": "update", "data": [{"symbol": "BTC/USD", "price": 100000.0, "qty": 0.0001}]}}
+{"recv_ns": 1700000002000000000, "msg": {"channel": "trade", "type": "update", "data": [{"symbol": "BTC/USD", "price": 100000.0, "qty": 0.0001}]}}
+{"recv_ns": 1700000003000000000, "msg": {"channel": "trade", "type": "update", "data": [{"symbol": "BTC/USD", "price": 100000.0, "qty": 0.0001}]}}
+{"recv_ns": 1700000004000000000, "msg": {"channel": "trade", "type": "update", "data": [{"symbol": "BTC/USD", "price": 100000.0, "qty": 0.0001}]}}
+{"recv_ns": 1700000005000000000, "msg": {"channel": "trade", "type": "update", "data": [{"symbol": "BTC/USD", "price": 100000.0, "qty": 0.0001}]}}
+{"recv_ns": 1700000006000000000, "msg": {"channel": "trade", "type": "update", "data": [{"symbol": "BTC/USD", "price": 100000.0, "qty": 0.0001}]}}
+{"recv_ns": 1700000007000000000, "msg": {"channel": "trade", "type": "update", "data": [{"symbol": "BTC/USD", "price": 100000.0, "qty": 0.0001}]}}
+{"recv_ns": 1700000008000000000, "msg": {"channel": "trade", "type": "update", "data": [{"symbol": "BTC/USD", "price": 100000.0, "qty": 0.0001}]}}
+{"recv_ns": 1700000009000000000, "msg": {"channel": "trade", "type": "update", "data": [{"symbol": "BTC/USD", "price": 100000.0, "qty": 0.0001}]}}
+{"recv_ns": 1700000010000000000, "msg": {"channel": "trade", "type": "update", "data": [{"symbol": "BTC/USD", "price": 100000.0, "qty": 0.0001}]}}
+{"recv_ns": 1700000011000000000, "msg": {"channel": "trade", "type": "update", "data": [{"symbol": "BTC/USD", "price": 100000.0, "qty": 0.0001}]}}
+{"recv_ns": 1700000012000000000, "msg": {"channel": "trade", "type": "update", "data": [{"symbol": "BTC/USD", "price": 100000.0, "qty": 0.0001}]}}
+{"recv_ns": 1700000013000000000, "msg": {"channel": "trade", "type": "update", "data": [{"symbol": "BTC/USD", "price": 100000.0, "qty": 0.0001}]}}
+{"recv_ns": 1700000014000000000, "msg": {"channel": "trade", "type": "update", "data": [{"symbol": "BTC/USD", "price": 100000.0, "qty": 0.0001}]}}
+{"recv_ns": 1700000015000000000, "msg": {"channel": "trade", "type": "update", "data": [{"symbol": "BTC/USD", "price": 100000.0, "qty": 0.0001}]}}
+{"recv_ns": 1700000016000000000, "msg": {"channel": "trade", "type": "update", "data": [{"symbol": "BTC/USD", "price": 100000.0, "qty": 0.0001}]}}
+{"recv_ns": 1700000017000000000, "msg": {"channel": "trade", "type": "update", "data": [{"symbol": "BTC/USD", "price": 100000.0, "qty": 0.0001}]}}
+{"recv_ns": 1700000018000000000, "msg": {"channel": "trade", "type": "update", "data": [{"symbol": "BTC/USD", "price": 100000.0, "qty": 0.0001}]}}
+{"recv_ns": 1700000019000000000, "msg": {"channel": "trade", "type": "update", "data": [{"symbol": "BTC/USD", "price": 100000.0, "qty": 0.0001}]}}
+{"recv_ns": 1700000020000000000, "msg": {"channel": "trade", "type": "update", "data": [{"symbol": "BTC/USD", "price": 100000.0, "qty": 0.0001}]}}
+{"recv_ns": 1700000021000000000, "msg": {"channel": "trade", "type": "update", "data": [{"symbol": "BTC/USD", "price": 100000.0, "qty": 0.0001}]}}
+{"recv_ns": 1700000022000000000, "msg": {"channel": "trade", "type": "update", "data": [{"symbol": "BTC/USD", "price": 100000.0, "qty": 0.0001}]}}
+{"recv_ns": 1700000023000000000, "msg": {"channel": "trade", "type": "update", "data": [{"symbol": "BTC/USD", "price": 100000.0, "qty": 0.0001}]}}
+{"recv_ns": 1700000024000000000, "msg": {"channel": "trade", "type": "update", "data": [{"symbol": "BTC/USD", "price": 100000.0, "qty": 0.0001}]}}
+{"recv_ns": 1700000025000000000, "msg": {"channel": "trade", "type": "update", "data": [{"symbol": "BTC/USD", "price": 100000.0, "qty": 0.0001}]}}
