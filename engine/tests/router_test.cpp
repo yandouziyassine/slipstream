@@ -69,6 +69,91 @@ TEST(Router, FeeFreeSingleVenueMatchesFillSimulator) {
     EXPECT_DOUBLE_EQ(routed.gross_notional / routed.filled_qty, simulated.avg_price);
 }
 
+TEST(Router, QtyStepFloorsLegAndTrimsTheWorstPrice) {
+    VenueLiquidity venue{0, 0.001, {{100.0, 0.02}, {101.0, 0.05}}};
+    venue.qty_step = 0.01;
+    const auto result = route(Side::Buy, 0.037, {venue});
+    ASSERT_EQ(result.legs.size(), 1u);
+    EXPECT_NEAR(result.legs[0].qty, 0.03, 1e-12);
+    EXPECT_NEAR(result.legs[0].gross_notional, 0.02 * 100.0 + 0.01 * 101.0, 1e-9);
+    EXPECT_NEAR(result.legs[0].fee, (0.02 * 100.0 + 0.01 * 101.0) * 0.001, 1e-12);
+    EXPECT_NEAR(result.filled_qty, 0.03, 1e-12);
+    EXPECT_NEAR(result.gross_notional, 3.01, 1e-9);
+    EXPECT_NEAR(result.fees, 0.00301, 1e-12);
+}
+
+TEST(Router, QtyStepFloorsToZeroDropsTheLeg) {
+    VenueLiquidity venue{0, 0.0, {{100.0, 1.0}}};
+    venue.qty_step = 0.01;
+    const auto result = route(Side::Buy, 0.004, {venue});
+    EXPECT_TRUE(result.legs.empty());
+    EXPECT_DOUBLE_EQ(result.filled_qty, 0.0);
+    EXPECT_DOUBLE_EQ(result.gross_notional, 0.0);
+}
+
+TEST(Router, ExactStepMultipleIsNotFlooredAway) {
+    VenueLiquidity venue{0, 0.0, {{100.0, 1.0}}};
+    venue.qty_step = 0.00000001;
+    venue.min_qty = 0.00005;
+    const auto result = route(Side::Buy, 0.00005, {venue});
+    ASSERT_EQ(result.legs.size(), 1u);
+    EXPECT_NEAR(result.legs[0].qty, 0.00005, 1e-15);
+}
+
+TEST(Router, LegBelowMinQtyIsDroppedAndOtherLegSurvives) {
+    VenueLiquidity thin{1, 0.0, {{100.1, 1.0}}};
+    thin.min_qty = 0.6;
+    const auto result = route(Side::Buy, 1.0, {{0, 0.0, {{100.0, 0.5}}}, thin});
+    ASSERT_EQ(result.legs.size(), 1u);
+    EXPECT_EQ(result.legs[0].venue, 0u);
+    EXPECT_DOUBLE_EQ(result.filled_qty, 0.5);
+    EXPECT_DOUBLE_EQ(result.gross_notional, 50.0);
+    EXPECT_DOUBLE_EQ(result.fees, 0.0);
+}
+
+TEST(Router, LegBelowMinNotionalIsDropped) {
+    VenueLiquidity small{1, 0.01, {{100.1, 1.0}}};
+    small.min_notional = 60.0;
+    const auto result = route(Side::Buy, 1.0, {{0, 0.0, {{100.0, 0.5}}}, small});
+    ASSERT_EQ(result.legs.size(), 1u);
+    EXPECT_EQ(result.legs[0].venue, 0u);
+    EXPECT_DOUBLE_EQ(result.filled_qty, 0.5);
+    EXPECT_DOUBLE_EQ(result.fees, 0.0);
+
+    small.min_notional = 50.0;
+    EXPECT_EQ(route(Side::Buy, 1.0, {{0, 0.0, {{100.0, 0.5}}}, small}).legs.size(), 2u);
+}
+
+TEST(Router, SellLegsAreFlooredAndCheckedToo) {
+    VenueLiquidity venue{0, 0.0, {{100.0, 0.02}, {99.0, 0.05}}};
+    venue.qty_step = 0.01;
+    venue.min_notional = 2.5;
+    const auto result = route(Side::Sell, 0.037, {venue});
+    ASSERT_EQ(result.legs.size(), 1u);
+    EXPECT_NEAR(result.gross_notional, 0.02 * 100.0 + 0.01 * 99.0, 1e-9);
+    EXPECT_TRUE(route(Side::Sell, 0.024, {venue}).legs.empty());
+}
+
+TEST(Router, ZeroRulesReproduceTheUnconstrainedWalk) {
+    const std::vector<VenueLiquidity> plain{{0, 0.004, {{100.0, 1.0}}},
+                                            {1, 0.0, {{100.3, 0.5}, {100.6, 5.0}}}};
+    const std::vector<VenueLiquidity> zero_rules{
+        {0, 0.004, {{100.0, 1.0}}, 0.0, 0.0, 0.0},
+        {1, 0.0, {{100.3, 0.5}, {100.6, 5.0}}, 0.0, 0.0, 0.0}};
+    const auto a = route(Side::Buy, 1.2, plain);
+    const auto b = route(Side::Buy, 1.2, zero_rules);
+    ASSERT_EQ(a.legs.size(), b.legs.size());
+    for (std::size_t i = 0; i < a.legs.size(); ++i) {
+        EXPECT_EQ(a.legs[i].venue, b.legs[i].venue);
+        EXPECT_EQ(a.legs[i].qty, b.legs[i].qty);
+        EXPECT_EQ(a.legs[i].gross_notional, b.legs[i].gross_notional);
+        EXPECT_EQ(a.legs[i].fee, b.legs[i].fee);
+    }
+    EXPECT_DOUBLE_EQ(a.filled_qty, 1.2);
+    EXPECT_DOUBLE_EQ(a.gross_notional, 0.5 * 100.3 + 0.7 * 100.0);
+    EXPECT_DOUBLE_EQ(a.fees, 0.7 * 100.0 * 0.004);
+}
+
 TEST(Router, RoutedAllInNeverWorseThanAnySingleVenue) {
     std::mt19937 rng(7);
     std::uniform_real_distribution<double> price(99.0, 101.0);
@@ -92,4 +177,15 @@ TEST(Router, RoutedAllInNeverWorseThanAnySingleVenue) {
             EXPECT_LE(all_in_notional(Side::Buy, routed), all_in_notional(Side::Buy, alone) + 1e-9);
         }
     }
+}
+
+TEST(Router, DroppedLegIsReroutedToTheNextVenue) {
+    // Venue 0 is cheaper but its minimum is above the child, so the child goes to venue 1.
+    VenueLiquidity big_minimum{0, 0.0, {{100.0, 1.0}}};
+    big_minimum.min_qty = 0.6;
+    const auto result = route(Side::Buy, 0.5, {big_minimum, {1, 0.0, {{100.1, 1.0}}}});
+    ASSERT_EQ(result.legs.size(), 1u);
+    EXPECT_EQ(result.legs[0].venue, 1u);
+    EXPECT_DOUBLE_EQ(result.filled_qty, 0.5);
+    EXPECT_DOUBLE_EQ(result.gross_notional, 0.5 * 100.1);
 }

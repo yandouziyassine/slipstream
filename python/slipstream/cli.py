@@ -22,12 +22,15 @@ from slipstream.recorder import RecordError, open_new_file, record_stream, write
 from slipstream.replay import ReplayError, read_calibration, read_replay, run_replay
 from slipstream.runner import ExecutionRunner, OrderRejectedError
 from slipstream.v1 import execution_pb2 as pb
+from slipstream.venue_rules import VenueRules, VenueRulesError, fetch_venue_rules
 
 _SYMBOL = re.compile(r"^[A-Z0-9]{2,10}/[A-Z0-9]{2,10}$")
 _ORDER_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 _DEADLINE_GRACE_S = 60
 ALGOS = ("twap", "vwap", "pov", "almgren_chriss")
 _CALIBRATED = ("vwap", "almgren_chriss")
+_DEPTH_CHECKED_COMMANDS = ("live", "compare")
+_FULL_FILL_TOL = 1e-9
 
 
 def _positive_float(value: str) -> float:
@@ -85,6 +88,36 @@ def _venues(value: str) -> tuple[Venue, ...]:
     return tuple(cast(Venue, name) for name in dict.fromkeys(names))
 
 
+def _fees(value: str) -> dict[Venue, float]:
+    fees: dict[Venue, float] = {}
+    entries = [entry.strip() for entry in value.split(",") if entry.strip()]
+    if not entries:
+        raise argparse.ArgumentTypeError(f"fees must be a comma list of {', '.join(VENUES)}=bps")
+    for entry in entries:
+        name, sep, raw = entry.partition("=")
+        if not sep or not raw or name not in VENUES:
+            raise argparse.ArgumentTypeError(
+                f"fees must be a comma list of {', '.join(VENUES)}=bps"
+            )
+        if name in fees:
+            raise argparse.ArgumentTypeError(f"duplicate fee for {name!r}")
+        try:
+            bps = float(raw)
+        except ValueError as exc:
+            raise argparse.ArgumentTypeError(f"fee for {name!r} is not a number") from exc
+        if not math.isfinite(bps) or not 0 <= bps <= 1000:
+            raise argparse.ArgumentTypeError(f"fee for {name!r} must be in [0, 1000]")
+        fees[name] = bps
+    return fees
+
+
+def _plain(value: float) -> str:
+    # format(x, "f") only keeps 6 decimal digits by default, which rounds a qty_step of
+    # 1e-08 down to zero. 12 digits covers Kraken's lot_decimals (0..12) without exponents.
+    text = format(value, ".12f").rstrip("0").rstrip(".")
+    return text if text else "0"
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="slipstream",
@@ -129,6 +162,12 @@ def build_parser() -> argparse.ArgumentParser:
             default=("kraken",),
             help="comma list of venues; must match the engine's --venue flags",
         )
+    venue_flags = commands.add_parser(
+        "venue-flags", help="fetch venue trading rules and print engine --venue flags"
+    )
+    venue_flags.add_argument("--venues", type=_venues, default=("kraken",))
+    venue_flags.add_argument("--fees", type=_fees, required=True, help="kraken=40,coinbase=60")
+    venue_flags.add_argument("--symbol", type=_symbol, default="BTC/USD")
     return parser
 
 
@@ -148,6 +187,25 @@ def _bps(value: float | None) -> str:
     return "n/a" if value is None else f"{_num(value)} bps"
 
 
+def _fully_filled(status: pb.OrderStatus) -> bool:
+    threshold = status.total_qty * (1 - _FULL_FILL_TOL)
+    return status.filled_qty >= threshold and status.immediate_filled_qty >= threshold
+
+
+def saved_bps(status: pb.OrderStatus) -> float | None:
+    """immediate_cost_bps - slippage_bps, but only when both the order and the one-shot
+    benchmark could actually fill in full; a partial fill makes the comparison meaningless."""
+    if not _fully_filled(status):
+        return None
+    return status.immediate_cost_bps - status.slippage_bps
+
+
+def _filled_pct(status: pb.OrderStatus) -> float:
+    if status.total_qty <= 0:
+        return 0.0
+    return status.filled_qty / status.total_qty * 100.0
+
+
 def format_summary(status: pb.OrderStatus) -> str:
     state = pb.OrderState.Name(status.state).removeprefix("ORDER_STATE_")
     lines = [
@@ -155,11 +213,12 @@ def format_summary(status: pb.OrderStatus) -> str:
         f"algo         {status.algo or 'twap'}",
         f"state        {state}",
         f"filled       {status.filled_qty:.8g} / {status.total_qty:.8g}",
+        f"filled %     {_filled_pct(status):.2f}%",
         f"avg price    {status.avg_fill_price:.2f}",
         f"arrival mid  {status.arrival_mid:.2f}",
         f"slippage     {status.slippage_bps:.2f} bps",
         f"one-shot     {status.immediate_cost_bps:.2f} bps (single market order at arrival)",
-        f"saved        {status.immediate_cost_bps - status.slippage_bps:.2f} bps",
+        f"saved        {_bps(saved_bps(status))}",
     ]
     lines += [
         f"fees         {status.fees_bps:.2f} bps ({status.fees_paid:.2f} paid)",
@@ -178,22 +237,25 @@ def format_summary(status: pb.OrderStatus) -> str:
 def format_comparison(statuses: Sequence[pb.OrderStatus], fills: Sequence[Fill]) -> str:
     venues = [cost.venue for cost in statuses[0].venue_costs] if statuses else []
     multi = len(venues) > 1
+    show_reason = any(status.halt_reason for status in statuses)
     header = (
-        f"{'algo':<16}{'state':<11}{'filled':>10}{'avg px':>12}{'slip bps':>10}"
+        f"{'algo':<16}{'state':<11}{'filled':>10}{'filled %':>10}{'avg px':>12}{'slip bps':>10}"
         f"{'1-shot bps':>12}{'saved bps':>11}{'fee bps':>9}{'all-in bps':>12}"
     )
     if multi:
         header += "".join(f"{venue + ' bps':>14}" for venue in venues) + f"{'gain bps':>10}"
-    rows = [header + f"{'fills':>7}"]
+    header += f"{'fills':>7}"
+    if show_reason:
+        header += f"{'reason':>20}"
+    rows = [header]
     for status in statuses:
         state = pb.OrderState.Name(status.state).removeprefix("ORDER_STATE_")
         count = sum(1 for fill in fills if fill.order_id == status.order_id)
-        saved = status.immediate_cost_bps - status.slippage_bps
         row = (
             f"{status.algo:<16}{state:<11}{status.filled_qty:>10.8g}"
-            f"{status.avg_fill_price:>12.2f}{status.slippage_bps:>10.2f}"
-            f"{status.immediate_cost_bps:>12.2f}{saved:>11.2f}"
-            f"{status.fees_bps:>9.2f}{status.routed_all_in_bps:>12.2f}"
+            f"{_filled_pct(status):>9.2f}%{status.avg_fill_price:>12.2f}"
+            f"{status.slippage_bps:>10.2f}{status.immediate_cost_bps:>12.2f}"
+            f"{_num(saved_bps(status)):>11}{status.fees_bps:>9.2f}{status.routed_all_in_bps:>12.2f}"
         )
         if multi:
             row += "".join(
@@ -201,7 +263,10 @@ def format_comparison(statuses: Sequence[pb.OrderStatus], fills: Sequence[Fill])
                 for cost in status.venue_costs
             )
             row += f"{_num(routing_gain_bps(status)):>10}"
-        rows.append(row + f"{count:>7}")
+        row += f"{count:>7}"
+        if show_reason:
+            row += f"{(status.halt_reason or '-'):>20}"
+        rows.append(row)
     return "\n".join(rows)
 
 
@@ -263,11 +328,59 @@ def _record(args: argparse.Namespace, log: logging.Logger) -> int:
     return 0
 
 
+def _venue_flags(args: argparse.Namespace, log: logging.Logger) -> int:
+    missing = [venue for venue in args.venues if venue not in args.fees]
+    if missing:
+        log.error(f"missing --fees entries for {', '.join(missing)}")
+        return 1
+    try:
+        rules: dict[Venue, VenueRules] = fetch_venue_rules(args.venues, args.symbol)
+    except (VenueRulesError, OSError) as exc:
+        log.error(str(exc))
+        return 1
+    for venue in args.venues:
+        r = rules[venue]
+        print("--venue")
+        print(
+            f"{venue}:fee_bps={_plain(args.fees[venue])},min_qty={_plain(r.min_qty)},"
+            f"qty_step={_plain(r.qty_step)},min_notional={_plain(r.min_notional)}"
+        )
+    return 0
+
+
+def _print_result(
+    args: argparse.Namespace, statuses: Sequence[pb.OrderStatus], fills: Sequence[Fill]
+) -> None:
+    if args.command == "compare":
+        print(format_comparison(statuses, fills))
+    else:
+        print(format_summary(statuses[0]))
+
+
+def _print_best_effort(
+    args: argparse.Namespace, runner: ExecutionRunner | None, log: logging.Logger
+) -> None:
+    """Best-effort summary/table after a failure that happened once an order might already be
+    working: show whatever the engine reports rather than nothing. If the status RPC itself
+    fails, just log it and give up."""
+    if runner is None:
+        return
+    try:
+        statuses = runner.order_statuses()
+    except EngineError as exc:
+        log.error(f"could not fetch final order status: {exc}")
+        return
+    if statuses:
+        _print_result(args, statuses, runner.fills)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     log = configure_logging()
     if args.command == "record":
         return _record(args, log)
+    if args.command == "venue-flags":
+        return _venue_flags(args, log)
     try:
         settings = load_settings()
         specs = _order_specs(args)
@@ -276,6 +389,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     except (ConfigError, CalibrationError, MarketDataError, ReplayError, OSError) as exc:
         log.error(str(exc))
         return 1
+    runner: ExecutionRunner | None = None
     try:
         client.wait_ready()
         fees = client.venue_fees()
@@ -285,6 +399,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "start the engine with one --venue flag per venue"
             )
             return 1
+        if args.command in _DEPTH_CHECKED_COMMANDS:
+            engine_depth = client.book_depth()
+            if engine_depth > args.depth:
+                log.error(
+                    f"engine book depth {engine_depth} exceeds --depth {args.depth}: levels "
+                    "outside the subscribed depth would look like phantom liquidity"
+                )
+                return 1
         runner = ExecutionRunner(
             client,
             specs,
@@ -307,10 +429,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if not statuses:
             log.error("order was never submitted (no order book snapshot received)")
             return 1
-        if args.command == "compare":
-            print(format_comparison(statuses, runner.fills))
-        else:
-            print(format_summary(statuses[0]))
+        _print_result(args, statuses, runner.fills)
         return 0
     except (
         EngineError,
@@ -322,6 +441,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         OSError,
     ) as exc:
         log.error(str(exc))
+        _print_best_effort(args, runner, log)
         return 1
     finally:
         client.close()

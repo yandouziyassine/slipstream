@@ -19,7 +19,6 @@ public:
 private:
     VwapSchedule(const SliceParams& params, std::vector<double> cumulative_fraction);
 
-    SliceParams params_;
     std::vector<double> cumulative_fraction_;
 };
 

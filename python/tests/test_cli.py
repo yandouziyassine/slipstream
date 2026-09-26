@@ -3,9 +3,18 @@ from pathlib import Path
 
 import pytest
 
-from slipstream.cli import build_parser, format_comparison, format_summary, main, routing_gain_bps
+from slipstream.cli import (
+    build_parser,
+    format_comparison,
+    format_summary,
+    main,
+    routing_gain_bps,
+    saved_bps,
+)
+from slipstream.engine_client import EngineError
 from slipstream.models import Fill
 from slipstream.v1 import execution_pb2 as pb
+from slipstream.venue_rules import VenueRules, VenueRulesError
 
 BASE = ["replay", "--file", "x.jsonl", "--side", "buy", "--duration", "6", "--slices", "3"]
 
@@ -37,6 +46,7 @@ def test_format_summary() -> None:
         state=pb.ORDER_STATE_COMPLETED,
         total_qty=0.06,
         filled_qty=0.06,
+        immediate_filled_qty=0.06,
         avg_fill_price=100008.333,
         arrival_mid=100000.0,
         slippage_bps=0.8333,
@@ -47,6 +57,42 @@ def test_format_summary() -> None:
     assert "0.83 bps" in text
     assert "1.67 bps" in text
     assert "saved        0.83 bps" in text
+    assert "filled %     100.00%" in text
+
+
+def test_saved_is_na_when_the_order_did_not_fully_fill() -> None:
+    status = pb.OrderStatus(total_qty=1.0, filled_qty=0.5, immediate_filled_qty=1.0)
+    assert saved_bps(status) is None
+    assert "saved        n/a" in format_summary(status)
+
+
+def test_saved_is_na_when_the_immediate_benchmark_could_not_fully_fill() -> None:
+    status = pb.OrderStatus(total_qty=1.0, filled_qty=1.0, immediate_filled_qty=0.9)
+    assert saved_bps(status) is None
+    assert "saved        n/a" in format_summary(status)
+
+
+def test_saved_has_a_value_when_both_the_order_and_the_benchmark_fully_fill() -> None:
+    status = pb.OrderStatus(
+        total_qty=1.0,
+        filled_qty=1.0,
+        immediate_filled_qty=1.0,
+        immediate_cost_bps=2.0,
+        slippage_bps=0.5,
+    )
+    assert saved_bps(status) == pytest.approx(1.5)
+    assert "saved        1.50 bps" in format_summary(status)
+
+
+def test_saved_tolerates_float_noise_just_under_full_fill() -> None:
+    status = pb.OrderStatus(
+        total_qty=1.0,
+        filled_qty=1.0 - 1e-12,
+        immediate_filled_qty=1.0 - 1e-12,
+        immediate_cost_bps=2.0,
+        slippage_bps=0.5,
+    )
+    assert saved_bps(status) == pytest.approx(1.5)
 
 
 def test_live_mode_env_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -136,7 +182,9 @@ def test_format_comparison_table() -> None:
             order_id="a",
             algo="twap",
             state=pb.ORDER_STATE_COMPLETED,
+            total_qty=1.0,
             filled_qty=1.0,
+            immediate_filled_qty=1.0,
             avg_fill_price=101.0,
             slippage_bps=100.0,
             immediate_cost_bps=150.0,
@@ -145,7 +193,9 @@ def test_format_comparison_table() -> None:
             order_id="b",
             algo="pov",
             state=pb.ORDER_STATE_HALTED,
+            total_qty=1.0,
             filled_qty=0.5,
+            immediate_filled_qty=1.0,
             avg_fill_price=101.0,
             slippage_bps=100.0,
             immediate_cost_bps=150.0,
@@ -157,6 +207,8 @@ def test_format_comparison_table() -> None:
         "algo",
         "state",
         "filled",
+        "filled",
+        "%",
         "avg",
         "px",
         "slip",
@@ -175,6 +227,7 @@ def test_format_comparison_table() -> None:
         "twap",
         "COMPLETED",
         "1",
+        "100.00%",
         "101.00",
         "100.00",
         "150.00",
@@ -187,14 +240,40 @@ def test_format_comparison_table() -> None:
         "pov",
         "HALTED",
         "0.5",
+        "50.00%",
         "101.00",
         "100.00",
         "150.00",
-        "50.00",
+        "n/a",
         "0.00",
         "0.00",
         "1",
     ]
+
+
+def test_comparison_table_appends_reason_column_when_any_halt_reason_present() -> None:
+    statuses = [
+        pb.OrderStatus(order_id="a", algo="twap", state=pb.ORDER_STATE_COMPLETED, filled_qty=1.0),
+        pb.OrderStatus(
+            order_id="b",
+            algo="pov",
+            state=pb.ORDER_STATE_HALTED,
+            filled_qty=0.5,
+            halt_reason="deadline reached",
+        ),
+    ]
+    lines = format_comparison(statuses, []).splitlines()
+    assert lines[0].split()[-1] == "reason"
+    assert lines[1].split()[-1] == "-"
+    assert lines[2].split()[-2:] == ["deadline", "reached"]
+
+
+def test_comparison_table_omits_reason_column_when_no_halts() -> None:
+    statuses = [
+        pb.OrderStatus(order_id="a", algo="twap", state=pb.ORDER_STATE_COMPLETED, filled_qty=1.0)
+    ]
+    lines = format_comparison(statuses, []).splitlines()
+    assert "reason" not in lines[0]
 
 
 def test_summary_shows_algo() -> None:
@@ -327,8 +406,67 @@ class _FakeClient:
     def venue_fees(self) -> dict[str, float]:
         return {"kraken": 40.0}
 
+    def book_depth(self) -> int:
+        return 10
+
     def close(self) -> None:
         self.closed = True
+
+
+class _DeepBookFakeClient(_FakeClient):
+    def book_depth(self) -> int:
+        return 25
+
+
+def test_live_refuses_when_engine_book_depth_exceeds_cli_depth(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.delenv("SLIPSTREAM_PAPER_MODE", raising=False)
+    monkeypatch.setattr("slipstream.cli.EngineClient", _DeepBookFakeClient)
+    code = main(["live", "--side", "buy", "--qty", "1", "--duration", "6", "--slices", "3"])
+    assert code == 1
+    assert "book depth" in capsys.readouterr().err
+
+
+def test_compare_refuses_when_engine_book_depth_exceeds_cli_depth(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.delenv("SLIPSTREAM_PAPER_MODE", raising=False)
+    monkeypatch.setattr("slipstream.cli.EngineClient", _DeepBookFakeClient)
+    code = main(["compare", "--side", "buy", "--qty", "1", "--duration", "6", "--slices", "3"])
+    assert code == 1
+    assert "book depth" in capsys.readouterr().err
+
+
+def test_replay_does_not_check_book_depth(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("SLIPSTREAM_PAPER_MODE", raising=False)
+
+    class _AssertNoDepthCallClient(_FakeClient):
+        def book_depth(self) -> int:
+            raise AssertionError("book_depth should not be called for replay")
+
+        def status(self) -> pb.StatusReply:
+            return pb.StatusReply()
+
+    monkeypatch.setattr("slipstream.cli.EngineClient", _AssertNoDepthCallClient)
+    file = tmp_path / "empty.jsonl"
+    file.write_text("", encoding="utf-8")
+    code = main(
+        [
+            "replay",
+            "--file",
+            str(file),
+            "--side",
+            "buy",
+            "--qty",
+            "1",
+            "--duration",
+            "6",
+            "--slices",
+            "3",
+        ]
+    )
+    assert code == 1  # order never submitted (empty file); proves book_depth() was never called
 
 
 def test_venue_mismatch_with_engine_is_refused(
@@ -430,3 +568,211 @@ def test_float_noise_gain_never_prints_negative_zero() -> None:
     assert "routing gain 0.00 bps" in format_summary(status)
     row = format_comparison([status], []).splitlines()[1]
     assert "-0.00" not in row
+
+
+VENUE_FLAGS_BASE = ["venue-flags", "--venues", "kraken,coinbase", "--fees", "kraken=40,coinbase=60"]
+
+
+def test_fees_parses_valid_list() -> None:
+    args = build_parser().parse_args(VENUE_FLAGS_BASE)
+    assert args.fees == {"kraken": 40.0, "coinbase": 60.0}
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "",
+        "kraken",
+        "kraken=",
+        "kraken=abc",
+        "kraken=-1",
+        "kraken=1001",
+        "kraken=nan",
+        "kraken=inf",
+        "kraken=40,kraken=50",
+        "binance=1",
+        ",",
+    ],
+)
+def test_fees_rejects_bad_entries(value: str) -> None:
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["venue-flags", "--venues", "kraken", "--fees", value])
+
+
+def test_venue_flags_requires_fees() -> None:
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["venue-flags", "--venues", "kraken"])
+
+
+def test_venue_flags_default_symbol() -> None:
+    args = build_parser().parse_args(VENUE_FLAGS_BASE)
+    assert args.symbol == "BTC/USD"
+
+
+def test_venue_flags_prints_plain_decimal_engine_args(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def fake_fetch(venues: object, symbol: str) -> dict[str, VenueRules]:
+        assert symbol == "BTC/USD"
+        return {
+            "kraken": VenueRules(min_qty=0.00005, qty_step=1e-08, min_notional=0.5),
+            "coinbase": VenueRules(min_qty=1e-08, qty_step=1e-08, min_notional=1.0),
+        }
+
+    monkeypatch.setattr("slipstream.cli.fetch_venue_rules", fake_fetch)
+    assert main(VENUE_FLAGS_BASE) == 0
+    out = capsys.readouterr().out.splitlines()
+    assert out == [
+        "--venue",
+        "kraken:fee_bps=40,min_qty=0.00005,qty_step=0.00000001,min_notional=0.5",
+        "--venue",
+        "coinbase:fee_bps=60,min_qty=0.00000001,qty_step=0.00000001,min_notional=1",
+    ]
+    for line in out:
+        assert "e-" not in line
+        assert "E" not in line
+
+
+def test_venue_flags_zero_rules_print_as_bare_zero(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def fake_fetch(venues: object, symbol: str) -> dict[str, VenueRules]:
+        return {"kraken": VenueRules(min_qty=0.0, qty_step=0.0, min_notional=0.0)}
+
+    monkeypatch.setattr("slipstream.cli.fetch_venue_rules", fake_fetch)
+    assert main(["venue-flags", "--venues", "kraken", "--fees", "kraken=0"]) == 0
+    out = capsys.readouterr().out.splitlines()
+    assert out == ["--venue", "kraken:fee_bps=0,min_qty=0,qty_step=0,min_notional=0"]
+
+
+def test_venue_flags_missing_fee_for_venue_is_refused(capsys: pytest.CaptureFixture[str]) -> None:
+    assert main(["venue-flags", "--venues", "kraken,coinbase", "--fees", "kraken=40"]) == 1
+    assert "coinbase" in capsys.readouterr().err
+
+
+def test_venue_flags_exits_1_on_venue_rules_error(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def fake_fetch(venues: object, symbol: str) -> dict[str, VenueRules]:
+        raise VenueRulesError("boom")
+
+    monkeypatch.setattr("slipstream.cli.fetch_venue_rules", fake_fetch)
+    assert main(VENUE_FLAGS_BASE) == 1
+    assert "boom" in capsys.readouterr().err
+
+
+def test_venue_flags_exits_1_on_os_error(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def fake_fetch(venues: object, symbol: str) -> dict[str, VenueRules]:
+        raise OSError("network down")
+
+    monkeypatch.setattr("slipstream.cli.fetch_venue_rules", fake_fetch)
+    assert main(VENUE_FLAGS_BASE) == 1
+    assert "network down" in capsys.readouterr().err
+
+
+def test_venue_flags_does_not_require_paper_mode_or_engine(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("SLIPSTREAM_PAPER_MODE", "false")
+
+    def fake_fetch(venues: object, symbol: str) -> dict[str, VenueRules]:
+        return {"kraken": VenueRules(min_qty=0.0, qty_step=0.0, min_notional=0.0)}
+
+    monkeypatch.setattr("slipstream.cli.fetch_venue_rules", fake_fetch)
+    assert main(["venue-flags", "--venues", "kraken", "--fees", "kraken=1"]) == 0
+
+
+def _bad_replay_file(tmp_path: Path) -> Path:
+    """A snapshot (submits the order) followed by a non-decreasing-timestamp violation."""
+    snapshot = {
+        "channel": "book",
+        "type": "snapshot",
+        "data": [
+            {
+                "symbol": "BTC/USD",
+                "bids": [{"price": 99.0, "qty": 1.0}],
+                "asks": [{"price": 101.0, "qty": 1.0}],
+            }
+        ],
+    }
+    file = tmp_path / "bad_after_submit.jsonl"
+    lines = [
+        json.dumps({"recv_ns": 100, "msg": snapshot}),
+        json.dumps({"recv_ns": 50, "msg": {"channel": "heartbeat"}}),
+    ]
+    file.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return file
+
+
+def test_replay_failure_after_submission_still_prints_the_summary(
+    tmp_path: Path,
+    engine_address: str,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("SLIPSTREAM_PAPER_MODE", raising=False)
+    file = _bad_replay_file(tmp_path)
+    code = main(
+        [
+            "replay",
+            "--file",
+            str(file),
+            "--side",
+            "buy",
+            "--qty",
+            "1.0",
+            "--duration",
+            "6",
+            "--slices",
+            "3",
+            "--algo",
+            "twap",
+            "--engine",
+            engine_address,
+        ]
+    )
+    assert code == 1
+    out = capsys.readouterr()
+    assert "non-decreasing" in out.err
+    assert "order        " in out.out
+
+
+def test_best_effort_summary_just_logs_when_the_status_call_itself_fails(
+    tmp_path: Path,
+    engine_address: str,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("SLIPSTREAM_PAPER_MODE", raising=False)
+    file = _bad_replay_file(tmp_path)
+
+    def always_fails(self: object) -> list[pb.OrderStatus]:
+        raise EngineError("status rpc failed")
+
+    monkeypatch.setattr("slipstream.runner.ExecutionRunner.order_statuses", always_fails)
+    code = main(
+        [
+            "replay",
+            "--file",
+            str(file),
+            "--side",
+            "buy",
+            "--qty",
+            "1.0",
+            "--duration",
+            "6",
+            "--slices",
+            "3",
+            "--algo",
+            "twap",
+            "--engine",
+            engine_address,
+        ]
+    )
+    assert code == 1
+    out = capsys.readouterr()
+    assert "non-decreasing" in out.err
+    assert "status rpc failed" in out.err
+    assert out.out == ""

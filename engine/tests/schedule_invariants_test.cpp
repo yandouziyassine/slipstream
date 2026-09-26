@@ -36,6 +36,30 @@ void expect_monotone_and_bounded(const Schedule& schedule, double total, std::mt
 
 }  // namespace
 
+TEST(ScheduleInvariants, SlicedSchedulesReleaseEverythingBeforeTheyExpire) {
+    std::mt19937 rng(11);
+    std::uniform_int_distribution<std::int32_t> slices_dist(1, kMaxSlices);
+    std::uniform_int_distribution<std::int64_t> extra_dist(0, 5000);
+    for (int trial = 0; trial < 200; ++trial) {
+        const std::int32_t slices = slices_dist(rng);
+        const SliceParams params{1.5, 7, slices + extra_dist(rng), slices};
+        std::vector<double> weights(static_cast<std::size_t>(slices), 1.0);
+        const auto twap = TwapSchedule::create(params);
+        const auto vwap = VwapSchedule::create(params, weights);
+        const auto ac = AlmgrenChrissSchedule::create(params, 1.0, 1.0, 1.0);
+        ASSERT_TRUE(twap && vwap && ac);
+        const std::int64_t last_ns = params.start_ns + params.duration_ns - 1;
+        for (const Schedule* schedule : {static_cast<const Schedule*>(&*twap),
+                                         static_cast<const Schedule*>(&*vwap),
+                                         static_cast<const Schedule*>(&*ac)}) {
+            EXPECT_EQ(schedule->target_qty_at(last_ns, MarketState{0.0}), params.total_qty)
+                << schedule->name() << " slices " << slices;
+            EXPECT_FALSE(schedule->expired(last_ns)) << schedule->name();
+            EXPECT_TRUE(schedule->expired(last_ns + 1)) << schedule->name();
+        }
+    }
+}
+
 TEST(ScheduleInvariants, AllSchedulesAreMonotoneAndBounded) {
     std::mt19937 rng(42);
     std::uniform_int_distribution<std::int32_t> slices_dist(1, 50);

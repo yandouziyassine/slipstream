@@ -15,13 +15,15 @@ from slipstream.models import (
     MarketDataError,
     OrderSpec,
     ScheduleParams,
+    StepResult,
     TradeBatch,
     Venue,
 )
 from slipstream.v1 import execution_pb2 as pb
 
-_TERMINAL_STATES = (pb.ORDER_STATE_COMPLETED, pb.ORDER_STATE_HALTED)
 _VALID_VENUES: frozenset[Venue] = frozenset(VENUES)
+# Heartbeats may keep a venue fresh only this long after its last real book change.
+MAX_QUIET_BOOK_NS = 30_000_000_000
 
 _Parser = Callable[[str | bytes], BookUpdate | TradeBatch | None]
 
@@ -32,7 +34,7 @@ class Engine(Protocol):
     def submit(
         self, spec: OrderSpec, start_ns: int, params: ScheduleParams | None = None
     ) -> tuple[bool, str]: ...
-    def step(self, now_ns: int) -> list[Fill]: ...
+    def step(self, now_ns: int) -> StepResult: ...
     def status(self) -> pb.StatusReply: ...
 
 
@@ -76,6 +78,8 @@ class ExecutionRunner:
             self._parsers["coinbase"] = CoinbaseStream(symbol, book_depth).parse
         self._snapshot_venues: set[Venue] = set()
         self._submitted = False
+        self._last_book_ns: dict[Venue, int] = {}
+        self._working = 0
         self.fills: list[Fill] = []
 
     @property
@@ -90,15 +94,23 @@ class ExecutionRunner:
         if isinstance(update, BookUpdate):
             self._check_symbol(update.symbol)
             self._engine.apply_book(update, now_ns)
-            self._books[venue].apply(update)
-            if update.is_snapshot and not self._submitted:
-                self._snapshot_venues.add(venue)
-                if self._snapshot_venues >= self._venues:
-                    self._submit_all(now_ns)
+            self._last_book_ns[venue] = now_ns
+            if not self._submitted:
+                self._books[venue].apply(update)
+                if update.is_snapshot:
+                    self._snapshot_venues.add(venue)
+                    if self._snapshot_venues >= self._venues:
+                        self._submit_all(now_ns)
         elif isinstance(update, TradeBatch):
             self._check_symbol(update.symbol)
             if not update.is_snapshot:
                 self._engine.apply_trades(update)
+        elif (
+            self._submitted and now_ns - self._last_book_ns.get(venue, now_ns) <= MAX_QUIET_BOOK_NS
+        ):
+            # A heartbeat on a live connection means this venue's book is unchanged, not stale.
+            # An empty delta refreshes the engine's freshness clock without touching any level.
+            self._engine.apply_book(BookUpdate(self._symbol, False, (), (), venue), now_ns)
         if self._submitted:
             self._step(now_ns)
 
@@ -111,10 +123,7 @@ class ExecutionRunner:
         return statuses[0] if statuses else None
 
     def is_done(self) -> bool:
-        statuses = self.order_statuses()
-        return len(statuses) == len(self._specs) and all(
-            status.state in _TERMINAL_STATES for status in statuses
-        )
+        return self._submitted and self._working == 0
 
     def _check_symbol(self, symbol: str) -> None:
         if symbol != self._symbol:
@@ -145,9 +154,12 @@ class ExecutionRunner:
                 },
             )
         self._submitted = True
+        self._working = len(self._specs)
 
     def _step(self, now_ns: int) -> None:
-        for fill in self._engine.step(now_ns):
+        result = self._engine.step(now_ns)
+        self._working = result.working_orders
+        for fill in result.fills:
             self.fills.append(fill)
             self._log.info(
                 "fill",

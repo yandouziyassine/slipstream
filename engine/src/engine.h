@@ -46,6 +46,9 @@ struct Fill {
 struct VenueSettings {
     std::string name;
     double fee_bps;
+    double min_qty = 0.0;
+    double qty_step = 0.0;
+    double min_notional = 0.0;
 };
 
 struct VenueCost {
@@ -70,6 +73,7 @@ struct OrderStatus {
     double fees_bps;
     double routed_all_in_bps;
     std::vector<VenueCost> venue_costs;
+    double immediate_filled_qty;
 };
 
 class Engine {
@@ -78,8 +82,11 @@ public:
     static constexpr std::size_t kMaxOrderIdLength = 64;
 
     Engine(RiskLimits limits, std::size_t book_depth);
+    // Widest collar the --max-deviation-bps flag allows; the flag itself defaults to 50.
+    static constexpr double kWidestDeviationBps = 10000.0;
+
     Engine(RiskLimits limits, std::size_t book_depth, std::vector<VenueSettings> venues,
-           std::int64_t stale_ns);
+           std::int64_t stale_ns, double max_deviation_bps = kWidestDeviationBps);
 
     bool apply_book_snapshot(const std::vector<Level>& bids, const std::vector<Level>& asks);
     bool apply_book_update(const std::vector<Level>& bids, const std::vector<Level>& asks);
@@ -93,6 +100,8 @@ public:
     std::vector<Fill> step(std::int64_t now_ns);
 
     std::vector<OrderStatus> statuses() const;
+    std::size_t working_orders() const;
+    std::size_t book_depth() const;
     double position() const;
     std::optional<double> mid() const;
     double market_volume() const;
@@ -110,30 +119,37 @@ private:
         double fees;
         double arrival_mid;
         double immediate_cost_bps;
+        double immediate_filled_qty;
         std::string halt_reason;
         std::vector<double> venue_all_in_notional;
         std::vector<char> venue_available;
     };
 
     struct Venue {
-        std::string name;
-        double fee_bps;
+        VenueSettings settings;
         double fee_rate;
         OrderBook book;
         std::int64_t last_update_ns;
     };
 
+    // The remainder can never trade when it is below every venue's minimum.
+    static bool complete_if_below_minimum(ParentOrder& order, double minimum);
+    double registered_minimum_locked(double ref_price) const;
     double projected_position_locked() const;
     void advance_locked(ParentOrder& order, std::int64_t now_ns, std::optional<double> ref_price,
                         const MarketState& market, std::vector<Fill>& fills);
     bool fresh_locked(std::size_t venue, std::int64_t now_ns) const;
     std::optional<double> consolidated_mid_locked(std::int64_t now_ns) const;
+    // Levels beyond the price collar around ref_price are left out.
     std::vector<VenueLiquidity> liquidity_locked(Side side, std::int64_t now_ns,
-                                                 std::optional<std::size_t> only) const;
+                                                 std::optional<std::size_t> only,
+                                                 double ref_price) const;
 
     mutable std::mutex mu_;
     std::vector<Venue> venues_;
+    std::size_t book_depth_;
     std::int64_t stale_ns_;
+    double max_deviation_;
     std::int64_t latest_ns_ = 0;
     RiskCheck risk_;
     double position_ = 0.0;

@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
+#include <limits>
 #include <memory>
 #include <utility>
 
@@ -11,6 +13,7 @@
 namespace slipstream {
 namespace {
 
+// Float noise only: venue minimums decide what is too small to trade.
 constexpr double kDustFraction = 1e-9;
 
 bool valid_order_id(const std::string& id) {
@@ -27,19 +30,51 @@ double cost_bps(Side side, double avg_price, double reference) {
     return diff / reference * 1e4;
 }
 
+double venue_minimum(const VenueLiquidity& venue, double ref_price) {
+    return std::max(venue.min_qty, venue.min_notional / ref_price);
+}
+
+// The child waits until it reaches the minimum of the venue with the best fee-adjusted top of
+// book, so small children are not pushed to a pricier venue. Only a remainder that can never
+// reach that minimum may use the smallest minimum of any venue. nullopt: no venue has liquidity.
+std::optional<double> child_minimum(const std::vector<VenueLiquidity>& venues, Side side,
+                                    double ref_price, double remaining) {
+    const VenueLiquidity* best = nullptr;
+    double best_price = 0.0;
+    std::optional<double> smallest;
+    for (const auto& venue : venues) {
+        if (venue.levels.empty()) continue;
+        const double minimum = venue_minimum(venue, ref_price);
+        if (!smallest || minimum < *smallest) smallest = minimum;
+        const double top = venue.levels.front().price;
+        const double price = side == Side::Buy ? top * (1.0 + venue.fee_rate)
+                                               : top * (1.0 - venue.fee_rate);
+        const bool better = side == Side::Buy ? price < best_price : price > best_price;
+        if (best == nullptr || better) {
+            best = &venue;
+            best_price = price;
+        }
+    }
+    if (best == nullptr) return std::nullopt;
+    const double best_minimum = venue_minimum(*best, ref_price);
+    return remaining >= best_minimum ? best_minimum : smallest;
+}
+
 }  // namespace
 
 Engine::Engine(RiskLimits limits, std::size_t book_depth)
     : Engine(limits, book_depth, {{"kraken", 0.0}}, 0) {}
 
 Engine::Engine(RiskLimits limits, std::size_t book_depth, std::vector<VenueSettings> venues,
-              std::int64_t stale_ns)
-    : stale_ns_(stale_ns), risk_(limits) {
+               std::int64_t stale_ns, double max_deviation_bps)
+    : book_depth_(book_depth),
+      stale_ns_(stale_ns),
+      max_deviation_(max_deviation_bps / 1e4),
+      risk_(limits) {
     venues_.reserve(venues.size());
     for (auto& venue : venues) {
-        const double fee_bps = venue.fee_bps;
-        venues_.push_back(Venue{std::move(venue.name), fee_bps, fee_bps / 1e4,
-                                OrderBook(book_depth), 0});
+        const double fee_rate = venue.fee_bps / 1e4;
+        venues_.push_back(Venue{std::move(venue), fee_rate, OrderBook(book_depth), 0});
     }
 }
 
@@ -137,12 +172,22 @@ std::optional<double> Engine::consolidated_mid_locked(std::int64_t now_ns) const
 }
 
 std::vector<VenueLiquidity> Engine::liquidity_locked(Side side, std::int64_t now_ns,
-                                                     std::optional<std::size_t> only) const {
+                                                     std::optional<std::size_t> only,
+                                                     double ref_price) const {
+    const double limit =
+        side == Side::Buy ? ref_price * (1.0 + max_deviation_) : ref_price * (1.0 - max_deviation_);
     std::vector<VenueLiquidity> out;
     for (std::size_t v = 0; v < venues_.size(); ++v) {
         if (only && *only != v) continue;
         if (!fresh_locked(v, now_ns)) continue;
-        out.push_back({v, venues_[v].fee_rate, venues_[v].book.liquidity_for(side)});
+        auto levels = venues_[v].book.liquidity_for(side);
+        const auto beyond = std::find_if(levels.begin(), levels.end(), [&](const Level& level) {
+            return side == Side::Buy ? level.price > limit : level.price < limit;
+        });
+        levels.erase(beyond, levels.end());
+        const auto& settings = venues_[v].settings;
+        out.push_back({v, venues_[v].fee_rate, std::move(levels), settings.min_qty,
+                       settings.qty_step, settings.min_notional});
     }
     return out;
 }
@@ -168,14 +213,16 @@ SubmitResult Engine::submit(const ParentOrderRequest& request, const ScheduleSpe
         risk_.check_parent(request.side, request.qty, *arrival_mid, projected_position_locked());
     if (!decision.ok) return {false, decision.reason};
 
-    const auto immediate =
-        route(request.side, request.qty, liquidity_locked(request.side, request.start_ns, std::nullopt));
+    const auto immediate = route(request.side, request.qty,
+                                 liquidity_locked(request.side, request.start_ns, std::nullopt,
+                                                  *arrival_mid));
     const double immediate_avg =
         immediate.filled_qty > 0.0 ? immediate.gross_notional / immediate.filled_qty : 0.0;
 
     orders_.push_back(ParentOrder{request, std::move(schedule), OrderState::Working, 0.0, 0.0, 0.0,
                                   *arrival_mid, cost_bps(request.side, immediate_avg, *arrival_mid),
-                                  "", std::vector<double>(venues_.size(), 0.0),
+                                  immediate.filled_qty, "",
+                                  std::vector<double>(venues_.size(), 0.0),
                                   std::vector<char>(venues_.size(), 1)});
     return {true, ""};
 }
@@ -201,24 +248,35 @@ void Engine::advance_locked(ParentOrder& order, std::int64_t now_ns,
                             std::optional<double> ref_price, const MarketState& market,
                             std::vector<Fill>& fills) {
     const double dust = order.request.qty * kDustFraction;
-    const double child = order.schedule->target_qty_at(now_ns, market) - order.filled_qty;
+    double child = order.schedule->target_qty_at(now_ns, market) - order.filled_qty;
     if (child <= dust || !ref_price) return;
 
-    const auto decision = risk_.check_child(order.request.side, child, *ref_price, position_,
-                                            order.filled_notional);
+    const auto liquidity = liquidity_locked(order.request.side, now_ns, std::nullopt, *ref_price);
+    // "Never executable" is judged against every registered venue, so a venue that is only
+    // briefly stale cannot make the order give up; the child waits for fresh venues instead.
+    const double registered_minimum = registered_minimum_locked(*ref_price);
+    if (complete_if_below_minimum(order, registered_minimum)) return;
+    const double remaining = order.request.qty - order.filled_qty;
+    const auto minimum = child_minimum(liquidity, order.request.side, *ref_price, remaining);
+    if (minimum && child < *minimum) return;
+    // Never strand a stub below the minimum this child is sized for: take the whole remainder.
+    if (minimum && remaining - child < *minimum) child = remaining;
+
+    const auto result = route(order.request.side, child, liquidity);
+    if (result.filled_qty <= 0.0) return;
+
+    const double fill_cost = result.gross_notional + result.fees;
+    const auto decision = risk_.check_child(order.request.side, result.filled_qty, fill_cost,
+                                            position_, order.filled_notional + order.fees);
     if (!decision.ok) {
         order.state = OrderState::Halted;
         order.halt_reason = decision.reason;
         return;
     }
 
-    const auto result =
-        route(order.request.side, child, liquidity_locked(order.request.side, now_ns, std::nullopt));
-    if (result.filled_qty <= 0.0) return;
-
     for (const auto& leg : result.legs) {
         fills.push_back({order.request.order_id, now_ns, leg.qty, leg.gross_notional / leg.qty,
-                         venues_[leg.venue].name, leg.fee});
+                         venues_[leg.venue].settings.name, leg.fee});
     }
 
     order.filled_qty += result.filled_qty;
@@ -232,8 +290,15 @@ void Engine::advance_locked(ParentOrder& order, std::int64_t now_ns,
             order.venue_available[v] = 0;
             continue;
         }
-        const auto alone = route(order.request.side, result.filled_qty,
-                                 liquidity_locked(order.request.side, now_ns, v));
+        // Price and depth only: a venue trading alone would simply wait for its own minimum,
+        // so minimum order sizes must not mark it unavailable.
+        auto alone_liquidity = liquidity_locked(order.request.side, now_ns, v, *ref_price);
+        for (auto& venue : alone_liquidity) {
+            venue.min_qty = 0.0;
+            venue.qty_step = 0.0;
+            venue.min_notional = 0.0;
+        }
+        const auto alone = route(order.request.side, result.filled_qty, alone_liquidity);
         if (alone.filled_qty < result.filled_qty * (1.0 - 1e-9)) {
             order.venue_available[v] = 0;
         } else {
@@ -241,7 +306,30 @@ void Engine::advance_locked(ParentOrder& order, std::int64_t now_ns,
         }
     }
 
-    if (order.request.qty - order.filled_qty <= dust) order.state = OrderState::Completed;
+    if (order.request.qty - order.filled_qty <= dust) {
+        order.state = OrderState::Completed;
+    } else {
+        complete_if_below_minimum(order, registered_minimum);
+    }
+}
+
+double Engine::registered_minimum_locked(double ref_price) const {
+    double smallest = std::numeric_limits<double>::infinity();
+    for (const auto& venue : venues_) {
+        const auto& rules = venue.settings;
+        smallest = std::min(smallest, std::max(rules.min_qty, rules.min_notional / ref_price));
+    }
+    return smallest;
+}
+
+bool Engine::complete_if_below_minimum(ParentOrder& order, double minimum) {
+    const double remaining = order.request.qty - order.filled_qty;
+    if (remaining >= minimum) return false;
+    char reason[64];
+    std::snprintf(reason, sizeof reason, "remaining %.8g below venue minimum", remaining);
+    order.state = OrderState::Completed;
+    order.halt_reason = reason;
+    return true;
 }
 
 std::vector<OrderStatus> Engine::statuses() const {
@@ -269,17 +357,27 @@ std::vector<OrderStatus> Engine::statuses() const {
                                      order.venue_all_in_notional[v] / order.filled_qty,
                                      order.arrival_mid)
                           : 0.0;
-            venue_costs.push_back({venues_[v].name, all_in_bps, available});
+            venue_costs.push_back({venues_[v].settings.name, all_in_bps, available});
         }
 
         out.push_back({order.request.order_id, order.request.side, order.state, order.request.qty,
                        order.filled_qty, avg, order.arrival_mid,
                        cost_bps(order.request.side, avg, order.arrival_mid),
                        order.immediate_cost_bps, order.halt_reason, order.schedule->name(),
-                       order.fees, fees_bps, routed_all_in_bps, std::move(venue_costs)});
+                       order.fees, fees_bps, routed_all_in_bps, std::move(venue_costs),
+                       order.immediate_filled_qty});
     }
     return out;
 }
+
+std::size_t Engine::working_orders() const {
+    std::lock_guard lock(mu_);
+    return static_cast<std::size_t>(
+        std::count_if(orders_.begin(), orders_.end(),
+                      [](const ParentOrder& order) { return order.state == OrderState::Working; }));
+}
+
+std::size_t Engine::book_depth() const { return book_depth_; }
 
 double Engine::position() const {
     std::lock_guard lock(mu_);
@@ -299,7 +397,7 @@ double Engine::market_volume() const {
 std::optional<std::size_t> Engine::venue_index(std::string_view name) const {
     std::lock_guard lock(mu_);
     for (std::size_t v = 0; v < venues_.size(); ++v) {
-        if (std::string_view(venues_[v].name) == name) return v;
+        if (std::string_view(venues_[v].settings.name) == name) return v;
     }
     return std::nullopt;
 }
@@ -313,7 +411,7 @@ std::vector<VenueSettings> Engine::venue_settings() const {
     std::lock_guard lock(mu_);
     std::vector<VenueSettings> out;
     out.reserve(venues_.size());
-    for (const auto& venue : venues_) out.push_back({venue.name, venue.fee_bps});
+    for (const auto& venue : venues_) out.push_back(venue.settings);
     return out;
 }
 

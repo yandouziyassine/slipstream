@@ -28,7 +28,7 @@ std::optional<AlmgrenChrissSchedule> AlmgrenChrissSchedule::create(const SlicePa
 
 AlmgrenChrissSchedule::AlmgrenChrissSchedule(const SliceParams& params, double kappa,
                                              double tau_s)
-    : params_(params),
+    : Schedule(params),
       kappa_(kappa),
       tau_s_(tau_s),
       horizon_s_(tau_s * static_cast<double>(params.num_slices)) {}
@@ -42,11 +42,12 @@ double AlmgrenChrissSchedule::remaining_fraction(double t_s) const {
 }
 
 double AlmgrenChrissSchedule::target_qty_at(std::int64_t now_ns, const MarketState&) const {
-    const std::int64_t released = released_slices(params_, now_ns);
+    const auto& params = slice_params();
+    const std::int64_t released = released_slices(params, now_ns);
     if (released == 0) return 0.0;
-    if (released == params_.num_slices) return params_.total_qty;
+    if (released == params.num_slices) return params.total_qty;
     const double t_s = static_cast<double>(released) * tau_s_;
-    return params_.total_qty * (1.0 - remaining_fraction(t_s));
+    return params.total_qty * (1.0 - remaining_fraction(t_s));
 }
 
 }  // namespace slipstream

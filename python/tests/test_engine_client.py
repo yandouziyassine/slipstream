@@ -14,6 +14,7 @@ from slipstream.models import (
     Fill,
     OrderSpec,
     PovParams,
+    StepResult,
     TradeBatch,
     TwapParams,
     VwapParams,
@@ -134,3 +135,35 @@ def test_venue_fees_rejects_bad_engine_venues(
 def test_fill_defaults_keep_single_venue_callers_working() -> None:
     fill = Fill("o", 1, 0.5, 100.0)
     assert (fill.venue, fill.fee) == ("kraken", 0.0)
+
+
+def test_step_returns_fills_and_working_orders(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = EngineClient("127.0.0.1:1")
+    try:
+        reply = pb.StepReply(
+            fills=[pb.Fill(order_id="o", ts_ns=1, qty=0.1, price=100.0, venue="kraken", fee=0.01)],
+            working_orders=2,
+        )
+        monkeypatch.setattr(client, "_call", lambda method, request: reply)
+        result = client.step(0)
+        assert result == StepResult([Fill("o", 1, 0.1, 100.0, "kraken", 0.01)], working_orders=2)
+    finally:
+        client.close()
+
+
+def test_step_reports_zero_working_orders_when_done(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = EngineClient("127.0.0.1:1")
+    try:
+        monkeypatch.setattr(client, "_call", lambda method, request: pb.StepReply())
+        assert client.step(0) == StepResult([], working_orders=0)
+    finally:
+        client.close()
+
+
+def test_book_depth_reads_status(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = EngineClient("127.0.0.1:1")
+    try:
+        monkeypatch.setattr(client, "status", lambda: pb.StatusReply(book_depth=25))
+        assert client.book_depth() == 25
+    finally:
+        client.close()

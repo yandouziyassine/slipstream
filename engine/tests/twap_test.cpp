@@ -62,9 +62,13 @@ TEST(Twap, ExtremeTimestampsDoNotOverflow) {
     EXPECT_DOUBLE_EQ(many->target_qty_at(std::numeric_limits<std::int64_t>::min(), kNoMarket), 0.0);
 }
 
-TEST(Twap, NeverExpiresAndReportsName) {
-    const auto schedule = TwapSchedule::create({1.0, 0, 60, 6});
+TEST(Twap, ExpiresAtDeadlineAndReportsName) {
+    const auto schedule = TwapSchedule::create({1.0, 1000, 60, 6});
     ASSERT_TRUE(schedule);
-    EXPECT_FALSE(schedule->expired(std::numeric_limits<std::int64_t>::max()));
+    EXPECT_FALSE(schedule->expired(999));
+    EXPECT_FALSE(schedule->expired(1059));
+    EXPECT_TRUE(schedule->expired(1060));
+    EXPECT_TRUE(schedule->expired(std::numeric_limits<std::int64_t>::max()));
+    EXPECT_FALSE(schedule->expired(std::numeric_limits<std::int64_t>::min()));
     EXPECT_STREQ(schedule->name(), "twap");
 }

@@ -24,7 +24,6 @@ private:
     AlmgrenChrissSchedule(const SliceParams& params, double kappa, double tau_s);
     double remaining_fraction(double t_s) const;
 
-    SliceParams params_;
     double kappa_;
     double tau_s_;
     double horizon_s_;

@@ -23,9 +23,10 @@ public:
     // projected_position includes the remaining qty of every other working order.
     RiskDecision check_parent(Side side, double qty, double ref_price,
                               double projected_position) const;
-    // spent_notional is what this parent order has already filled.
-    RiskDecision check_child(Side side, double qty, double ref_price, double current_position,
-                             double spent_notional) const;
+    // fill_cost is the routed child's gross notional plus fees; spent_cost is the same total for
+    // everything this parent order has already filled.
+    RiskDecision check_child(Side side, double qty, double fill_cost, double current_position,
+                             double spent_cost) const;
 
     const RiskLimits& limits() const { return limits_; }
 

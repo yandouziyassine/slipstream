@@ -173,12 +173,31 @@ almgren_chriss  COMPLETED        0.02    83943.54     -0.78       -0.39       0.
 - **Negative slippage is real, not a bug.** Kraken's ask sat about $1.20 below Coinbase's bid for the whole session. The reference mid spans both venues, so buying on the cheaper venue lands below it. The engine accepts a cross between venues like this, because fees make it unprofitable to trade. It rejects one that would still be an arbitrage after fees, and any venue whose own book is crossed.
 - **One run is one sample.** As with the algorithm comparison, these tables demonstrate the tooling. They are not evidence of a statistical edge.
 
+## Executable, honest results
+
+Paper results are only useful if a real exchange would have accepted every fill:
+
+- **Exchange trading rules.** At startup the demo scripts fetch each exchange's rules from its free public API: Kraken `AssetPairs` and Coinbase's public product endpoint. They pass them to the engine with `slipstream venue-flags`:
+  - the minimum order size;
+  - the quantity step;
+  - the minimum order value.
+
+  For example, Kraken BTC/USD requires at least 0.00005 BTC and $0.50. The engine never sends a fill below an exchange's minimum. Each slice waits until it reaches the minimum of the exchange with the best price after fees. It only goes elsewhere for a remainder that can never reach that minimum, and it never leaves a leftover no exchange would accept.
+- **Risk on what is actually paid.** Each fill is routed first. The order's spending limit is then checked on the real cost, meaning the price walked through the book plus fees, before anything is committed.
+- **Price collar.** A fill may never use a price more than 0.5% (50 bps) from the market mid. `--max-deviation-bps` changes it.
+- **Every algorithm ends.** TWAP, VWAP, POV and Almgren-Chriss all stop at their deadline, with a reason. The table shows `filled %`, and `saved` shows `n/a` when an order or the one-shot benchmark was only partly filled, because those numbers would not be like for like. If a run fails part-way, the CLI still prints what was filled.
+- **Fast by default.** The demos run an optimised release build of the engine; CI keeps the sanitizer build. The CLI no longer asks the engine for status after every message. Measured over loopback:
+  - about 0.25–0.3 ms per engine call;
+  - about 0.86 ms per market message with the release build, versus 1.28 ms with the debug build;
+  - Phase 2 replaces the per-message calls with one stream per exchange.
+
 ## Security
 
 - **Paper trading is enforced.** `SLIPSTREAM_PAPER_MODE` must be `true`, and v0.1 contains no live order path.
 - **Loopback only.** The gRPC engine binds only to loopback addresses, and both sides validate the address.
 - **Untrusted input.** All exchange data is validated before use: types, finiteness, ranges, and size caps. Hostile JSON (deep nesting, oversized numbers, invalid UTF-8) is rejected cleanly and never crashes the parser.
 - **Venues are an allowlist** (`kraken`, `coinbase`), checked in the CLI, in the parsers, and at the engine's gRPC boundary. Market data connections go only to fixed public WebSocket URLs over TLS, with size caps. A venue whose book is stale or corrupt is excluded, or the step is skipped; the engine never guesses.
+- **Risk limits hold on real costs.** The per-order spending limit is checked on the routed cost including fees, before a fill is committed. A 50 bps price collar blocks fills far from the market. Exchange rules come only from fixed public HTTPS endpoints, with no redirects, size caps, and strict number parsing.
 - **Hardened C++.** It builds with `-Wall -Wextra -Wpedantic -Wshadow -Werror` and is tested under AddressSanitizer and UndefinedBehaviorSanitizer.
 - **Supply chain.** Python dependencies are pinned with sha256 hashes and audited with `pip-audit`.
 

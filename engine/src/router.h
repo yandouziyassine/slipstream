@@ -11,6 +11,9 @@ struct VenueLiquidity {
     std::size_t venue;
     double fee_rate;
     std::vector<Level> levels;  // best-first, gross prices
+    double min_qty = 0.0;
+    double qty_step = 0.0;  // 0 means no rounding
+    double min_notional = 0.0;
 };
 
 struct RouteLeg {
@@ -28,7 +31,9 @@ struct RouteResult {
 };
 
 // Takes the best fee-adjusted prices across venues until qty is filled (paper: books unchanged).
-// Ties go to the venue listed first.
+// Ties go to the venue listed first. Each leg is then floored to its venue's qty_step (the excess
+// comes off its worst prices) and dropped if below min_qty or min_notional. Dropped quantity is
+// not re-routed.
 RouteResult route(Side taker_side, double qty, const std::vector<VenueLiquidity>& venues);
 
 // Buy: gross + fees paid. Sell: gross - fees paid.

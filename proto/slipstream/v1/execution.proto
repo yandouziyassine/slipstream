@@ -83,6 +83,8 @@ message Fill {
 
 message StepReply {
   repeated Fill fills = 1;
+  // Orders still working after this step.
+  int32 working_orders = 2;
 }
 
 message StatusRequest {}
@@ -109,11 +111,16 @@ message OrderStatus {
   double fees_bps = 13;
   double routed_all_in_bps = 14;
   repeated VenueCost venue_costs = 15;
+  // What the one-shot benchmark route could fill at submit, under the same collar and venue rules.
+  double immediate_filled_qty = 16;
 }
 
 message VenueInfo {
   string name = 1;
   double fee_bps = 2;
+  double min_qty = 3;
+  double qty_step = 4;
+  double min_notional = 5;
 }
 
 message StatusReply {
@@ -122,6 +129,7 @@ message StatusReply {
   double mid = 3;
   repeated OrderStatus orders = 4;
   repeated VenueInfo venues = 5;
+  int32 book_depth = 6;
 }
 
 message Trade {

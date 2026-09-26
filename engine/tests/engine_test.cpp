@@ -114,6 +114,73 @@ TEST_F(EngineTest, PartialFillRollsIntoNextStep) {
     EXPECT_EQ(engine.statuses().at(0).state, OrderState::Completed);
 }
 
+TEST(EngineRisk, RoutedBookWalkCostIsCheckedNotTheMidEstimate) {
+    Engine engine(RiskLimits{1000.0, 100.0}, 10);
+    ASSERT_TRUE(engine.apply_book_snapshot({{98.0, 20.0}}, {{100.0, 20.0}}));
+    ASSERT_TRUE(
+        engine.submit({"o", Side::Buy, 9.98, 0, 2 * kSec, 2}, VwapSpec{{9.9, 0.08}}).accepted);
+    ASSERT_EQ(engine.step(0).size(), 1u);  // 9.9 at 100 spends 990
+
+    // Mid 100: the 0.08 child looks like 8 at mid, but walking the book costs 4.004 + 7.996 = 12.
+    ASSERT_TRUE(engine.apply_book_snapshot({{99.9, 5.0}}, {{100.1, 0.04}, {199.9, 5.0}}));
+    EXPECT_TRUE(engine.step(kSec).empty());
+
+    const auto status = engine.statuses().at(0);
+    EXPECT_EQ(status.state, OrderState::Halted);
+    EXPECT_EQ(status.halt_reason, "order notional limit exceeded");
+    EXPECT_NEAR(status.filled_qty, 9.9, 1e-12);
+    EXPECT_NEAR(engine.position(), 9.9, 1e-12);
+}
+
+TEST(EngineRisk, FeesCountTowardTheNotionalLimit) {
+    Engine engine(RiskLimits{1000.0, 100.0}, 10, {{"kraken", 100.0}}, 0);
+    ASSERT_TRUE(engine.apply_book_snapshot(0, {{98.0, 20.0}}, {{100.0, 20.0}}, 0));
+    // Mid 99 x 9.95 = 985 passes the parent check; the route costs 995 + 9.95 fee = 1004.95.
+    ASSERT_TRUE(engine.submit({"o", Side::Buy, 9.95, 0, kSec, 1}).accepted);
+    EXPECT_TRUE(engine.step(0).empty());
+    const auto status = engine.statuses().at(0);
+    EXPECT_EQ(status.state, OrderState::Halted);
+    EXPECT_EQ(status.halt_reason, "order notional limit exceeded");
+    EXPECT_DOUBLE_EQ(engine.position(), 0.0);
+}
+
+TEST(EngineCollar, BuyUsesLevelsWithinTheCollarOnly) {
+    Engine engine(RiskLimits{1'000'000.0, 100.0}, 10, {{"kraken", 0.0}}, 0, 50.0);
+    ASSERT_TRUE(engine.apply_book_snapshot(0, {{99.9, 5.0}},
+                                           {{100.1, 0.1}, {100.4, 0.1}, {100.6, 5.0}}, 0));
+    ASSERT_TRUE(engine.submit({"o", Side::Buy, 1.0, 0, 10 * kSec, 1}).accepted);
+    EXPECT_NEAR(engine.statuses().at(0).immediate_cost_bps, 25.0, 1e-9);
+    const auto fills = engine.step(0);
+    ASSERT_EQ(fills.size(), 1u);
+    EXPECT_NEAR(fills[0].qty, 0.2, 1e-12);
+    EXPECT_NEAR(fills[0].price, 100.25, 1e-9);
+    EXPECT_EQ(engine.statuses().at(0).state, OrderState::Working);
+}
+
+TEST(EngineCollar, SellUsesLevelsWithinTheCollarOnly) {
+    Engine engine(RiskLimits{1'000'000.0, 100.0}, 10, {{"kraken", 0.0}}, 0, 50.0);
+    ASSERT_TRUE(engine.apply_book_snapshot(0, {{99.9, 0.1}, {99.6, 0.1}, {99.4, 5.0}},
+                                           {{100.1, 5.0}}, 0));
+    ASSERT_TRUE(engine.submit({"o", Side::Sell, 1.0, 0, 10 * kSec, 1}).accepted);
+    EXPECT_NEAR(engine.statuses().at(0).immediate_cost_bps, 25.0, 1e-9);
+    const auto fills = engine.step(0);
+    ASSERT_EQ(fills.size(), 1u);
+    EXPECT_NEAR(fills[0].qty, 0.2, 1e-12);
+    EXPECT_NEAR(fills[0].price, 99.75, 1e-9);
+}
+
+TEST(EngineCollar, CounterfactualVenueRouteUsesTheCollar) {
+    Engine engine(RiskLimits{1'000'000.0, 100.0}, 10, {{"kraken", 0.0}, {"coinbase", 0.0}}, kSec,
+                  50.0);
+    ASSERT_TRUE(engine.apply_book_snapshot(0, {{99.9, 5.0}}, {{100.1, 1.0}}, 0));
+    ASSERT_TRUE(engine.apply_book_snapshot(1, {{99.9, 5.0}}, {{100.2, 0.1}, {100.8, 5.0}}, 0));
+    ASSERT_TRUE(engine.submit({"o", Side::Buy, 0.5, 0, 10 * kSec, 1}).accepted);
+    ASSERT_EQ(engine.step(0).size(), 1u);
+    const auto status = engine.statuses().at(0);
+    EXPECT_TRUE(status.venue_costs[0].available);
+    EXPECT_FALSE(status.venue_costs[1].available);
+}
+
 TEST(EngineRisk, PriceSpikeHaltsOrderOnNotionalBudget) {
     Engine engine(RiskLimits{250.0, 100.0}, 10);
     ASSERT_TRUE(engine.apply_book_snapshot({{99.0, 5.0}}, {{101.0, 5.0}}));

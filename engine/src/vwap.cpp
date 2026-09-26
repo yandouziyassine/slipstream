@@ -27,13 +27,14 @@ std::optional<VwapSchedule> VwapSchedule::create(const SliceParams& params,
 }
 
 VwapSchedule::VwapSchedule(const SliceParams& params, std::vector<double> cumulative_fraction)
-    : params_(params), cumulative_fraction_(std::move(cumulative_fraction)) {}
+    : Schedule(params), cumulative_fraction_(std::move(cumulative_fraction)) {}
 
 double VwapSchedule::target_qty_at(std::int64_t now_ns, const MarketState&) const {
-    const std::int64_t released = released_slices(params_, now_ns);
+    const auto& params = slice_params();
+    const std::int64_t released = released_slices(params, now_ns);
     if (released == 0) return 0.0;
-    if (released == params_.num_slices) return params_.total_qty;
-    return params_.total_qty * cumulative_fraction_[static_cast<std::size_t>(released - 1)];
+    if (released == params.num_slices) return params.total_qty;
+    return params.total_qty * cumulative_fraction_[static_cast<std::size_t>(released - 1)];
 }
 
 }  // namespace slipstream

@@ -55,6 +55,12 @@ class Fill:
 
 
 @dataclass(frozen=True)
+class StepResult:
+    fills: list[Fill]
+    working_orders: int
+
+
+@dataclass(frozen=True)
 class TwapParams:
     pass
 

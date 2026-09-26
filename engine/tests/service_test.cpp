@@ -288,6 +288,53 @@ TEST(ServiceMultiVenue, StatusListsVenuesAndFeesInRegistrationOrder) {
     EXPECT_DOUBLE_EQ(status.venues(1).fee_bps(), 60.0);
 }
 
+TEST(ServiceMultiVenue, StatusCarriesVenueRulesAndBookDepth) {
+    Engine engine(RiskLimits{1'000'000.0, 100.0}, 25,
+                  {{"kraken", 40.0, 0.00005, 0.00000001, 0.5}, {"coinbase", 60.0}}, 2'000'000'000);
+    ExecutionService service{engine, "BTC/USD"};
+    v1::StatusRequest request;
+    v1::StatusReply status;
+    ASSERT_TRUE(service.GetStatus(nullptr, &request, &status).ok());
+    EXPECT_EQ(status.book_depth(), 25);
+    ASSERT_EQ(status.venues_size(), 2);
+    EXPECT_DOUBLE_EQ(status.venues(0).min_qty(), 0.00005);
+    EXPECT_DOUBLE_EQ(status.venues(0).qty_step(), 0.00000001);
+    EXPECT_DOUBLE_EQ(status.venues(0).min_notional(), 0.5);
+    EXPECT_DOUBLE_EQ(status.venues(1).min_qty(), 0.0);
+    EXPECT_DOUBLE_EQ(status.venues(1).qty_step(), 0.0);
+    EXPECT_DOUBLE_EQ(status.venues(1).min_notional(), 0.0);
+}
+
+TEST_F(ServiceTest, StepReportsWorkingOrdersAndStatusReportsImmediateFill) {
+    const auto update = snapshot();  // ask 101 x 1.0
+    v1::BookAck ack;
+    ASSERT_TRUE(service.ApplyBookUpdate(nullptr, &update, &ack).ok());
+    auto request = order(v1::SIDE_BUY);
+    request.set_qty(3.0);
+    request.set_num_slices(3);
+    request.set_duration_ns(3'000'000'000);
+    v1::SubmitReply reply;
+    ASSERT_TRUE(service.SubmitParentOrder(nullptr, &request, &reply).ok());
+    ASSERT_TRUE(reply.accepted()) << reply.reason();
+
+    v1::StepRequest step;
+    step.set_now_ns(0);
+    v1::StepReply step_reply;
+    ASSERT_TRUE(service.Step(nullptr, &step, &step_reply).ok());
+    EXPECT_EQ(step_reply.working_orders(), 1);
+
+    v1::StatusRequest status_request;
+    v1::StatusReply status;
+    ASSERT_TRUE(service.GetStatus(nullptr, &status_request, &status).ok());
+    EXPECT_EQ(status.book_depth(), 10);
+    EXPECT_DOUBLE_EQ(status.orders(0).immediate_filled_qty(), 1.0);
+
+    step.set_now_ns(3'000'000'000);
+    v1::StepReply last_reply;
+    ASSERT_TRUE(service.Step(nullptr, &step, &last_reply).ok());
+    EXPECT_EQ(last_reply.working_orders(), 0);
+}
+
 TEST(ServiceMultiVenue, DefaultEngineListsKrakenWithZeroFee) {
     Engine engine(RiskLimits{1'000'000.0, 100.0}, 10);
     ExecutionService service{engine, "BTC/USD"};

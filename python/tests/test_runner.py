@@ -88,7 +88,27 @@ def test_records_fills_and_reports_done(fake_engine: FakeEngine) -> None:
     assert runner.fills == [fill]
     assert not runner.is_done()
     fake_engine.state = pb.ORDER_STATE_COMPLETED
+    runner.on_message(HEARTBEAT, 200)
     assert runner.is_done()
+
+
+def test_is_done_reflects_the_last_step_without_calling_get_status(
+    fake_engine: FakeEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake_engine.done_after_steps = 1
+    calls = 0
+    orig_status = fake_engine.status
+
+    def spy_status() -> pb.StatusReply:
+        nonlocal calls
+        calls += 1
+        return orig_status()
+
+    monkeypatch.setattr(fake_engine, "status", spy_status)
+    runner = make_runner(fake_engine)
+    runner.on_message(snapshot(), 100)
+    assert runner.is_done()
+    assert calls == 0
 
 
 def trade(msg_type: str = "update", symbol: str = "BTC/USD") -> str:
@@ -136,7 +156,22 @@ def test_done_only_when_every_order_is_terminal(fake_engine: FakeEngine) -> None
     runner.on_message(snapshot(), 100)
     assert not runner.is_done()
     fake_engine.state = pb.ORDER_STATE_COMPLETED
+    runner.on_message(HEARTBEAT, 200)
     assert runner.is_done()
+
+
+def test_working_orders_is_set_right_after_submit_before_any_step(
+    fake_engine: FakeEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Regression guard for the D1 ordering requirement: even if step() were never called,
+    # a freshly submitted runner must not report done.
+    monkeypatch.setattr(fake_engine, "step", lambda now_ns: pytest.fail("step should not run"))
+    runner = ExecutionRunner(
+        fake_engine, [OrderSpec("a", "buy", 1.0, 4, 4)], "BTC/USD", logging.getLogger("test")
+    )
+    runner._submit_all(100)  # exercising the ordering guarantee directly, before any step
+    assert runner._working == 1
+    assert not runner.is_done()
 
 
 def test_calibrated_algo_without_data_fails_before_submitting(fake_engine: FakeEngine) -> None:
@@ -338,3 +373,56 @@ def test_runner_exposes_its_venues(fake_engine: FakeEngine) -> None:
         fake_engine, SPEC, "BTC/USD", logging.getLogger("t"), venues=("coinbase", "kraken")
     )
     assert runner.venues == frozenset({"kraken", "coinbase"})
+
+
+def test_local_books_stop_updating_after_submission(
+    fake_engine: FakeEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from slipstream.book import LocalBook
+
+    calls = 0
+    orig_apply = LocalBook.apply
+
+    def spy_apply(self: LocalBook, update: BookUpdate) -> None:
+        nonlocal calls
+        calls += 1
+        orig_apply(self, update)
+
+    monkeypatch.setattr(LocalBook, "apply", spy_apply)
+    runner = make_runner(fake_engine)
+    runner.on_message(snapshot(), 100)  # triggers submission
+    assert calls == 1
+    delta = {
+        "channel": "book",
+        "type": "update",
+        "data": [{"symbol": "BTC/USD", "bids": [], "asks": [{"price": 100.5, "qty": 2.0}]}],
+    }
+    runner.on_message(json.dumps(delta), 200)
+    assert calls == 1  # still only the pre-submission apply; the engine still sees the update
+    assert len(fake_engine.books) == 2
+
+
+def test_heartbeat_after_submit_keeps_the_venue_fresh(fake_engine: FakeEngine) -> None:
+    # A heartbeat on a live connection means the book is unchanged, not stale.
+    runner = make_runner(fake_engine)
+    runner.on_message(snapshot(), 100)
+    runner.on_message(HEARTBEAT, 200)
+    assert fake_engine.books[-1] == BookUpdate("BTC/USD", False, (), (), "kraken")
+    assert fake_engine.book_recv_ns[-1] == 200
+
+
+def test_heartbeat_before_submit_sends_no_keepalive(fake_engine: FakeEngine) -> None:
+    make_runner(fake_engine).on_message(HEARTBEAT, 50)
+    assert fake_engine.books == []
+
+
+def test_heartbeats_cannot_keep_a_silent_book_fresh_forever(fake_engine: FakeEngine) -> None:
+    # Heartbeats prove the connection is alive, not that the book feed is. After 30 s without a
+    # book change the keep-alive stops, so the engine's normal staleness rule takes over.
+    runner = make_runner(fake_engine)
+    runner.on_message(snapshot(), 100)
+    runner.on_message(HEARTBEAT, 100 + 29_000_000_000)
+    assert fake_engine.book_recv_ns[-1] == 100 + 29_000_000_000
+    books_before = len(fake_engine.books)
+    runner.on_message(HEARTBEAT, 100 + 31_000_000_000)
+    assert len(fake_engine.books) == books_before

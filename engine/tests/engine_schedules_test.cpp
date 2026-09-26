@@ -65,6 +65,34 @@ TEST_F(EngineSchedulesTest, PovOrderHaltsAtDeadline) {
     EXPECT_DOUBLE_EQ(status.filled_qty, 1.0);
 }
 
+TEST_F(EngineSchedulesTest, EverySlicedScheduleHaltsAtDeadline) {
+    const double lambda = 2.0 * (std::cosh(0.5) - 1.0);
+    ASSERT_TRUE(engine.submit({"t", Side::Buy, 1.0, 0, 4 * kSec, 4}).accepted);
+    ASSERT_TRUE(
+        engine.submit({"v", Side::Buy, 1.0, 0, 4 * kSec, 4}, VwapSpec{{1.0, 1.0, 1.0, 1.0}})
+            .accepted);
+    ASSERT_TRUE(engine.submit({"ac", Side::Buy, 1.0, 0, 4 * kSec, 4},
+                              AlmgrenChrissSpec{1.0, 1.0, lambda})
+                    .accepted);
+    ASSERT_TRUE(engine.apply_book_update({}, {{101.0, 0.0}}));  // no asks: nothing can fill
+    EXPECT_TRUE(engine.step(4 * kSec - 1).empty());
+    for (const auto& status : engine.statuses()) {
+        EXPECT_EQ(status.state, OrderState::Working) << status.algo;
+    }
+    EXPECT_TRUE(engine.step(4 * kSec).empty());
+    for (const auto& status : engine.statuses()) {
+        EXPECT_EQ(status.state, OrderState::Halted) << status.algo;
+        EXPECT_EQ(status.halt_reason, "deadline reached") << status.algo;
+        EXPECT_DOUBLE_EQ(status.filled_qty, 0.0) << status.algo;
+    }
+}
+
+TEST_F(EngineSchedulesTest, OrderCompletingOnItsDeadlineStepIsNotHalted) {
+    ASSERT_TRUE(engine.submit({"t", Side::Buy, 1.0, 0, 4 * kSec, 1}).accepted);
+    EXPECT_EQ(engine.step(4 * kSec).size(), 1u);
+    EXPECT_EQ(engine.statuses().at(0).state, OrderState::Completed);
+}
+
 TEST_F(EngineSchedulesTest, RejectsInvalidScheduleSpecs) {
     EXPECT_EQ(engine.submit({"v", Side::Buy, 1.0, 0, 4 * kSec, 4}, VwapSpec{{1.0}}).reason,
               "invalid schedule");

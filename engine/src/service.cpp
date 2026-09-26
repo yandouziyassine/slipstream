@@ -1,5 +1,6 @@
 #include "service.h"
 
+#include <cstdint>
 #include <optional>
 #include <utility>
 #include <vector>
@@ -122,12 +123,14 @@ grpc::Status ExecutionService::Step(grpc::ServerContext*, const v1::StepRequest*
         out->set_venue(fill.venue);
         out->set_fee(fill.fee);
     }
+    reply->set_working_orders(static_cast<std::int32_t>(engine_.working_orders()));
     return grpc::Status::OK;
 }
 
 grpc::Status ExecutionService::GetStatus(grpc::ServerContext*, const v1::StatusRequest*,
                                          v1::StatusReply* reply) {
     reply->set_position(engine_.position());
+    reply->set_book_depth(static_cast<std::int32_t>(engine_.book_depth()));
     if (const auto mid = engine_.mid()) {
         reply->set_has_mid(true);
         reply->set_mid(*mid);
@@ -148,6 +151,7 @@ grpc::Status ExecutionService::GetStatus(grpc::ServerContext*, const v1::StatusR
         out->set_fees_paid(status.fees_paid);
         out->set_fees_bps(status.fees_bps);
         out->set_routed_all_in_bps(status.routed_all_in_bps);
+        out->set_immediate_filled_qty(status.immediate_filled_qty);
         for (const auto& venue_cost : status.venue_costs) {
             auto* out_cost = out->add_venue_costs();
             out_cost->set_venue(venue_cost.venue);
@@ -159,6 +163,9 @@ grpc::Status ExecutionService::GetStatus(grpc::ServerContext*, const v1::StatusR
         auto* info = reply->add_venues();
         info->set_name(venue.name);
         info->set_fee_bps(venue.fee_bps);
+        info->set_min_qty(venue.min_qty);
+        info->set_qty_step(venue.qty_step);
+        info->set_min_notional(venue.min_notional);
     }
     return grpc::Status::OK;
 }

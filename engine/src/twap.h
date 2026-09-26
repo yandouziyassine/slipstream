@@ -15,9 +15,7 @@ public:
     const char* name() const override { return "twap"; }
 
 private:
-    explicit TwapSchedule(const SliceParams& params) : params_(params) {}
-
-    SliceParams params_;
+    explicit TwapSchedule(const SliceParams& params) : Schedule(params) {}
 };
 
 }  // namespace slipstream

@@ -3,6 +3,7 @@
 #include <gtest/gtest.h>
 
 #include <string>
+#include <utility>
 
 using slipstream::parse_args;
 
@@ -101,6 +102,75 @@ TEST(Config, RejectsBadVenues) {
         EXPECT_FALSE(parse_args({"--venue", value}).config) << value;
     }
     EXPECT_FALSE(parse_args({"--venue", "kraken:fee_bps=1", "--venue", "kraken:fee_bps=2"}).config);
+}
+
+TEST(Config, VenueRulesDefaultToZero) {
+    const auto result = parse_args({"--venue", "kraken:fee_bps=40"});
+    ASSERT_TRUE(result.config) << result.error;
+    const auto& venue = result.config->venues.at(0);
+    EXPECT_DOUBLE_EQ(venue.min_qty, 0.0);
+    EXPECT_DOUBLE_EQ(venue.qty_step, 0.0);
+    EXPECT_DOUBLE_EQ(venue.min_notional, 0.0);
+}
+
+TEST(Config, ParsesVenueRules) {
+    const auto result = parse_args(
+        {"--venue", "kraken:fee_bps=40,min_qty=0.00005,qty_step=0.00000001,min_notional=0.5",
+         "--venue", "coinbase:fee_bps=60,min_notional=1"});
+    ASSERT_TRUE(result.config) << result.error;
+    const auto& kraken = result.config->venues.at(0);
+    EXPECT_DOUBLE_EQ(kraken.fee_bps, 40.0);
+    EXPECT_DOUBLE_EQ(kraken.min_qty, 0.00005);
+    EXPECT_DOUBLE_EQ(kraken.qty_step, 0.00000001);
+    EXPECT_DOUBLE_EQ(kraken.min_notional, 0.5);
+    const auto& coinbase = result.config->venues.at(1);
+    EXPECT_DOUBLE_EQ(coinbase.min_qty, 0.0);
+    EXPECT_DOUBLE_EQ(coinbase.min_notional, 1.0);
+}
+
+TEST(Config, AcceptsVenueRulesAtTheirBounds) {
+    const auto result = parse_args({"--venue",
+                                    "kraken:fee_bps=1000,min_qty=1000000,qty_step=1000000,"
+                                    "min_notional=1000000000"});
+    ASSERT_TRUE(result.config) << result.error;
+    EXPECT_DOUBLE_EQ(result.config->venues.at(0).min_notional, 1e9);
+}
+
+TEST(Config, RejectsBadVenueRules) {
+    for (const char* value :
+         {"kraken:fee_bps=40,", "kraken:fee_bps=40,,min_qty=1", "kraken:fee_bps=40,min_qty=",
+          "kraken:fee_bps=40,min_qty", "kraken:fee_bps=40,lot=1", "kraken:min_qty=1",
+          "kraken:fee_bps=40,min_qty=1,min_qty=2", "kraken:fee_bps=1,fee_bps=2",
+          "kraken:fee_bps=40,min_qty=1e-5", "kraken:fee_bps=40,min_qty=-1",
+          "kraken:fee_bps=40,min_qty=+1", "kraken:fee_bps=40,min_qty= 1",
+          "kraken:fee_bps=40,min_qty=1000001", "kraken:fee_bps=40,qty_step=1000001",
+          "kraken:fee_bps=40,min_notional=1000000001", "kraken:fee_bps=40,qty_step=nan",
+          "kraken:fee_bps=40,min_notional=inf", "kraken:fee_bps=40;min_qty=1",
+          "kraken:fee_bps=40,MIN_QTY=1", "kraken:fee_bps=40,min_qty==1"}) {
+        EXPECT_FALSE(parse_args({"--venue", value}).config) << value;
+    }
+}
+
+TEST(Config, MaxDeviationDefaultsTo50Bps) {
+    const auto result = parse_args({});
+    ASSERT_TRUE(result.config);
+    EXPECT_DOUBLE_EQ(result.config->max_deviation_bps, 50.0);
+}
+
+TEST(Config, ParsesMaxDeviation) {
+    for (const auto& [text, expected] :
+         {std::pair{"25.5", 25.5}, std::pair{"10000", 10000.0}, std::pair{"0.01", 0.01}}) {
+        const auto result = parse_args({"--max-deviation-bps", text});
+        ASSERT_TRUE(result.config) << text << ": " << result.error;
+        EXPECT_DOUBLE_EQ(result.config->max_deviation_bps, expected);
+    }
+}
+
+TEST(Config, RejectsBadMaxDeviation) {
+    for (const char* value :
+         {"0", "0.0", "10000.1", "-1", "+5", "1e2", "abc", "", "nan", "inf", " 5", "5 ", "."}) {
+        EXPECT_FALSE(parse_args({"--max-deviation-bps", value}).config) << value;
+    }
 }
 
 TEST(Config, RejectsBadStaleness) {

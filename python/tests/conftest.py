@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from slipstream.models import BookUpdate, Fill, OrderSpec, ScheduleParams, TradeBatch
+from slipstream.models import BookUpdate, Fill, OrderSpec, ScheduleParams, StepResult, TradeBatch
 from slipstream.v1 import execution_pb2 as pb
 
 ENGINE_BIN = Path(__file__).resolve().parents[2] / "build" / "engine" / "slipstream_engine"
@@ -42,9 +42,20 @@ class FakeEngine:
     def apply_trades(self, batch: TradeBatch) -> None:
         self.trades.append(batch)
 
-    def step(self, now_ns: int) -> list[Fill]:
+    def step(self, now_ns: int) -> StepResult:
         self.steps.append(now_ns)
-        return self.fills_per_step.pop(0) if self.fills_per_step else []
+        fills = self.fills_per_step.pop(0) if self.fills_per_step else []
+        return StepResult(fills=fills, working_orders=self._working_orders())
+
+    def _working_orders(self) -> int:
+        total = len(self.submits)
+        if total == 0:
+            return 0
+        if self.done_after_steps is not None and len(self.steps) >= self.done_after_steps:
+            return 0
+        if self.state in (pb.ORDER_STATE_COMPLETED, pb.ORDER_STATE_HALTED):
+            return 0
+        return total
 
     def status(self) -> pb.StatusReply:
         if not self.accept:
@@ -103,3 +114,8 @@ def engine_address() -> Iterator[str]:
 @pytest.fixture
 def two_venue_engine_address() -> Iterator[str]:
     yield from _run_engine("--venue", "kraken:fee_bps=0", "--venue", "coinbase:fee_bps=1")
+
+
+@pytest.fixture
+def kraken_min_qty_engine_address() -> Iterator[str]:
+    yield from _run_engine("--venue", "kraken:fee_bps=0,min_qty=0.00005")

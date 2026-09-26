@@ -40,7 +40,9 @@ TEST(Risk, RejectsInvalidInputs) {
     EXPECT_EQ(kRisk.check_parent(Side::Buy, 0.0, 100.0, 0.0).reason, "invalid quantity");
     EXPECT_EQ(kRisk.check_parent(Side::Buy, std::nan(""), 100.0, 0.0).reason, "invalid quantity");
     EXPECT_EQ(kRisk.check_parent(Side::Buy, 0.5, 0.0, 0.0).reason, "no reference price");
-    EXPECT_EQ(kRisk.check_child(Side::Buy, 0.5, std::nan(""), 0.0, 0.0).reason, "no reference price");
+    EXPECT_EQ(kRisk.check_child(Side::Buy, 0.5, std::nan(""), 0.0, 0.0).reason, "invalid fill cost");
+    EXPECT_EQ(kRisk.check_child(Side::Buy, 0.5, 0.0, 0.0, 0.0).reason, "invalid fill cost");
+    EXPECT_EQ(kRisk.check_child(Side::Buy, 0.0, 50.0, 0.0, 0.0).reason, "invalid quantity");
 }
 
 TEST(Risk, ToleratesFloatingPointRoundingAtTheLimit) {
@@ -55,9 +57,10 @@ TEST(Risk, ChildPositionLimit) {
     EXPECT_EQ(decision.reason, "position limit exceeded");
 }
 
-TEST(Risk, ChildNotionalBudgetIncludesAlreadySpent) {
-    EXPECT_TRUE(kRisk.check_child(Side::Buy, 0.5, 100.0, 0.0, 900.0).ok);
-    const auto decision = kRisk.check_child(Side::Buy, 0.5, 100.0, 0.0, 960.0);
+TEST(Risk, ChildCostBudgetIncludesAlreadySpent) {
+    EXPECT_TRUE(kRisk.check_child(Side::Buy, 0.5, 60.0, 0.0, 940.0).ok);
+    const auto decision = kRisk.check_child(Side::Buy, 0.5, 60.5, 0.0, 940.0);
     EXPECT_FALSE(decision.ok);
     EXPECT_EQ(decision.reason, "order notional limit exceeded");
+    EXPECT_FALSE(kRisk.check_child(Side::Sell, 0.5, 60.5, 0.0, 940.0).ok);
 }
