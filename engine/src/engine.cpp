@@ -456,7 +456,8 @@ std::vector<VenueState> Engine::venue_states(std::int64_t now_ns) const {
     std::vector<VenueState> out;
     out.reserve(venues_.size());
     for (std::size_t v = 0; v < venues_.size(); ++v) {
-        out.push_back({venues_[v].settings.name, !venues_[v].book.empty(), fresh_locked(v, now_ns)});
+        const auto& venue = venues_[v];
+        out.push_back({venue.settings.name, !venue.book.empty(), fresh_locked(v, now_ns)});
     }
     return out;
 }
