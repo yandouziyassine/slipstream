@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+from bisect import bisect_left, insort
 from typing import Any
 
 from slipstream.models import BookUpdate, MarketDataError, TradeBatch
@@ -10,6 +11,7 @@ COINBASE_WS_URL = "wss://advanced-trade-ws.coinbase.com"
 MAX_MESSAGE_BYTES = 16 << 20
 MAX_EVENTS = 16
 MAX_UPDATES = 200_000
+MAX_BOOK_LEVELS = 200_000
 MAX_TRADES = 1000
 MAX_DEPTH = 1000
 MAX_FIELD_CHARS = 64
@@ -19,6 +21,37 @@ _SIDES = ("bid", "offer")
 
 class CoinbaseMessageError(MarketDataError):
     pass
+
+
+class _BookSide:
+    """One side of the full Coinbase book, with prices kept sorted best-first."""
+
+    def __init__(self, descending: bool) -> None:
+        self._sign = -1.0 if descending else 1.0
+        self._qty: dict[float, float] = {}
+        self._keys: list[float] = []
+
+    def replace(self, levels: list[tuple[float, float]]) -> None:
+        qty = {price: size for price, size in levels if size > 0}
+        if len(qty) > MAX_BOOK_LEVELS:
+            raise CoinbaseMessageError("book has too many levels")
+        self._qty = qty
+        self._keys = sorted(self._sign * price for price in qty)
+
+    def set(self, price: float, qty: float) -> None:
+        key = self._sign * price
+        if qty == 0:
+            if self._qty.pop(price, None) is not None:
+                del self._keys[bisect_left(self._keys, key)]
+            return
+        if price not in self._qty:
+            if len(self._qty) >= MAX_BOOK_LEVELS:
+                raise CoinbaseMessageError("book has too many levels")
+            insort(self._keys, key)
+        self._qty[price] = qty
+
+    def top(self, depth: int) -> tuple[tuple[float, float], ...]:
+        return tuple((self._sign * key, self._qty[self._sign * key]) for key in self._keys[:depth])
 
 
 def product_id(symbol: str) -> str:
@@ -46,6 +79,9 @@ class CoinbaseStream:
         self._product = product_id(symbol)
         self._depth = depth
         self._last_sequence: int | None = None
+        self._bids = _BookSide(descending=True)
+        self._asks = _BookSide(descending=False)
+        self._has_book = False
 
     def parse(self, raw: str | bytes) -> BookUpdate | TradeBatch | None:
         if len(raw) > MAX_MESSAGE_BYTES:
@@ -98,11 +134,26 @@ class CoinbaseStream:
                 price = _decimal(update.get("price_level"), "price", allow_zero=False)
                 qty = _decimal(update.get("new_quantity"), "quantity", allow_zero=True)
                 (bids if update["side"] == "bid" else asks).append((price, qty))
-        is_snapshot = kinds == {"snapshot"}
-        if is_snapshot:
-            bids = sorted((level for level in bids if level[1] > 0), reverse=True)[: self._depth]
-            asks = sorted(level for level in asks if level[1] > 0)[: self._depth]
-        return BookUpdate(self._symbol, is_snapshot, tuple(bids), tuple(asks), "coinbase")
+        # Coinbase sends full-book deltas, but the engine keeps only the top N levels, so it could
+        # never refill a deleted top level. Keep the whole book here and send the top-N view.
+        if kinds == {"snapshot"}:
+            self._bids.replace(bids)
+            self._asks.replace(asks)
+            self._has_book = True
+        else:
+            if not self._has_book:
+                raise CoinbaseMessageError("level2 update before snapshot")
+            for price, qty in bids:
+                self._bids.set(price, qty)
+            for price, qty in asks:
+                self._asks.set(price, qty)
+        return BookUpdate(
+            self._symbol,
+            True,
+            self._bids.top(self._depth),
+            self._asks.top(self._depth),
+            "coinbase",
+        )
 
     def _trades(self, events: list[dict[str, Any]]) -> TradeBatch | None:
         prints: list[tuple[float, float]] = []
