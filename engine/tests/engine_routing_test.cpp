@@ -2,6 +2,8 @@
 
 #include <cmath>
 #include <cstdint>
+#include <limits>
+#include <optional>
 
 #include "engine.h"
 
@@ -333,4 +335,35 @@ TEST(RoutingVenueRules, SingleVenueCostIgnoresMinimumOrderSizes) {
     EXPECT_TRUE(status.venue_costs[0].available);
     EXPECT_TRUE(status.venue_costs[1].available);
     EXPECT_LT(status.venue_costs[0].all_in_bps, status.venue_costs[1].all_in_bps);
+}
+
+TEST_F(RoutingTest, HeartbeatKeepsAQuietVenueFresh) {
+    ASSERT_TRUE(engine.apply_heartbeat(0, 10 * kSec));
+    // An older heartbeat must not move the venue's heartbeat time backwards.
+    ASSERT_TRUE(engine.apply_heartbeat(0, 5 * kSec));
+    // Only kraken heartbeated, so coinbase is stale and the mid is kraken's alone.
+    EXPECT_EQ(engine.mid(), std::optional<double>{(99.0 + 100.0) / 2.0});
+}
+
+TEST_F(RoutingTest, HeartbeatsCannotKeepABookFreshMoreThan30sAfterItsLastChange) {
+    ASSERT_TRUE(engine.apply_book_snapshot(1, {{99.5, 5.0}}, {{100.3, 5.0}}, 31 * kSec));
+    ASSERT_TRUE(engine.apply_heartbeat(0, 31 * kSec));
+    EXPECT_EQ(engine.mid(), std::optional<double>{(99.5 + 100.0) / 2.0});
+    ASSERT_TRUE(engine.apply_book_snapshot(1, {{99.5, 5.0}}, {{100.3, 5.0}}, 34 * kSec));
+    ASSERT_TRUE(engine.apply_heartbeat(0, 34 * kSec));
+    // Kraken's book last changed at 1 s: heartbeats count up to 31 s, which is 3 s old at 34 s.
+    EXPECT_EQ(engine.mid(), std::optional<double>{(99.5 + 100.3) / 2.0});
+}
+
+TEST_F(RoutingTest, HeartbeatRejectsUnknownVenueAndNegativeTime) {
+    EXPECT_FALSE(engine.apply_heartbeat(2, kSec));
+    EXPECT_FALSE(engine.apply_heartbeat(0, -1));
+}
+
+TEST(RoutingHeartbeat, BookNearTheEndOfTimeDoesNotOverflowTheGrace) {
+    constexpr std::int64_t kMax = std::numeric_limits<std::int64_t>::max();
+    Engine engine(RiskLimits{1'000'000.0, 100.0}, 10, {{"kraken", 0.0}, {"coinbase", 0.0}}, kSec);
+    ASSERT_TRUE(engine.apply_book_snapshot(0, {{99.0, 5.0}}, {{100.0, 5.0}}, kMax - kSec));
+    ASSERT_TRUE(engine.apply_heartbeat(0, kMax));
+    EXPECT_EQ(engine.mid(), std::optional<double>{(99.0 + 100.0) / 2.0});
 }

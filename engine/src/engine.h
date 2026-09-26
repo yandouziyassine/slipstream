@@ -95,6 +95,10 @@ public:
     bool apply_book_update(std::size_t venue, const std::vector<Level>& bids,
                            const std::vector<Level>& asks, std::int64_t recv_ns);
     bool apply_trades(const std::vector<Trade>& trades);
+    // A heartbeat proves the feed is alive, so it keeps a quiet venue fresh, but only for
+    // kHeartbeatGraceNs after the venue's last real book change.
+    bool apply_heartbeat(std::size_t venue, std::int64_t now_ns);
+    static constexpr std::int64_t kHeartbeatGraceNs = 30'000'000'000;
 
     SubmitResult submit(const ParentOrderRequest& request, const ScheduleSpec& spec = TwapSpec{});
     std::vector<Fill> step(std::int64_t now_ns);
@@ -130,6 +134,7 @@ private:
         double fee_rate;
         OrderBook book;
         std::int64_t last_update_ns;
+        std::int64_t last_heartbeat_ns;
     };
 
     // The remainder can never trade when it is below every venue's minimum.
