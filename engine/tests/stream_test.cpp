@@ -174,6 +174,10 @@ double bid_qty(const v1::StatusReply& status, int venue) {
     return bids.empty() ? 0.0 : bids.at(0).qty();
 }
 
+std::function<bool(const v1::StatusReply&)> booked(int venue) {
+    return [venue](const v1::StatusReply& status) { return status.venues(venue).has_book(); };
+}
+
 grpc::Status stream_one(Harness& harness, const std::optional<std::string>& venue,
                         const v1::MarketEvent& event) {
     Stream stream(harness.stub(), venue);
@@ -220,7 +224,7 @@ TEST(StreamTest, LiveRejectsMissingUnknownAndDuplicateVenues) {
 
     Stream first(harness.stub(), "kraken");
     first.send(book("", 0, 1.0));
-    ASSERT_TRUE(harness.eventually([](const v1::StatusReply& s) { return s.venues(0).has_book(); }));
+    ASSERT_TRUE(harness.eventually(booked(0)));
     EXPECT_EQ(stream_one(harness, "kraken", book("", 0, 2.0)).error_code(),
               grpc::StatusCode::FAILED_PRECONDITION);
     EXPECT_TRUE(first.finish().ok());
@@ -275,7 +279,7 @@ TEST(StreamTest, ReplayAllowsOneStreamAtATime) {
     Harness harness(ClockMode::Replay);
     Stream first(harness.stub(), std::nullopt);
     first.send(book("kraken", kSec, 1.0));
-    ASSERT_TRUE(harness.eventually([](const v1::StatusReply& s) { return s.venues(0).has_book(); }));
+    ASSERT_TRUE(harness.eventually(booked(0)));
     EXPECT_EQ(stream_one(harness, std::nullopt, book("coinbase", kSec, 1.0)).error_code(),
               grpc::StatusCode::FAILED_PRECONDITION);
     EXPECT_TRUE(first.finish().ok());
@@ -335,7 +339,7 @@ TEST(StreamTest, SubscriberReceivesFillsAndTheTerminalUpdate) {
         stream.send(book("kraken", kSec, 1.0));
         ASSERT_TRUE(stream.finish().ok());
     }
-    ASSERT_TRUE(harness.eventually([](const v1::StatusReply& s) { return s.venues(0).has_book(); }));
+    ASSERT_TRUE(harness.eventually(booked(0)));
 
     const auto reply = harness.submit("o-1", kSec, kSec, 2);
     ASSERT_TRUE(reply.accepted()) << reply.reason();
@@ -416,7 +420,7 @@ TEST(StreamTest, SlowSubscriberIsDisconnectedWithResourceExhausted) {
         stream.send(book("kraken", kSec, 1.0));
         ASSERT_TRUE(stream.finish().ok());
     }
-    ASSERT_TRUE(harness.eventually([](const v1::StatusReply& s) { return s.venues(0).has_book(); }));
+    ASSERT_TRUE(harness.eventually(booked(0)));
     // Without a subscriber nothing steps, so all orders fill together at the next tick.
     for (int i = 0; i < 50; ++i) {
         ASSERT_TRUE(harness.submit("o-" + std::to_string(i), kSec, kSec, 1).accepted());
