@@ -71,6 +71,7 @@ target_compile_options(slipstream_engine PRIVATE ${SLIPSTREAM_WARNINGS})
 
 enable_testing()
 find_package(GTest REQUIRED)
+find_package(Threads REQUIRED)
 include(GoogleTest)
 
 add_executable(engine_tests
@@ -89,7 +90,8 @@ add_executable(engine_tests
   tests/router_test.cpp
   tests/engine_routing_test.cpp
   tests/clock_test.cpp
+  tests/bounded_queue_test.cpp
 )
-target_link_libraries(engine_tests PRIVATE slipstream_service GTest::gtest_main)
+target_link_libraries(engine_tests PRIVATE slipstream_service GTest::gtest_main Threads::Threads)
 target_compile_options(engine_tests PRIVATE ${SLIPSTREAM_WARNINGS})
 gtest_discover_tests(engine_tests)
