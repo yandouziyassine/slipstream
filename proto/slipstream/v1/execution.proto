@@ -121,6 +121,29 @@ message VenueInfo {
   double min_qty = 3;
   double qty_step = 4;
   double min_notional = 5;
+  bool has_book = 6;
+  bool fresh = 7;
+}
+
+// Top levels of one venue's book, best price first on each side.
+message VenueBook {
+  string venue = 1;
+  repeated PriceLevel bids = 2;
+  repeated PriceLevel asks = 3;
+}
+
+message EngineStats {
+  uint64 events = 1;
+  uint64 queue_high_water = 2;
+  // Ingest-to-processed time, as the upper bound of a log2 histogram bucket.
+  int64 latency_p50_ns = 3;
+  int64 latency_p99_ns = 4;
+}
+
+enum ClockMode {
+  CLOCK_MODE_UNSPECIFIED = 0;
+  CLOCK_MODE_LIVE = 1;
+  CLOCK_MODE_REPLAY = 2;
 }
 
 message StatusReply {
@@ -130,6 +153,9 @@ message StatusReply {
   repeated OrderStatus orders = 4;
   repeated VenueInfo venues = 5;
   int32 book_depth = 6;
+  repeated VenueBook books = 7;
+  EngineStats stats = 8;
+  ClockMode clock_mode = 9;
 }
 
 message Trade {
@@ -146,10 +172,53 @@ message TradeBatch {
 
 message TradeAck {}
 
+message Heartbeat {}
+
+// Replay mode only: advances time.
+message Tick {
+  int64 now_ns = 1;
+}
+
+message MarketEvent {
+  oneof event {
+    BookUpdate book = 1;
+    TradeBatch trades = 2;
+    Heartbeat heartbeat = 3;
+    Tick tick = 4;
+  }
+}
+
+message MarketStreamSummary {
+  uint64 events = 1;
+}
+
+message SubscribeRequest {}
+
+message OrderUpdate {
+  string order_id = 1;
+  OrderState state = 2;
+  string reason = 3;
+  double filled_qty = 4;
+}
+
+message EngineEvent {
+  // Strictly increasing across all events.
+  uint64 seq = 1;
+  oneof event {
+    Fill fill = 2;
+    OrderUpdate order = 3;
+  }
+}
+
 service ExecutionEngine {
   rpc ApplyBookUpdate(BookUpdate) returns (BookAck);
   rpc SubmitParentOrder(ParentOrder) returns (SubmitReply);
   rpc Step(StepRequest) returns (StepReply);
   rpc GetStatus(StatusRequest) returns (StatusReply);
   rpc ApplyTrades(TradeBatch) returns (TradeAck);
+  // Live mode: one stream per venue, named by the "slipstream-venue" request metadata.
+  // Replay mode: exactly one stream, and every book or trade event names its own venue.
+  rpc MarketStream(stream MarketEvent) returns (MarketStreamSummary);
+  // Fills and order state changes for every order, in engine order. One subscriber at a time.
+  rpc Subscribe(SubscribeRequest) returns (stream EngineEvent);
 }
