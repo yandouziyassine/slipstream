@@ -95,6 +95,7 @@ add_executable(engine_tests
   tests/bounded_queue_test.cpp
   tests/engine_loop_test.cpp
   tests/market_validation_test.cpp
+  tests/stream_test.cpp
 )
 target_link_libraries(engine_tests PRIVATE slipstream_service GTest::gtest_main Threads::Threads)
 target_compile_options(engine_tests PRIVATE ${SLIPSTREAM_WARNINGS})

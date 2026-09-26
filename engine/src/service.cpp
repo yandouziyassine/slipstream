@@ -1,8 +1,10 @@
 #include "service.h"
 
 #include <cstdint>
+#include <iterator>
 #include <optional>
 #include <stdexcept>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -149,6 +151,35 @@ void fill_status(const Engine& engine, const LoopView& view, ClockMode mode,
     reply.set_clock_mode(mode == ClockMode::Live ? v1::CLOCK_MODE_LIVE : v1::CLOCK_MODE_REPLAY);
 }
 
+v1::EngineEvent to_proto(const EngineEventData& data) {
+    v1::EngineEvent out;
+    out.set_seq(data.seq);
+    if (const auto* fill = std::get_if<Fill>(&data.event)) {
+        to_proto(*fill, *out.mutable_fill());
+    } else {
+        const auto& update = std::get<OrderUpdate>(data.event);
+        auto* order = out.mutable_order();
+        order->set_order_id(update.order_id);
+        order->set_state(to_proto(update.state));
+        order->set_reason(update.reason);
+        order->set_filled_qty(update.filled_qty);
+    }
+    return out;
+}
+
+// Runs its function on every exit path of the enclosing scope.
+template <class F>
+class ScopeExit {
+public:
+    explicit ScopeExit(F fn) : fn_(std::move(fn)) {}
+    ~ScopeExit() { fn_(); }
+    ScopeExit(const ScopeExit&) = delete;
+    ScopeExit& operator=(const ScopeExit&) = delete;
+
+private:
+    F fn_;
+};
+
 std::vector<std::string> venue_names(EngineLoop& loop) {
     std::vector<std::string> names;
     for (const auto& venue : loop.run([](Engine& e) { return e.venue_settings(); })) {
@@ -236,6 +267,78 @@ grpc::Status ExecutionService::ApplyTrades(grpc::ServerContext*, const v1::Trade
         const bool ok = loop_.run([&](Engine& engine) { return engine.apply_trades(trades); });
         return ok ? grpc::Status::OK : invalid("invalid trade");
     });
+}
+
+std::optional<std::size_t> ExecutionService::metadata_venue(
+    const grpc::ServerContext& context) const {
+    const auto& metadata = context.client_metadata();
+    const auto [first, last] = metadata.equal_range(kVenueMetadataKey);
+    if (first == last || std::next(first) != last) return std::nullopt;
+    const std::string_view name(first->second.data(), first->second.size());
+    if (name.empty()) return std::nullopt;
+    return validator_.resolve_venue(name);
+}
+
+grpc::Status ExecutionService::MarketStream(grpc::ServerContext* context,
+                                            grpc::ServerReader<v1::MarketEvent>* reader,
+                                            v1::MarketStreamSummary* summary) {
+    if (loop_.mode() == ClockMode::Replay) {
+        if (!loop_.bind_replay()) {
+            return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION,
+                                "a replay stream is already open");
+        }
+        const ScopeExit unbind([this] { loop_.unbind_replay(); });
+        return pump(StreamAdmission::replay(validator_), *reader, *summary);
+    }
+    const auto venue = metadata_venue(*context);
+    if (!venue) return invalid("slipstream-venue metadata must name one registered venue");
+    if (!loop_.bind_venue(*venue)) {
+        return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION,
+                            "this venue already has an open stream");
+    }
+    const ScopeExit unbind([this, bound = *venue] { loop_.unbind_venue(bound); });
+    return pump(StreamAdmission::live(validator_, *venue), *reader, *summary);
+}
+
+grpc::Status ExecutionService::pump(StreamAdmission admission,
+                                    grpc::ServerReader<v1::MarketEvent>& reader,
+                                    v1::MarketStreamSummary& summary) {
+    v1::MarketEvent event;
+    std::uint64_t events = 0;
+    while (reader.Read(&event)) {
+        auto admitted = admission.admit(event);
+        if (const auto* status = std::get_if<grpc::Status>(&admitted)) return *status;
+        if (!loop_.push(std::move(std::get<MarketItem>(admitted)))) {
+            return grpc::Status(grpc::StatusCode::RESOURCE_EXHAUSTED, "engine queue full");
+        }
+        ++events;
+    }
+    summary.set_events(events);
+    return grpc::Status::OK;
+}
+
+grpc::Status ExecutionService::Subscribe(grpc::ServerContext* context,
+                                         const v1::SubscribeRequest*,
+                                         grpc::ServerWriter<v1::EngineEvent>* writer) {
+    const auto subscriber = loop_.subscribe();
+    if (!subscriber) {
+        return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "another subscriber is active");
+    }
+    const ScopeExit unsubscribe([&] { loop_.unsubscribe(subscriber); });
+    writer->SendInitialMetadata();
+    for (;;) {
+        if (context->IsCancelled()) return grpc::Status::OK;
+        if (subscriber->overflowed()) {
+            return grpc::Status(grpc::StatusCode::RESOURCE_EXHAUSTED,
+                                "subscriber fell too far behind; read order state from GetStatus");
+        }
+        const auto event = subscriber->pop_for(kSubscribePoll);
+        if (event) {
+            if (!writer->Write(to_proto(*event))) return grpc::Status::OK;  // the client left
+            continue;
+        }
+        if (subscriber->closed()) return grpc::Status::OK;
+    }
 }
 
 }  // namespace slipstream
