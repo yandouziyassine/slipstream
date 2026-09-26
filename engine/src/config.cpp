@@ -179,6 +179,14 @@ ParseResult parse_args(const std::vector<std::string>& args) {
             const auto parsed = parse_stale_ms(value);
             if (!parsed) return {std::nullopt, "invalid --stale-ms (1-600000)"};
             config.stale_ns = *parsed;
+        } else if (flag == "--clock") {
+            if (value == "live") {
+                config.clock = ClockMode::Live;
+            } else if (value == "replay") {
+                config.clock = ClockMode::Replay;
+            } else {
+                return {std::nullopt, "invalid --clock (must be live or replay)"};
+            }
         } else {
             return {std::nullopt, "unknown flag " + flag};
         }
