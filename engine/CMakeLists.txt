@@ -64,7 +64,7 @@ add_library(slipstream_proto STATIC ${GEN_SRCS})
 target_include_directories(slipstream_proto SYSTEM PUBLIC ${GEN_DIR})
 target_link_libraries(slipstream_proto PUBLIC protobuf::libprotobuf PkgConfig::GRPCPP)
 
-add_library(slipstream_service STATIC src/service.cpp)
+add_library(slipstream_service STATIC src/service.cpp src/market_validation.cpp)
 target_link_libraries(slipstream_service PUBLIC slipstream_core slipstream_proto)
 target_compile_options(slipstream_service PRIVATE ${SLIPSTREAM_WARNINGS})
 
@@ -94,6 +94,7 @@ add_executable(engine_tests
   tests/clock_test.cpp
   tests/bounded_queue_test.cpp
   tests/engine_loop_test.cpp
+  tests/market_validation_test.cpp
 )
 target_link_libraries(engine_tests PRIVATE slipstream_service GTest::gtest_main Threads::Threads)
 target_compile_options(engine_tests PRIVATE ${SLIPSTREAM_WARNINGS})

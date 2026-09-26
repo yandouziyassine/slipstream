@@ -27,8 +27,10 @@ public:
 
     bool empty() const;
 
-private:
+    // Finite, positive prices and finite, non-negative quantities; a snapshot also needs qty > 0.
     static bool valid_levels(const std::vector<Level>& levels, bool allow_zero_qty);
+
+private:
     void truncate();
 
     std::size_t max_depth_;
