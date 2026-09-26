@@ -15,6 +15,9 @@ namespace slipstream {
 struct VenueConfig {
     std::string name;
     double fee_bps;
+    double min_qty = 0.0;
+    double qty_step = 0.0;
+    double min_notional = 0.0;
 };
 
 constexpr std::array<std::string_view, 2> kKnownVenues{"kraken", "coinbase"};

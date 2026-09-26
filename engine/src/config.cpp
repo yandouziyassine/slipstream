@@ -56,30 +56,65 @@ bool is_known_venue(std::string_view name) {
     return std::find(kKnownVenues.begin(), kKnownVenues.end(), name) != kKnownVenues.end();
 }
 
-std::optional<VenueConfig> parse_venue(const std::string& value) {
-    const auto colon = value.find(':');
-    if (colon == std::string::npos) return std::nullopt;
-    const std::string name = value.substr(0, colon);
-    if (!is_known_venue(name)) return std::nullopt;
-    const std::string rest = value.substr(colon + 1);
-    constexpr std::string_view prefix = "fee_bps=";
-    if (rest.size() < prefix.size() || rest.compare(0, prefix.size(), prefix) != 0) return std::nullopt;
-    const std::string number = rest.substr(prefix.size());
-    const auto dots = std::count(number.begin(), number.end(), '.');
-    const bool plain_decimal =
-        dots <= 1 && number.find_first_not_of("0123456789.") == std::string::npos &&
-        number.find_first_of("0123456789") != std::string::npos;
+// Plain decimal only: no sign, exponent, whitespace, nan or inf.
+std::optional<double> parse_plain_decimal(std::string_view text, double max) {
+    const auto dots = std::count(text.begin(), text.end(), '.');
+    const bool plain_decimal = dots <= 1 &&
+                               text.find_first_not_of("0123456789.") == std::string_view::npos &&
+                               text.find_first_of("0123456789") != std::string_view::npos;
     if (!plain_decimal) return std::nullopt;
     try {
+        const std::string number(text);
         std::size_t consumed = 0;
-        const double fee_bps = std::stod(number, &consumed);
-        if (consumed != number.size() || !std::isfinite(fee_bps) || fee_bps < 0.0 || fee_bps > 1000.0) {
+        const double value = std::stod(number, &consumed);
+        if (consumed != number.size() || !std::isfinite(value) || value < 0.0 || value > max) {
             return std::nullopt;
         }
-        return VenueConfig{name, fee_bps};
+        return value;
     } catch (const std::exception&) {
         return std::nullopt;
     }
+}
+
+struct VenueKey {
+    std::string_view name;
+    double max;
+    double VenueConfig::*field;
+};
+
+// fee_bps first: it is the only required key.
+constexpr std::array<VenueKey, 4> kVenueKeys{{{"fee_bps", 1000.0, &VenueConfig::fee_bps},
+                                              {"min_qty", 1e6, &VenueConfig::min_qty},
+                                              {"qty_step", 1e6, &VenueConfig::qty_step},
+                                              {"min_notional", 1e9, &VenueConfig::min_notional}}};
+
+std::optional<VenueConfig> parse_venue(const std::string& value) {
+    const auto colon = value.find(':');
+    if (colon == std::string::npos) return std::nullopt;
+    VenueConfig venue{value.substr(0, colon), 0.0};
+    if (!is_known_venue(venue.name)) return std::nullopt;
+    std::array<bool, kVenueKeys.size()> seen{};
+    std::string_view rest = std::string_view(value).substr(colon + 1);
+    while (true) {
+        const auto comma = rest.find(',');
+        const std::string_view item = rest.substr(0, comma);
+        const auto equals = item.find('=');
+        if (equals == std::string_view::npos) return std::nullopt;
+        const auto key = std::find_if(kVenueKeys.begin(), kVenueKeys.end(), [&](const VenueKey& k) {
+            return k.name == item.substr(0, equals);
+        });
+        if (key == kVenueKeys.end()) return std::nullopt;
+        auto& key_seen = seen[static_cast<std::size_t>(key - kVenueKeys.begin())];
+        if (key_seen) return std::nullopt;
+        key_seen = true;
+        const auto number = parse_plain_decimal(item.substr(equals + 1), key->max);
+        if (!number) return std::nullopt;
+        venue.*(key->field) = *number;
+        if (comma == std::string_view::npos) break;
+        rest = rest.substr(comma + 1);
+    }
+    if (!seen[0]) return std::nullopt;
+    return venue;
 }
 
 std::optional<std::int64_t> parse_stale_ms(const std::string& text) {
@@ -121,7 +156,8 @@ ParseResult parse_args(const std::vector<std::string>& args) {
             const auto parsed = parse_venue(value);
             if (!parsed) {
                 return {std::nullopt,
-                        "invalid --venue (name:fee_bps=N, name in kraken|coinbase, 0<=N<=1000)"};
+                        "invalid --venue (name:fee_bps=F[,min_qty=Q][,qty_step=S][,min_notional=N]"
+                        ", name in kraken|coinbase, plain decimals, 0<=F<=1000)"};
             }
             if (!venue_flag_seen) {
                 config.venues.clear();

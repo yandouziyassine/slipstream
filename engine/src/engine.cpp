@@ -37,9 +37,8 @@ Engine::Engine(RiskLimits limits, std::size_t book_depth, std::vector<VenueSetti
     : stale_ns_(stale_ns), risk_(limits) {
     venues_.reserve(venues.size());
     for (auto& venue : venues) {
-        const double fee_bps = venue.fee_bps;
-        venues_.push_back(Venue{std::move(venue.name), fee_bps, fee_bps / 1e4,
-                                OrderBook(book_depth), 0});
+        const double fee_rate = venue.fee_bps / 1e4;
+        venues_.push_back(Venue{std::move(venue), fee_rate, OrderBook(book_depth), 0});
     }
 }
 
@@ -142,7 +141,9 @@ std::vector<VenueLiquidity> Engine::liquidity_locked(Side side, std::int64_t now
     for (std::size_t v = 0; v < venues_.size(); ++v) {
         if (only && *only != v) continue;
         if (!fresh_locked(v, now_ns)) continue;
-        out.push_back({v, venues_[v].fee_rate, venues_[v].book.liquidity_for(side)});
+        const auto& settings = venues_[v].settings;
+        out.push_back({v, venues_[v].fee_rate, venues_[v].book.liquidity_for(side), settings.min_qty,
+                       settings.qty_step, settings.min_notional});
     }
     return out;
 }
@@ -218,7 +219,7 @@ void Engine::advance_locked(ParentOrder& order, std::int64_t now_ns,
 
     for (const auto& leg : result.legs) {
         fills.push_back({order.request.order_id, now_ns, leg.qty, leg.gross_notional / leg.qty,
-                         venues_[leg.venue].name, leg.fee});
+                         venues_[leg.venue].settings.name, leg.fee});
     }
 
     order.filled_qty += result.filled_qty;
@@ -269,7 +270,7 @@ std::vector<OrderStatus> Engine::statuses() const {
                                      order.venue_all_in_notional[v] / order.filled_qty,
                                      order.arrival_mid)
                           : 0.0;
-            venue_costs.push_back({venues_[v].name, all_in_bps, available});
+            venue_costs.push_back({venues_[v].settings.name, all_in_bps, available});
         }
 
         out.push_back({order.request.order_id, order.request.side, order.state, order.request.qty,
@@ -299,7 +300,7 @@ double Engine::market_volume() const {
 std::optional<std::size_t> Engine::venue_index(std::string_view name) const {
     std::lock_guard lock(mu_);
     for (std::size_t v = 0; v < venues_.size(); ++v) {
-        if (std::string_view(venues_[v].name) == name) return v;
+        if (std::string_view(venues_[v].settings.name) == name) return v;
     }
     return std::nullopt;
 }
@@ -313,7 +314,7 @@ std::vector<VenueSettings> Engine::venue_settings() const {
     std::lock_guard lock(mu_);
     std::vector<VenueSettings> out;
     out.reserve(venues_.size());
-    for (const auto& venue : venues_) out.push_back({venue.name, venue.fee_bps});
+    for (const auto& venue : venues_) out.push_back(venue.settings);
     return out;
 }
 

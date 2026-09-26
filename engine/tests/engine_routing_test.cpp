@@ -161,6 +161,20 @@ TEST_F(RoutingTest, SellSplitsAcrossVenuesByFeeAdjustedBids) {
     EXPECT_DOUBLE_EQ(engine.position(), -1.0);
 }
 
+TEST(RoutingVenueRules, EngineAppliesEachVenuesQtyStep) {
+    Engine engine(RiskLimits{1'000'000.0, 100.0}, 10, {{"kraken", 0.0, 0.01, 0.01, 1.0}}, 0);
+    ASSERT_TRUE(engine.apply_book_snapshot(0, {{99.0, 5.0}}, {{101.0, 5.0}}, 0));
+    ASSERT_TRUE(engine.submit({"o", Side::Buy, 0.5, 0, 10 * kSec, 1}).accepted);
+    ASSERT_TRUE(engine.apply_book_snapshot(0, {{99.0, 5.0}}, {{101.0, 0.037}}, 0));
+    const auto fills = engine.step(0);
+    ASSERT_EQ(fills.size(), 1u);
+    EXPECT_NEAR(fills[0].qty, 0.03, 1e-12);
+    const auto settings = engine.venue_settings().at(0);
+    EXPECT_DOUBLE_EQ(settings.min_qty, 0.01);
+    EXPECT_DOUBLE_EQ(settings.qty_step, 0.01);
+    EXPECT_DOUBLE_EQ(settings.min_notional, 1.0);
+}
+
 TEST_F(RoutingTest, VenueWithEmptyAskSideIsSkippedForBuys) {
     ASSERT_TRUE(engine.apply_book_snapshot(1, {{99.5, 5.0}}, {}, kSec));
     ASSERT_TRUE(engine.submit({"o", Side::Buy, 0.5, kSec, kSec, 1}).accepted);

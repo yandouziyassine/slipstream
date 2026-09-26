@@ -46,6 +46,9 @@ struct Fill {
 struct VenueSettings {
     std::string name;
     double fee_bps;
+    double min_qty = 0.0;
+    double qty_step = 0.0;
+    double min_notional = 0.0;
 };
 
 struct VenueCost {
@@ -116,8 +119,7 @@ private:
     };
 
     struct Venue {
-        std::string name;
-        double fee_bps;
+        VenueSettings settings;
         double fee_rate;
         OrderBook book;
         std::int64_t last_update_ns;
