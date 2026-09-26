@@ -1,0 +1,374 @@
+#include <grpcpp/grpcpp.h>
+#include <gtest/gtest.h>
+
+#include <chrono>
+#include <cstdint>
+#include <functional>
+#include <future>
+#include <memory>
+#include <optional>
+#include <string>
+#include <thread>
+#include <utility>
+#include <vector>
+
+#include "engine_loop.h"
+#include "service.h"
+#include "stream_harness.h"
+
+using namespace slipstream;
+using namespace slipstream::test;
+using namespace std::chrono_literals;
+
+namespace {
+
+constexpr std::int64_t kSec = 1'000'000'000;
+constexpr std::int64_t kDay = 86'400 * kSec;
+
+v1::MarketEvent book(const std::string& venue, std::int64_t recv_ns, double bid_qty,
+                     bool snapshot = true) {
+    v1::MarketEvent event;
+    auto* update = event.mutable_book();
+    update->set_symbol("BTC/USD");
+    update->set_is_snapshot(snapshot);
+    update->set_venue(venue);
+    update->set_recv_ns(recv_ns);
+    auto* bid = update->add_bids();
+    bid->set_price(99.0);
+    bid->set_qty(bid_qty);
+    if (snapshot) {
+        auto* ask = update->add_asks();
+        ask->set_price(101.0);
+        ask->set_qty(100.0);
+    }
+    return event;
+}
+
+v1::MarketEvent tick(std::int64_t now_ns) {
+    v1::MarketEvent event;
+    event.mutable_tick()->set_now_ns(now_ns);
+    return event;
+}
+
+double bid_qty(const v1::StatusReply& status, int venue) {
+    const auto& bids = status.books(venue).bids();
+    return bids.empty() ? 0.0 : bids.at(0).qty();
+}
+
+std::function<bool(const v1::StatusReply&)> booked(int venue) {
+    return [venue](const v1::StatusReply& status) { return status.venues(venue).has_book(); };
+}
+
+// Holds the engine thread inside a command until release() or destruction.
+class EngineGate {
+public:
+    explicit EngineGate(EngineLoop& loop) {
+        auto entered = entered_.get_future();
+        holder_ = std::async(std::launch::async, [this, &loop] {
+            loop.run([this](Engine&) {
+                entered_.set_value();
+                released_.wait();
+            });
+        });
+        entered.wait();
+    }
+
+    ~EngineGate() { release(); }
+
+    EngineGate(const EngineGate&) = delete;
+    EngineGate& operator=(const EngineGate&) = delete;
+
+    void release() {
+        if (holder_.valid()) {
+            release_.set_value();
+            holder_.get();
+        }
+    }
+
+private:
+    std::promise<void> entered_;
+    std::promise<void> release_;
+    std::shared_future<void> released_ = release_.get_future().share();
+    std::future<void> holder_;
+};
+
+grpc::Status stream_one(Harness& harness, const std::optional<std::string>& venue,
+                        const v1::MarketEvent& event) {
+    Stream stream(harness.stub(), venue);
+    stream.send(event);
+    return stream.finish();
+}
+
+}  // namespace
+
+TEST(StreamTest, TwoVenuesStreamConcurrently) {
+    Harness harness(ClockMode::Live);
+    constexpr int kUpdates = 300;
+    const auto feed = [&](const std::string& venue, double scale) {
+        Stream stream(harness.stub(), venue);
+        stream.send(book(venue, 0, scale));
+        for (int i = 1; i <= kUpdates; ++i) stream.send(book("", 0, scale * i, false));
+        const auto status = stream.finish();
+        EXPECT_TRUE(status.ok()) << status.error_message();
+        EXPECT_EQ(stream.events(), static_cast<std::uint64_t>(kUpdates + 1));
+    };
+    auto kraken = std::async(std::launch::async, feed, "kraken", 1.0);
+    auto coinbase = std::async(std::launch::async, feed, "coinbase", 2.0);
+    kraken.get();
+    coinbase.get();
+
+    EXPECT_TRUE(harness.eventually([](const v1::StatusReply& status) {
+        return bid_qty(status, 0) == 1.0 * kUpdates && bid_qty(status, 1) == 2.0 * kUpdates;
+    }));
+    const auto status = harness.status();
+    EXPECT_TRUE(status.venues(0).has_book());
+    EXPECT_TRUE(status.venues(1).has_book());
+    EXPECT_TRUE(status.venues(0).fresh());
+    EXPECT_EQ(status.clock_mode(), v1::CLOCK_MODE_LIVE);
+}
+
+TEST(StreamTest, LiveRejectsMissingUnknownAndDuplicateVenues) {
+    Harness harness(ClockMode::Live);
+    EXPECT_EQ(stream_one(harness, std::nullopt, book("", 0, 1.0)).error_code(),
+              grpc::StatusCode::INVALID_ARGUMENT);
+    EXPECT_EQ(stream_one(harness, "binance", book("", 0, 1.0)).error_code(),
+              grpc::StatusCode::INVALID_ARGUMENT);
+    EXPECT_EQ(stream_one(harness, "", book("", 0, 1.0)).error_code(),
+              grpc::StatusCode::INVALID_ARGUMENT);
+
+    Stream first(harness.stub(), "kraken");
+    first.send(book("", 0, 1.0));
+    ASSERT_TRUE(harness.eventually(booked(0)));
+    EXPECT_EQ(stream_one(harness, "kraken", book("", 0, 2.0)).error_code(),
+              grpc::StatusCode::FAILED_PRECONDITION);
+    EXPECT_TRUE(first.finish().ok());
+    EXPECT_EQ(first.events(), 1u);
+
+    // The first stream unbound its venue when it ended.
+    EXPECT_TRUE(stream_one(harness, "kraken", book("", 0, 3.0)).ok());
+}
+
+TEST(StreamTest, LiveRejectsClientTime) {
+    Harness harness(ClockMode::Live);
+    EXPECT_EQ(stream_one(harness, "kraken", book("", 5, 1.0)).error_code(),
+              grpc::StatusCode::INVALID_ARGUMENT);
+    EXPECT_EQ(stream_one(harness, "kraken", tick(5)).error_code(),
+              grpc::StatusCode::INVALID_ARGUMENT);
+    EXPECT_EQ(stream_one(harness, "kraken", book("coinbase", 0, 1.0)).error_code(),
+              grpc::StatusCode::INVALID_ARGUMENT);
+    EXPECT_FALSE(harness.status().venues(0).has_book());
+    EXPECT_FALSE(harness.status().venues(1).has_book());
+}
+
+TEST(StreamTest, ReplayRejectsBadTimeAndMissingVenue) {
+    Harness harness(ClockMode::Replay);
+    {
+        Stream stream(harness.stub(), std::nullopt);
+        stream.send(book("kraken", 2 * kSec, 1.0));
+        stream.send(book("kraken", kSec, 1.0));
+        EXPECT_EQ(stream.finish().error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+    }
+    {
+        Stream stream(harness.stub(), std::nullopt);
+        stream.send(tick(kSec));
+        stream.send(tick(kSec + kDay + 1));
+        EXPECT_EQ(stream.finish().error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+    }
+    EXPECT_EQ(stream_one(harness, std::nullopt, book("", kSec, 1.0)).error_code(),
+              grpc::StatusCode::INVALID_ARGUMENT);
+    EXPECT_EQ(stream_one(harness, std::nullopt, book("kraken", 0, 1.0)).error_code(),
+              grpc::StatusCode::INVALID_ARGUMENT);
+
+    // Each rejected stream released the replay binding.
+    Stream good(harness.stub(), std::nullopt);
+    good.send(book("coinbase", 3 * kSec, 4.0));
+    const auto status = good.finish();
+    EXPECT_TRUE(status.ok()) << status.error_message();
+    EXPECT_EQ(good.events(), 1u);
+    EXPECT_TRUE(harness.eventually([](const v1::StatusReply& s) { return bid_qty(s, 1) == 4.0; }));
+    EXPECT_EQ(harness.status().clock_mode(), v1::CLOCK_MODE_REPLAY);
+}
+
+TEST(StreamTest, ReplayAllowsOneStreamAtATime) {
+    Harness harness(ClockMode::Replay);
+    Stream first(harness.stub(), std::nullopt);
+    first.send(book("kraken", kSec, 1.0));
+    ASSERT_TRUE(harness.eventually(booked(0)));
+    EXPECT_EQ(stream_one(harness, std::nullopt, book("coinbase", kSec, 1.0)).error_code(),
+              grpc::StatusCode::FAILED_PRECONDITION);
+    EXPECT_TRUE(first.finish().ok());
+}
+
+TEST(StreamTest, InvalidEventEndsOnlyItsOwnStream) {
+    Harness harness(ClockMode::Live);
+    Stream kraken(harness.stub(), "kraken");
+    Stream coinbase(harness.stub(), "coinbase");
+    coinbase.send(book("", 0, 1.0));
+    kraken.send(book("", 0, 1.0));
+    ASSERT_TRUE(harness.eventually([](const v1::StatusReply& s) {
+        return s.venues(0).has_book() && s.venues(1).has_book();
+    }));
+
+    auto bad = book("", 0, 2.0, false);
+    bad.mutable_book()->mutable_bids(0)->set_price(-1.0);
+    kraken.send(bad);
+    EXPECT_EQ(kraken.finish().error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+
+    coinbase.send(book("", 0, 7.0, false));
+    const auto status = coinbase.finish();
+    EXPECT_TRUE(status.ok()) << status.error_message();
+    EXPECT_EQ(coinbase.events(), 2u);
+    EXPECT_TRUE(harness.eventually([](const v1::StatusReply& s) {
+        return bid_qty(s, 1) == 7.0 && bid_qty(s, 0) == 1.0;
+    }));
+}
+
+TEST(StreamTest, ReplayWaitsForRoomInAFullEngineQueue) {
+    constexpr int kCapacity = 4;
+    constexpr int kEvents = 3 * kCapacity;
+    Harness harness(ClockMode::Replay, kCapacity);
+    {
+        EngineGate gate(harness.loop());
+        Stream stream(harness.stub(), std::nullopt);
+        // In-process writes complete only once the handler reads them, so send from another thread.
+        auto sender = std::async(std::launch::async, [&] {
+            for (int i = 1; i <= kEvents; ++i) stream.send(book("kraken", i * kSec, i));
+            return stream.finish();
+        });
+        // Meanwhile the handler fills the queue, then waits instead of failing the stream.
+        std::this_thread::sleep_for(200ms);
+        gate.release();
+        const auto status = sender.get();
+        ASSERT_TRUE(status.ok()) << status.error_message();
+        EXPECT_EQ(stream.events(), static_cast<std::uint64_t>(kEvents));
+    }
+    EXPECT_TRUE(harness.eventually([](const v1::StatusReply& s) {
+        return s.stats().events() == static_cast<std::uint64_t>(kEvents);
+    }));
+    EXPECT_DOUBLE_EQ(bid_qty(harness.status(), 0), kEvents);
+}
+
+TEST(StreamTest, ReplayQueueStillFullAfterTheWaitEndsTheStream) {
+    Harness harness(ClockMode::Replay, 1, 10'000, 50ms);
+    EngineGate gate(harness.loop());
+    Stream stream(harness.stub(), std::nullopt);
+    for (int i = 1; i <= 3; ++i) stream.send(book("kraken", i * kSec, 1.0));
+    EXPECT_EQ(stream.finish().error_code(), grpc::StatusCode::RESOURCE_EXHAUSTED);
+}
+
+TEST(StreamTest, LiveFullEngineQueueFailsTheStreamAtOnce) {
+    Harness harness(ClockMode::Live, 1);
+    EngineGate gate(harness.loop());
+    Stream stream(harness.stub(), "kraken");
+    for (int i = 1; i <= 3; ++i) stream.send(book("", 0, 1.0));
+    // The stream ends while the engine thread is still held, so the live push never waited.
+    EXPECT_EQ(stream.finish().error_code(), grpc::StatusCode::RESOURCE_EXHAUSTED);
+}
+
+TEST(StreamTest, SubscriberReceivesFillsAndTheTerminalUpdate) {
+    Harness harness(ClockMode::Replay);
+    Subscription subscription(harness.stub());
+    subscription.wait_active();
+    {
+        Stream stream(harness.stub(), std::nullopt);
+        stream.send(book("kraken", kSec, 1.0));
+        ASSERT_TRUE(stream.finish().ok());
+    }
+    ASSERT_TRUE(harness.eventually(booked(0)));
+
+    const auto reply = harness.submit("o-1", kSec, kSec, 2);
+    ASSERT_TRUE(reply.accepted()) << reply.reason();
+
+    // With a subscriber active, the first slice executes at submission, before any market event.
+    const auto first = subscription.next();
+    ASSERT_TRUE(first);
+    ASSERT_TRUE(first->has_fill());
+    EXPECT_EQ(first->seq(), 1u);
+    EXPECT_EQ(first->fill().order_id(), "o-1");
+    EXPECT_DOUBLE_EQ(first->fill().qty(), 0.5);
+    EXPECT_EQ(first->fill().ts_ns(), kSec);
+    EXPECT_EQ(first->fill().venue(), "kraken");
+
+    {
+        Stream stream(harness.stub(), std::nullopt);
+        stream.send(tick(2 * kSec));
+        ASSERT_TRUE(stream.finish().ok());
+    }
+    double filled = first->fill().qty();
+    std::uint64_t last_seq = first->seq();
+    std::optional<v1::OrderUpdate> terminal;
+    while (!terminal) {
+        const auto event = subscription.next();
+        ASSERT_TRUE(event) << "subscription ended early";
+        EXPECT_GT(event->seq(), last_seq);
+        last_seq = event->seq();
+        if (event->has_fill()) filled += event->fill().qty();
+        if (event->has_order() && event->order().state() != v1::ORDER_STATE_WORKING) {
+            terminal = event->order();
+        }
+    }
+    EXPECT_EQ(terminal->order_id(), "o-1");
+    EXPECT_EQ(terminal->state(), v1::ORDER_STATE_COMPLETED);
+    EXPECT_DOUBLE_EQ(terminal->filled_qty(), 1.0);
+    EXPECT_DOUBLE_EQ(filled, 1.0);
+
+    const auto ended = subscription.cancel();
+    EXPECT_TRUE(ended.ok() || ended.error_code() == grpc::StatusCode::CANCELLED)
+        << ended.error_message();
+}
+
+TEST(StreamTest, SecondSubscriberIsRejectedUntilTheFirstLeaves) {
+    Harness harness(ClockMode::Replay);
+    auto first = std::make_unique<Subscription>(harness.stub());
+    first->wait_active();
+    {
+        Subscription second(harness.stub());
+        EXPECT_FALSE(second.next());
+        EXPECT_EQ(second.finish().error_code(), grpc::StatusCode::FAILED_PRECONDITION);
+    }
+    (void)first->cancel();
+    first.reset();
+
+    // The first handler unsubscribes within one poll interval of noticing the cancellation.
+    const auto deadline = std::chrono::steady_clock::now() + 10s;
+    std::shared_ptr<Subscriber> probe;
+    while (!(probe = harness.loop().subscribe()) && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(5ms);
+    }
+    ASSERT_NE(probe, nullptr);
+    harness.loop().unsubscribe(probe);
+
+    Subscription third(harness.stub());
+    third.wait_active();
+    {
+        Subscription fourth(harness.stub());
+        EXPECT_FALSE(fourth.next());
+        EXPECT_EQ(fourth.finish().error_code(), grpc::StatusCode::FAILED_PRECONDITION);
+    }
+    (void)third.cancel();
+}
+
+TEST(StreamTest, SlowSubscriberIsDisconnectedWithResourceExhausted) {
+    Harness harness(ClockMode::Replay, 10'000, 1);
+    {
+        Stream stream(harness.stub(), std::nullopt);
+        stream.send(book("kraken", kSec, 1.0));
+        ASSERT_TRUE(stream.finish().ok());
+    }
+    ASSERT_TRUE(harness.eventually(booked(0)));
+    // Without a subscriber nothing steps, so all orders fill together at the next tick.
+    for (int i = 0; i < 50; ++i) {
+        ASSERT_TRUE(harness.submit("o-" + std::to_string(i), kSec, kSec, 1).accepted());
+    }
+
+    Subscription subscription(harness.stub());
+    subscription.wait_active();
+    {
+        Stream stream(harness.stub(), std::nullopt);
+        stream.send(tick(kSec));
+        ASSERT_TRUE(stream.finish().ok());
+    }
+    while (subscription.next()) {
+    }
+    EXPECT_EQ(subscription.finish().error_code(), grpc::StatusCode::RESOURCE_EXHAUSTED);
+}

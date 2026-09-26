@@ -10,6 +10,7 @@
 
 #include "config.h"
 #include "engine.h"
+#include "engine_loop.h"
 #include "service.h"
 
 namespace {
@@ -38,7 +39,8 @@ int main(int argc, char** argv) {
 
     slipstream::Engine engine(config.limits, config.book_depth, venues, config.stale_ns,
                               config.max_deviation_bps);
-    slipstream::ExecutionService service(engine, config.symbol);
+    slipstream::EngineLoop loop(engine, config.clock);
+    slipstream::ExecutionService service(loop, config.symbol);
 
     int bound_port = 0;
     grpc::ServerBuilder builder;
@@ -60,9 +62,13 @@ int main(int argc, char** argv) {
                   << ",qty_step=" << venue.qty_step << ",min_notional=" << venue.min_notional
                   << ')';
     }
-    std::cout << ", max deviation " << config.max_deviation_bps << "bps)" << std::endl;
+    std::cout << ", max deviation " << config.max_deviation_bps << "bps, "
+              << (config.clock == slipstream::ClockMode::Live ? "clock live" : "REPLAY CLOCK")
+              << ")" << std::endl;
 
     while (!g_stop.load()) std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    server->Shutdown();
+    // Refuses new calls, lets open ones finish, and cancels any still running at the deadline.
+    server->Shutdown(std::chrono::system_clock::now() + std::chrono::seconds(2));
+    loop.stop();
     return 0;
 }

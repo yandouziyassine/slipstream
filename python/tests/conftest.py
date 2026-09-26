@@ -89,6 +89,8 @@ def _run_engine(*extra: str) -> Iterator[str]:
             "10000",
             "--max-position",
             "1.0",
+            "--clock",
+            "replay",
             *extra,
         ],
         stdout=subprocess.PIPE,

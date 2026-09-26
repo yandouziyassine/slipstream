@@ -43,12 +43,37 @@ struct Fill {
     double fee;
 };
 
+struct OrderUpdate {
+    std::string order_id;
+    OrderState state;
+    std::string reason;
+    double filled_qty;
+};
+
+// Updates list each order whose state or filled quantity changed during the step.
+struct StepOutput {
+    std::vector<Fill> fills;
+    std::vector<OrderUpdate> updates;
+};
+
 struct VenueSettings {
     std::string name;
     double fee_bps;
     double min_qty = 0.0;
     double qty_step = 0.0;
     double min_notional = 0.0;
+};
+
+struct VenueBookView {
+    std::string venue;
+    std::vector<Level> bids;  // best first
+    std::vector<Level> asks;  // best first
+};
+
+struct VenueState {
+    std::string name;
+    bool has_book;
+    bool fresh;
 };
 
 struct VenueCost {
@@ -95,9 +120,13 @@ public:
     bool apply_book_update(std::size_t venue, const std::vector<Level>& bids,
                            const std::vector<Level>& asks, std::int64_t recv_ns);
     bool apply_trades(const std::vector<Trade>& trades);
+    // A heartbeat proves the feed is alive, so it keeps a quiet venue fresh, but only for
+    // kHeartbeatGraceNs after the venue's last real book change.
+    bool apply_heartbeat(std::size_t venue, std::int64_t now_ns);
+    static constexpr std::int64_t kHeartbeatGraceNs = 30'000'000'000;
 
     SubmitResult submit(const ParentOrderRequest& request, const ScheduleSpec& spec = TwapSpec{});
-    std::vector<Fill> step(std::int64_t now_ns);
+    StepOutput step(std::int64_t now_ns);
 
     std::vector<OrderStatus> statuses() const;
     std::size_t working_orders() const;
@@ -108,6 +137,8 @@ public:
     std::optional<std::size_t> venue_index(std::string_view name) const;
     std::size_t venue_count() const;
     std::vector<VenueSettings> venue_settings() const;
+    std::vector<VenueBookView> books(std::size_t depth) const;
+    std::vector<VenueState> venue_states(std::int64_t now_ns) const;
 
 private:
     struct ParentOrder {
@@ -130,6 +161,7 @@ private:
         double fee_rate;
         OrderBook book;
         std::int64_t last_update_ns;
+        std::int64_t last_heartbeat_ns;
     };
 
     // The remainder can never trade when it is below every venue's minimum.

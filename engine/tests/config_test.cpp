@@ -178,3 +178,25 @@ TEST(Config, RejectsBadStaleness) {
         EXPECT_FALSE(parse_args({"--stale-ms", value}).config) << value;
     }
 }
+
+TEST(Config, ClockDefaultsToLive) {
+    const auto result = parse_args({});
+    ASSERT_TRUE(result.config);
+    EXPECT_EQ(result.config->clock, slipstream::ClockMode::Live);
+}
+
+TEST(Config, ParsesClockFlag) {
+    const auto live = parse_args({"--clock", "live"});
+    ASSERT_TRUE(live.config) << live.error;
+    EXPECT_EQ(live.config->clock, slipstream::ClockMode::Live);
+
+    const auto replay = parse_args({"--clock", "replay"});
+    ASSERT_TRUE(replay.config) << replay.error;
+    EXPECT_EQ(replay.config->clock, slipstream::ClockMode::Replay);
+}
+
+TEST(Config, RejectsBadClock) {
+    for (const char* value : {"Live", "LIVE", "Replay", "replay ", " replay", "sim", "", "0"}) {
+        EXPECT_FALSE(parse_args({"--clock", value}).config) << value;
+    }
+}

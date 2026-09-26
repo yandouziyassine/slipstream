@@ -74,7 +74,7 @@ Engine::Engine(RiskLimits limits, std::size_t book_depth, std::vector<VenueSetti
     venues_.reserve(venues.size());
     for (auto& venue : venues) {
         const double fee_rate = venue.fee_bps / 1e4;
-        venues_.push_back(Venue{std::move(venue), fee_rate, OrderBook(book_depth), 0});
+        venues_.push_back(Venue{std::move(venue), fee_rate, OrderBook(book_depth), 0, 0});
     }
 }
 
@@ -106,6 +106,14 @@ bool Engine::apply_book_update(std::size_t venue, const std::vector<Level>& bids
     return true;
 }
 
+bool Engine::apply_heartbeat(std::size_t venue, std::int64_t now_ns) {
+    std::lock_guard lock(mu_);
+    if (venue >= venues_.size() || now_ns < 0) return false;
+    venues_[venue].last_heartbeat_ns = std::max(venues_[venue].last_heartbeat_ns, now_ns);
+    latest_ns_ = std::max(latest_ns_, now_ns);
+    return true;
+}
+
 bool Engine::apply_trades(const std::vector<Trade>& trades) {
     std::lock_guard lock(mu_);
     double added = 0.0;
@@ -130,10 +138,18 @@ double Engine::projected_position_locked() const {
 
 bool Engine::fresh_locked(std::size_t venue, std::int64_t now_ns) const {
     if (venues_.size() < 2) return true;
+    const auto& state = venues_[venue];
+    // Saturate: recv_ns is only checked to be non-negative, so it can be close to the int64 limit.
+    const std::int64_t grace_end =
+        state.last_update_ns > std::numeric_limits<std::int64_t>::max() - kHeartbeatGraceNs
+            ? std::numeric_limits<std::int64_t>::max()
+            : state.last_update_ns + kHeartbeatGraceNs;
+    const std::int64_t alive_ns =
+        std::max(state.last_update_ns, std::min(state.last_heartbeat_ns, grace_end));
     // The engine's clock never moves backwards, so an old or negative caller time cannot make a
-    // stale book fresh again. latest_ns_ >= last_update_ns >= 0, so the subtraction cannot overflow.
+    // stale book fresh again. latest_ns_ >= alive_ns >= 0, so the subtraction cannot overflow.
     const std::int64_t effective_now = std::max(now_ns, latest_ns_);
-    return effective_now - venues_[venue].last_update_ns <= stale_ns_;
+    return effective_now - alive_ns <= stale_ns_;
 }
 
 std::optional<double> Engine::consolidated_mid_locked(std::int64_t now_ns) const {
@@ -227,21 +243,26 @@ SubmitResult Engine::submit(const ParentOrderRequest& request, const ScheduleSpe
     return {true, ""};
 }
 
-std::vector<Fill> Engine::step(std::int64_t now_ns) {
+StepOutput Engine::step(std::int64_t now_ns) {
     std::lock_guard lock(mu_);
     latest_ns_ = std::max(latest_ns_, now_ns);
-    std::vector<Fill> fills;
+    StepOutput out;
     const auto ref_price = consolidated_mid_locked(now_ns);
     const MarketState market{market_volume_};
     for (auto& order : orders_) {
         if (order.state != OrderState::Working) continue;
-        advance_locked(order, now_ns, ref_price, market, fills);
+        const double filled_before = order.filled_qty;
+        advance_locked(order, now_ns, ref_price, market, out.fills);
         if (order.state == OrderState::Working && order.schedule->expired(now_ns)) {
             order.state = OrderState::Halted;
             order.halt_reason = "deadline reached";
         }
+        if (order.state != OrderState::Working || order.filled_qty != filled_before) {
+            out.updates.push_back(
+                {order.request.order_id, order.state, order.halt_reason, order.filled_qty});
+        }
     }
-    return fills;
+    return out;
 }
 
 void Engine::advance_locked(ParentOrder& order, std::int64_t now_ns,
@@ -412,6 +433,32 @@ std::vector<VenueSettings> Engine::venue_settings() const {
     std::vector<VenueSettings> out;
     out.reserve(venues_.size());
     for (const auto& venue : venues_) out.push_back(venue.settings);
+    return out;
+}
+
+std::vector<VenueBookView> Engine::books(std::size_t depth) const {
+    std::lock_guard lock(mu_);
+    const auto top = [depth](std::vector<Level> levels) {
+        if (levels.size() > depth) levels.resize(depth);
+        return levels;
+    };
+    std::vector<VenueBookView> out;
+    out.reserve(venues_.size());
+    for (const auto& venue : venues_) {
+        out.push_back({venue.settings.name, top(venue.book.liquidity_for(Side::Sell)),
+                       top(venue.book.liquidity_for(Side::Buy))});
+    }
+    return out;
+}
+
+std::vector<VenueState> Engine::venue_states(std::int64_t now_ns) const {
+    std::lock_guard lock(mu_);
+    std::vector<VenueState> out;
+    out.reserve(venues_.size());
+    for (std::size_t v = 0; v < venues_.size(); ++v) {
+        const auto& venue = venues_[v];
+        out.push_back({venue.settings.name, !venue.book.empty(), fresh_locked(v, now_ns)});
+    }
     return out;
 }
 

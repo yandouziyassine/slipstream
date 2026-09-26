@@ -6,6 +6,16 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 option(SLIPSTREAM_SANITIZE "Build with AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
+option(SLIPSTREAM_TSAN "Build with ThreadSanitizer" OFF)
+if(SLIPSTREAM_SANITIZE AND SLIPSTREAM_TSAN)
+  message(FATAL_ERROR
+    "SLIPSTREAM_SANITIZE and SLIPSTREAM_TSAN cannot both be ON: ThreadSanitizer cannot be "
+    "combined with AddressSanitizer. Configure with -DSLIPSTREAM_SANITIZE=OFF -DSLIPSTREAM_TSAN=ON.")
+endif()
+if(SLIPSTREAM_TSAN)
+  add_compile_options(-fsanitize=thread -fno-omit-frame-pointer)
+  add_link_options(-fsanitize=thread)
+endif()
 if(SLIPSTREAM_SANITIZE)
   add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=all)
   add_link_options(-fsanitize=address,undefined)
@@ -26,9 +36,20 @@ add_library(slipstream_core STATIC
   src/engine.cpp
   src/config.cpp
   src/router.cpp
+  src/clock.cpp
+  src/engine_loop.cpp
 )
 target_include_directories(slipstream_core PUBLIC src)
 target_compile_options(slipstream_core PRIVATE ${SLIPSTREAM_WARNINGS})
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+  # With optimization on, GCC 13 falsely reports (maybe-)uninitialized members when a queue slot
+  # (a std::variant holding a std::variant) is moved out of the deque, which breaks -O2 and -O3
+  # builds under -Werror. Only this file instantiates that move.
+  set_source_files_properties(src/engine_loop.cpp PROPERTIES COMPILE_OPTIONS
+    "-Wno-maybe-uninitialized;-Wno-uninitialized")
+endif()
+find_package(Threads REQUIRED)
+target_link_libraries(slipstream_core PUBLIC Threads::Threads)
 
 find_package(Protobuf REQUIRED)
 find_package(PkgConfig REQUIRED)
@@ -59,8 +80,12 @@ add_custom_command(
 add_library(slipstream_proto STATIC ${GEN_SRCS})
 target_include_directories(slipstream_proto SYSTEM PUBLIC ${GEN_DIR})
 target_link_libraries(slipstream_proto PUBLIC protobuf::libprotobuf PkgConfig::GRPCPP)
+if(SLIPSTREAM_TSAN)
+  # protoc's generated code belongs with libprotobuf and gRPC, which are built without TSan.
+  target_compile_options(slipstream_proto PRIVATE -fno-sanitize=thread)
+endif()
 
-add_library(slipstream_service STATIC src/service.cpp)
+add_library(slipstream_service STATIC src/service.cpp src/market_validation.cpp)
 target_link_libraries(slipstream_service PUBLIC slipstream_core slipstream_proto)
 target_compile_options(slipstream_service PRIVATE ${SLIPSTREAM_WARNINGS})
 
@@ -87,7 +112,13 @@ add_executable(engine_tests
   tests/engine_schedules_test.cpp
   tests/router_test.cpp
   tests/engine_routing_test.cpp
+  tests/clock_test.cpp
+  tests/bounded_queue_test.cpp
+  tests/engine_loop_test.cpp
+  tests/market_validation_test.cpp
+  tests/stream_test.cpp
+  tests/stream_stress_test.cpp
 )
-target_link_libraries(engine_tests PRIVATE slipstream_service GTest::gtest_main)
+target_link_libraries(engine_tests PRIVATE slipstream_service GTest::gtest_main Threads::Threads)
 target_compile_options(engine_tests PRIVATE ${SLIPSTREAM_WARNINGS})
 gtest_discover_tests(engine_tests)

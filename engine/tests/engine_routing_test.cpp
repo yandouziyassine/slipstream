@@ -2,6 +2,8 @@
 
 #include <cmath>
 #include <cstdint>
+#include <limits>
+#include <optional>
 
 #include "engine.h"
 
@@ -29,7 +31,7 @@ protected:
 
 TEST_F(RoutingTest, SplitsChildAcrossVenuesByAllInPrice) {
     ASSERT_TRUE(engine.submit({"o", Side::Buy, 1.0, kSec, kSec, 1}).accepted);
-    const auto fills = engine.step(kSec);
+    const auto fills = engine.step(kSec).fills;
     ASSERT_EQ(fills.size(), 2u);
     EXPECT_EQ(fills[0].venue, "kraken");
     EXPECT_DOUBLE_EQ(fills[0].qty, 0.5);
@@ -57,7 +59,7 @@ TEST_F(RoutingTest, SplitsChildAcrossVenuesByAllInPrice) {
 TEST_F(RoutingTest, VenueTooThinForTheWholeChildIsUnavailable) {
     ASSERT_TRUE(engine.apply_book_snapshot(1, {{99.5, 5.0}}, {{100.3, 0.5}}, kSec));
     ASSERT_TRUE(engine.submit({"o", Side::Buy, 1.0, kSec, kSec, 1}).accepted);
-    ASSERT_EQ(engine.step(kSec).size(), 2u);
+    ASSERT_EQ(engine.step(kSec).fills.size(), 2u);
     const auto status = engine.statuses().at(0);
     EXPECT_TRUE(status.venue_costs[0].available);
     EXPECT_FALSE(status.venue_costs[1].available);
@@ -67,7 +69,7 @@ TEST_F(RoutingTest, StaleVenueIsExcludedFromRoutingAndMid) {
     ASSERT_TRUE(engine.apply_book_snapshot(1, {{99.5, 5.0}}, {{100.3, 0.5}, {100.6, 5.0}}, 4 * kSec));
     ASSERT_TRUE(engine.submit({"o", Side::Buy, 1.0, 4 * kSec, kSec, 1}).accepted);
     EXPECT_DOUBLE_EQ(engine.statuses().at(0).arrival_mid, (99.5 + 100.3) / 2.0);
-    const auto fills = engine.step(4 * kSec);
+    const auto fills = engine.step(4 * kSec).fills;
     ASSERT_EQ(fills.size(), 1u);  // one leg per venue; both coinbase levels merge into one leg
     EXPECT_EQ(fills[0].venue, "coinbase");
     EXPECT_DOUBLE_EQ(fills[0].qty, 1.0);
@@ -78,9 +80,9 @@ TEST_F(RoutingTest, StaleVenueIsExcludedFromRoutingAndMid) {
 TEST_F(RoutingTest, VenueWithItsOwnBookCrossedSkipsTheStep) {
     ASSERT_TRUE(engine.submit({"o", Side::Buy, 1.0, kSec, kSec, 1}).accepted);
     ASSERT_TRUE(engine.apply_book_update(0, {{100.5, 1.0}}, {}, kSec));
-    EXPECT_TRUE(engine.step(kSec).empty());
+    EXPECT_TRUE(engine.step(kSec).fills.empty());
     ASSERT_TRUE(engine.apply_book_update(0, {{100.5, 0.0}}, {}, kSec));
-    EXPECT_EQ(engine.step(kSec).size(), 2u);
+    EXPECT_EQ(engine.step(kSec).fills.size(), 2u);
 }
 
 TEST_F(RoutingTest, CrossBetweenVenuesWithinFeesStillTrades) {
@@ -90,7 +92,7 @@ TEST_F(RoutingTest, CrossBetweenVenuesWithinFeesStillTrades) {
     const auto submitted = engine.submit({"o", Side::Buy, 1.0, kSec, kSec, 1});
     ASSERT_TRUE(submitted.accepted) << submitted.reason;
     EXPECT_DOUBLE_EQ(engine.statuses().at(0).arrival_mid, (100.1 + 100.0) / 2.0);
-    const auto fills = engine.step(kSec);
+    const auto fills = engine.step(kSec).fills;
     ASSERT_EQ(fills.size(), 2u);
     EXPECT_EQ(fills[0].venue, "kraken");
     EXPECT_DOUBLE_EQ(fills[0].qty, 0.5);
@@ -103,9 +105,9 @@ TEST_F(RoutingTest, CrossBetweenVenuesBeyondFeesSkipsTheStep) {
     // Coinbase bid 100.45 (no fee) beats Kraken's effective ask 100.0 x 1.004 = 100.4:
     // an arbitrage after fees, which real venues do not leave standing, so the data is suspect.
     ASSERT_TRUE(engine.apply_book_snapshot(1, {{100.45, 5.0}}, {{100.6, 5.0}}, kSec));
-    EXPECT_TRUE(engine.step(kSec).empty());
+    EXPECT_TRUE(engine.step(kSec).fills.empty());
     ASSERT_TRUE(engine.apply_book_snapshot(1, {{99.5, 5.0}}, {{100.6, 5.0}}, kSec));
-    EXPECT_EQ(engine.step(kSec).size(), 1u);
+    EXPECT_EQ(engine.step(kSec).fills.size(), 1u);
 }
 
 TEST_F(RoutingTest, SubmitRejectsWhenCrossedBeyondFees) {
@@ -127,7 +129,7 @@ TEST(RoutingSingleVenue, LegacyEngineIsUnchangedAndNeverStale) {
     Engine engine(RiskLimits{1'000'000.0, 100.0}, 10);
     ASSERT_TRUE(engine.apply_book_snapshot({{99.0, 5.0}}, {{101.0, 5.0}}));
     ASSERT_TRUE(engine.submit({"o", Side::Buy, 1.0, 1000 * kSec, kSec, 1}).accepted);
-    const auto fills = engine.step(1000 * kSec);
+    const auto fills = engine.step(1000 * kSec).fills;
     ASSERT_EQ(fills.size(), 1u);
     EXPECT_EQ(fills[0].venue, "kraken");
     EXPECT_DOUBLE_EQ(fills[0].fee, 0.0);
@@ -141,7 +143,7 @@ TEST_F(RoutingTest, BackwardClockCannotReviveStaleVenue) {
     EXPECT_DOUBLE_EQ(engine.statuses().at(0).arrival_mid, (99.5 + 100.3) / 2.0);
     // kraken was last updated at 1 s and the engine has already seen 4 s: an older caller
     // clock must not make the kraken book fresh again.
-    const auto fills = engine.step(kSec);
+    const auto fills = engine.step(kSec).fills;
     ASSERT_EQ(fills.size(), 1u);
     EXPECT_EQ(fills[0].venue, "coinbase");
 }
@@ -149,7 +151,7 @@ TEST_F(RoutingTest, BackwardClockCannotReviveStaleVenue) {
 TEST_F(RoutingTest, SellSplitsAcrossVenuesByFeeAdjustedBids) {
     ASSERT_TRUE(engine.apply_book_snapshot(1, {{99.5, 0.5}, {98.0, 5.0}}, {{100.3, 0.5}}, kSec));
     ASSERT_TRUE(engine.submit({"s", Side::Sell, 1.0, kSec, kSec, 1}).accepted);
-    const auto fills = engine.step(kSec);
+    const auto fills = engine.step(kSec).fills;
     ASSERT_EQ(fills.size(), 2u);
     EXPECT_EQ(fills[0].venue, "kraken");
     EXPECT_DOUBLE_EQ(fills[0].qty, 0.5);
@@ -166,7 +168,7 @@ TEST(RoutingVenueRules, EngineAppliesEachVenuesQtyStep) {
     ASSERT_TRUE(engine.apply_book_snapshot(0, {{99.0, 5.0}}, {{101.0, 5.0}}, 0));
     ASSERT_TRUE(engine.submit({"o", Side::Buy, 0.5, 0, 10 * kSec, 1}).accepted);
     ASSERT_TRUE(engine.apply_book_snapshot(0, {{99.0, 5.0}}, {{101.0, 0.037}}, 0));
-    const auto fills = engine.step(0);
+    const auto fills = engine.step(0).fills;
     ASSERT_EQ(fills.size(), 1u);
     EXPECT_NEAR(fills[0].qty, 0.03, 1e-12);
     const auto settings = engine.venue_settings().at(0);
@@ -186,7 +188,7 @@ TEST(RoutingVenueRules, PovAccumulatesTinyPrintsUntilTheVenueMinimum) {
     while (fills.empty() && prints < 200) {
         ASSERT_TRUE(engine.apply_trades({{100.0, 0.000001}}));
         ++prints;
-        fills = engine.step(prints);
+        fills = engine.step(prints).fills;
     }
     ASSERT_EQ(fills.size(), 1u);
     EXPECT_GE(fills[0].qty, kMinQty * (1.0 - 1e-9));
@@ -199,8 +201,8 @@ TEST(RoutingVenueRules, ChildBelowMinNotionalWaitsForTheNextSlice) {
     Engine engine(RiskLimits{1'000'000.0, 100.0}, 10, {{"kraken", 0.0, 0.0, 0.0, 1.0}}, 0);
     ASSERT_TRUE(engine.apply_book_snapshot(0, {{99.0, 5.0}}, {{101.0, 5.0}}, 0));
     ASSERT_TRUE(engine.submit({"t", Side::Buy, 0.015, 0, 2 * kSec, 2}).accepted);
-    EXPECT_TRUE(engine.step(0).empty());
-    const auto fills = engine.step(kSec);
+    EXPECT_TRUE(engine.step(0).fills.empty());
+    const auto fills = engine.step(kSec).fills;
     ASSERT_EQ(fills.size(), 1u);
     EXPECT_DOUBLE_EQ(fills[0].qty, 0.015);
     EXPECT_EQ(engine.statuses().at(0).state, OrderState::Completed);
@@ -210,11 +212,11 @@ TEST(RoutingVenueRules, TwapCompletesWhenTheRemainderIsBelowTheVenueMinimum) {
     Engine engine(RiskLimits{1'000'000.0, 100.0}, 10, {{"kraken", 0.0, 0.0001, 0.0001, 0.0}}, 0);
     ASSERT_TRUE(engine.apply_book_snapshot(0, {{99.0, 5.0}}, {{101.0, 5.0}}, 0));
     ASSERT_TRUE(engine.submit({"t", Side::Buy, 0.20001, 0, 2 * kSec, 2}).accepted);
-    auto fills = engine.step(0);
+    auto fills = engine.step(0).fills;
     ASSERT_EQ(fills.size(), 1u);
     EXPECT_NEAR(fills[0].qty, 0.1, 1e-12);
     EXPECT_EQ(engine.statuses().at(0).state, OrderState::Working);
-    fills = engine.step(kSec);
+    fills = engine.step(kSec).fills;
     ASSERT_EQ(fills.size(), 1u);
     EXPECT_NEAR(fills[0].qty, 0.1, 1e-12);
     const auto status = engine.statuses().at(0);
@@ -229,7 +231,7 @@ TEST(RoutingVenueRules, OrderBelowEveryVenueMinimumCompletesWithoutFills) {
     ASSERT_TRUE(engine.apply_book_snapshot(0, {{99.0, 5.0}}, {{101.0, 5.0}}, 0));
     ASSERT_TRUE(engine.apply_book_snapshot(1, {{99.0, 5.0}}, {{101.0, 5.0}}, 0));
     ASSERT_TRUE(engine.submit({"t", Side::Buy, 0.5, 0, 10 * kSec, 1}).accepted);
-    EXPECT_TRUE(engine.step(0).empty());
+    EXPECT_TRUE(engine.step(0).fills.empty());
     const auto status = engine.statuses().at(0);
     EXPECT_EQ(status.state, OrderState::Completed);
     EXPECT_EQ(status.halt_reason, "remaining 0.5 below venue minimum");
@@ -242,7 +244,7 @@ TEST(RoutingVenueRules, SmallestVenueMinimumGatesTheChild) {
     ASSERT_TRUE(engine.apply_book_snapshot(0, {{99.0, 5.0}}, {{101.0, 5.0}}, 0));
     ASSERT_TRUE(engine.apply_book_snapshot(1, {{99.0, 5.0}}, {{100.9, 5.0}}, 0));
     ASSERT_TRUE(engine.submit({"t", Side::Buy, 0.5, 0, 10 * kSec, 1}).accepted);
-    const auto fills = engine.step(0);
+    const auto fills = engine.step(0).fills;
     ASSERT_EQ(fills.size(), 1u);
     EXPECT_EQ(fills[0].venue, "coinbase");
     EXPECT_DOUBLE_EQ(fills[0].qty, 0.5);
@@ -251,7 +253,7 @@ TEST(RoutingVenueRules, SmallestVenueMinimumGatesTheChild) {
 TEST_F(RoutingTest, VenueWithEmptyAskSideIsSkippedForBuys) {
     ASSERT_TRUE(engine.apply_book_snapshot(1, {{99.5, 5.0}}, {}, kSec));
     ASSERT_TRUE(engine.submit({"o", Side::Buy, 0.5, kSec, kSec, 1}).accepted);
-    const auto fills = engine.step(kSec);
+    const auto fills = engine.step(kSec).fills;
     ASSERT_EQ(fills.size(), 1u);
     EXPECT_EQ(fills[0].venue, "kraken");
     EXPECT_FALSE(engine.statuses().at(0).venue_costs[1].available);
@@ -264,7 +266,7 @@ TEST(RoutingVenueRules, RemainderBelowTheCheapVenueMinimumFillsOnTheOtherVenue) 
     ASSERT_TRUE(engine.apply_book_snapshot(0, {{99.0, 5.0}}, {{100.0, 5.0}}, 0));
     ASSERT_TRUE(engine.apply_book_snapshot(1, {{99.0, 5.0}}, {{100.0, 5.0}}, 0));
     ASSERT_TRUE(engine.submit({"t", Side::Buy, 0.5, 0, 10 * kSec, 1}).accepted);
-    const auto fills = engine.step(0);
+    const auto fills = engine.step(0).fills;
     ASSERT_EQ(fills.size(), 1u);
     EXPECT_EQ(fills[0].venue, "coinbase");
     EXPECT_DOUBLE_EQ(fills[0].qty, 0.5);
@@ -277,10 +279,10 @@ TEST(RoutingVenueRules, StaleSmallMinimumVenueDoesNotCompleteTheOrderEarly) {
     ASSERT_TRUE(engine.apply_book_snapshot(1, {{99.0, 5.0}}, {{101.0, 5.0}}, 0));
     ASSERT_TRUE(engine.apply_book_snapshot(0, {{99.0, 5.0}}, {{101.0, 5.0}}, 10 * kSec));
     ASSERT_TRUE(engine.submit({"t", Side::Buy, 0.5, 10 * kSec, 10 * kSec, 1}).accepted);
-    EXPECT_TRUE(engine.step(10 * kSec).empty());
+    EXPECT_TRUE(engine.step(10 * kSec).fills.empty());
     EXPECT_EQ(engine.statuses().at(0).state, OrderState::Working);
     ASSERT_TRUE(engine.apply_book_snapshot(1, {{99.0, 5.0}}, {{101.0, 5.0}}, 11 * kSec));
-    const auto fills = engine.step(11 * kSec);
+    const auto fills = engine.step(11 * kSec).fills;
     ASSERT_EQ(fills.size(), 1u);
     EXPECT_EQ(fills[0].venue, "coinbase");
     EXPECT_DOUBLE_EQ(fills[0].qty, 0.5);
@@ -294,7 +296,7 @@ TEST(RoutingVenueRules, NeverLeavesARemainderBelowTheVenueMinimum) {
     ASSERT_TRUE(engine.submit({"t", Side::Buy, 0.25, 0, 10 * kSec, 5}).accepted);
     double filled = 0.0;
     for (std::int64_t t = 0; t <= 10 * kSec; t += kSec / 2) {
-        for (const auto& fill : engine.step(t)) filled += fill.qty;
+        for (const auto& fill : engine.step(t).fills) filled += fill.qty;
     }
     const auto status = engine.statuses().at(0);
     EXPECT_EQ(status.state, OrderState::Completed);
@@ -312,7 +314,7 @@ TEST(RoutingVenueRules, WaitsForTheCheapVenueMinimumInsteadOfPayingMoreElsewhere
     ASSERT_TRUE(engine.submit({"t", Side::Buy, 2.0, 0, 10 * kSec, 10}).accepted);
     double filled = 0.0;
     for (std::int64_t t = 0; t <= 10 * kSec; t += kSec / 2) {
-        for (const auto& fill : engine.step(t)) {
+        for (const auto& fill : engine.step(t).fills) {
             EXPECT_EQ(fill.venue, "kraken");
             filled += fill.qty;
         }
@@ -328,9 +330,107 @@ TEST(RoutingVenueRules, SingleVenueCostIgnoresMinimumOrderSizes) {
     ASSERT_TRUE(engine.apply_book_snapshot(0, {{99.0, 5.0}}, {{100.0, 5.0}}, 0));
     ASSERT_TRUE(engine.apply_book_snapshot(1, {{99.0, 5.0}}, {{100.0, 5.0}}, 0));
     ASSERT_TRUE(engine.submit({"t", Side::Buy, 0.5, 0, 10 * kSec, 1}).accepted);
-    ASSERT_EQ(engine.step(0).size(), 1u);
+    ASSERT_EQ(engine.step(0).fills.size(), 1u);
     const auto status = engine.statuses().at(0);
     EXPECT_TRUE(status.venue_costs[0].available);
     EXPECT_TRUE(status.venue_costs[1].available);
     EXPECT_LT(status.venue_costs[0].all_in_bps, status.venue_costs[1].all_in_bps);
+}
+
+TEST_F(RoutingTest, HeartbeatKeepsAQuietVenueFresh) {
+    ASSERT_TRUE(engine.apply_heartbeat(0, 10 * kSec));
+    // An older heartbeat must not move the venue's heartbeat time backwards.
+    ASSERT_TRUE(engine.apply_heartbeat(0, 5 * kSec));
+    // Only kraken heartbeated, so coinbase is stale and the mid is kraken's alone.
+    EXPECT_EQ(engine.mid(), std::optional<double>{(99.0 + 100.0) / 2.0});
+}
+
+TEST_F(RoutingTest, HeartbeatsCannotKeepABookFreshMoreThan30sAfterItsLastChange) {
+    ASSERT_TRUE(engine.apply_book_snapshot(1, {{99.5, 5.0}}, {{100.3, 5.0}}, 31 * kSec));
+    ASSERT_TRUE(engine.apply_heartbeat(0, 31 * kSec));
+    EXPECT_EQ(engine.mid(), std::optional<double>{(99.5 + 100.0) / 2.0});
+    ASSERT_TRUE(engine.apply_book_snapshot(1, {{99.5, 5.0}}, {{100.3, 5.0}}, 34 * kSec));
+    ASSERT_TRUE(engine.apply_heartbeat(0, 34 * kSec));
+    // Kraken's book last changed at 1 s: heartbeats count up to 31 s, which is 3 s old at 34 s.
+    EXPECT_EQ(engine.mid(), std::optional<double>{(99.5 + 100.3) / 2.0});
+}
+
+TEST_F(RoutingTest, HeartbeatRejectsUnknownVenueAndNegativeTime) {
+    EXPECT_FALSE(engine.apply_heartbeat(2, kSec));
+    EXPECT_FALSE(engine.apply_heartbeat(0, -1));
+}
+
+TEST(RoutingHeartbeat, BookNearTheEndOfTimeDoesNotOverflowTheGrace) {
+    constexpr std::int64_t kMax = std::numeric_limits<std::int64_t>::max();
+    Engine engine(RiskLimits{1'000'000.0, 100.0}, 10, {{"kraken", 0.0}, {"coinbase", 0.0}}, kSec);
+    ASSERT_TRUE(engine.apply_book_snapshot(0, {{99.0, 5.0}}, {{100.0, 5.0}}, kMax - kSec));
+    ASSERT_TRUE(engine.apply_heartbeat(0, kMax));
+    EXPECT_EQ(engine.mid(), std::optional<double>{(99.0 + 100.0) / 2.0});
+}
+
+TEST(RoutingVenueRules, CompletionBelowTheVenueMinimumIsReportedWithoutAFill) {
+    Engine engine(RiskLimits{1'000'000.0, 100.0}, 10, {{"kraken", 0.0, 1.0, 0.0, 0.0}}, kSec);
+    ASSERT_TRUE(engine.apply_book_snapshot(0, {{99.0, 5.0}}, {{101.0, 5.0}}, 0));
+    ASSERT_TRUE(engine.submit({"t", Side::Buy, 0.5, 0, 10 * kSec, 1}).accepted);
+    const auto out = engine.step(0);
+    EXPECT_TRUE(out.fills.empty());
+    ASSERT_EQ(out.updates.size(), 1u);
+    EXPECT_EQ(out.updates[0].state, OrderState::Completed);
+    EXPECT_EQ(out.updates[0].reason, "remaining 0.5 below venue minimum");
+    EXPECT_DOUBLE_EQ(out.updates[0].filled_qty, 0.0);
+}
+
+TEST_F(RoutingTest, BooksShowTheTopLevelsOfEachVenueBestFirst) {
+    ASSERT_TRUE(engine.apply_book_update(0, {{98.0, 2.0}}, {{101.0, 3.0}}, kSec));
+    const auto top = engine.books(1);
+    ASSERT_EQ(top.size(), 2u);
+    EXPECT_EQ(top[0].venue, "kraken");
+    ASSERT_EQ(top[0].bids.size(), 1u);
+    EXPECT_DOUBLE_EQ(top[0].bids[0].price, 99.0);
+    EXPECT_DOUBLE_EQ(top[0].bids[0].qty, 5.0);
+    ASSERT_EQ(top[0].asks.size(), 1u);
+    EXPECT_DOUBLE_EQ(top[0].asks[0].price, 100.0);
+    EXPECT_EQ(top[1].venue, "coinbase");
+    ASSERT_EQ(top[1].asks.size(), 1u);
+    EXPECT_DOUBLE_EQ(top[1].asks[0].price, 100.3);
+    EXPECT_DOUBLE_EQ(top[1].asks[0].qty, 0.5);
+
+    const auto all = engine.books(10);
+    ASSERT_EQ(all[0].bids.size(), 2u);
+    EXPECT_DOUBLE_EQ(all[0].bids[1].price, 98.0);
+    ASSERT_EQ(all[1].asks.size(), 2u);
+    EXPECT_DOUBLE_EQ(all[1].asks[1].price, 100.6);
+
+    const auto none = engine.books(0);
+    EXPECT_TRUE(none[0].bids.empty());
+    EXPECT_TRUE(none[0].asks.empty());
+}
+
+TEST_F(RoutingTest, VenueStatesReportBookAndFreshness) {
+    auto states = engine.venue_states(kSec);
+    ASSERT_EQ(states.size(), 2u);
+    EXPECT_EQ(states[0].name, "kraken");
+    EXPECT_TRUE(states[0].has_book);
+    EXPECT_TRUE(states[0].fresh);
+    EXPECT_EQ(states[1].name, "coinbase");
+    EXPECT_TRUE(states[1].has_book);
+    EXPECT_TRUE(states[1].fresh);
+
+    ASSERT_TRUE(engine.apply_book_snapshot(1, {{99.5, 5.0}}, {{100.3, 5.0}}, 4 * kSec));
+    states = engine.venue_states(4 * kSec);
+    EXPECT_TRUE(states[0].has_book);
+    EXPECT_FALSE(states[0].fresh);
+    EXPECT_TRUE(states[1].fresh);
+
+    ASSERT_TRUE(engine.apply_book_snapshot(1, {}, {}, 4 * kSec));
+    EXPECT_FALSE(engine.venue_states(4 * kSec)[1].has_book);
+}
+
+TEST(RoutingHeartbeat, HeartbeatBeforeAnyBookLeavesHasBookFalse) {
+    Engine engine(RiskLimits{1'000'000.0, 100.0}, 10, {{"kraken", 0.0}, {"coinbase", 0.0}}, kSec);
+    ASSERT_TRUE(engine.apply_heartbeat(0, kSec));
+    const auto states = engine.venue_states(kSec);
+    EXPECT_FALSE(states[0].has_book);
+    EXPECT_FALSE(states[1].has_book);
+    EXPECT_TRUE(engine.books(10)[0].bids.empty());
 }

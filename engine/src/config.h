@@ -22,6 +22,10 @@ struct VenueConfig {
 
 constexpr std::array<std::string_view, 2> kKnownVenues{"kraken", "coinbase"};
 
+// Live: the engine stamps events with its own clock and ignores client-supplied time.
+// Replay: recorded times drive the clock; there is no timer.
+enum class ClockMode { Live, Replay };
+
 struct EngineConfig {
     std::string listen_address = "127.0.0.1:50051";
     std::string symbol = "BTC/USD";
@@ -30,6 +34,7 @@ struct EngineConfig {
     std::vector<VenueConfig> venues{{"kraken", 0.0}};
     std::int64_t stale_ns = 2'000'000'000;
     double max_deviation_bps = 50.0;
+    ClockMode clock = ClockMode::Live;
 };
 
 struct ParseResult {
