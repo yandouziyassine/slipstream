@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import Protocol
 
+from slipstream.book import LocalBook, consolidated_book
 from slipstream.calibration import CalibrationData, schedule_params
 from slipstream.coinbase import CoinbaseStream
 from slipstream.kraken import parse_message
@@ -49,6 +50,7 @@ class ExecutionRunner:
         calibration: CalibrationData | None = None,
         venues: Sequence[Venue] = ("kraken",),
         book_depth: int = 10,
+        fee_bps: Mapping[Venue, float] | None = None,
     ) -> None:
         if not venues:
             raise ValueError("venues must not be empty")
@@ -63,6 +65,10 @@ class ExecutionRunner:
         self._log = logger
         self._calibration = calibration
         self._venues: frozenset[Venue] = frozenset(venues)
+        self._fee_bps: dict[Venue, float] = dict(fee_bps or {})
+        self._books: dict[Venue, LocalBook] = {
+            venue: LocalBook(book_depth) for venue in self._venues
+        }
         self._parsers: dict[Venue, _Parser] = {}
         if "kraken" in self._venues:
             self._parsers["kraken"] = parse_message
@@ -72,6 +78,10 @@ class ExecutionRunner:
         self._submitted = False
         self.fills: list[Fill] = []
 
+    @property
+    def venues(self) -> frozenset[Venue]:
+        return self._venues
+
     def on_message(self, raw: str | bytes, now_ns: int, venue: Venue = "kraken") -> None:
         parser = self._parsers.get(venue)
         if parser is None:
@@ -80,10 +90,11 @@ class ExecutionRunner:
         if isinstance(update, BookUpdate):
             self._check_symbol(update.symbol)
             self._engine.apply_book(update, now_ns)
+            self._books[venue].apply(update)
             if update.is_snapshot and not self._submitted:
-                self._snapshot_venues.add(update.venue)
+                self._snapshot_venues.add(venue)
                 if self._snapshot_venues >= self._venues:
-                    self._submit_all(update, now_ns)
+                    self._submit_all(now_ns)
         elif isinstance(update, TradeBatch):
             self._check_symbol(update.symbol)
             if not update.is_snapshot:
@@ -109,7 +120,8 @@ class ExecutionRunner:
         if symbol != self._symbol:
             raise MarketDataError(f"unexpected symbol {symbol!r}")
 
-    def _submit_all(self, book: BookUpdate, now_ns: int) -> None:
+    def _submit_all(self, now_ns: int) -> None:
+        book = consolidated_book(self._symbol, self._books, self._fee_bps)
         planned = [
             (spec, schedule_params(spec, book, now_ns, self._calibration)) for spec in self._specs
         ]
@@ -146,6 +158,8 @@ class ExecutionRunner:
                         "qty": fill.qty,
                         "price": fill.price,
                         "ts_ns": fill.ts_ns,
+                        "venue": fill.venue,
+                        "fee": fill.fee,
                     }
                 },
             )

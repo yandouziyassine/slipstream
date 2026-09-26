@@ -8,7 +8,15 @@ from slipstream.calibration import CalibrationData, CalibrationError
 from slipstream.coinbase import CoinbaseMessageError
 from slipstream.kraken import KrakenMessageError
 from slipstream.kraken_rest import Bar
-from slipstream.models import Fill, MarketDataError, OrderSpec, PovParams, TwapParams
+from slipstream.models import (
+    BookUpdate,
+    Fill,
+    MarketDataError,
+    OrderSpec,
+    PovParams,
+    ScheduleParams,
+    TwapParams,
+)
 from slipstream.runner import ExecutionRunner, OrderRejectedError
 from slipstream.v1 import execution_pb2 as pb
 
@@ -255,3 +263,78 @@ def test_book_updates_carry_their_receive_time(fake_engine: FakeEngine) -> None:
     runner = make_runner(fake_engine)
     runner.on_message(snapshot(), 1234)
     assert fake_engine.book_recv_ns == [1234]
+
+
+def test_calibration_uses_the_consolidated_fee_adjusted_book(
+    fake_engine: FakeEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: list[BookUpdate] = []
+
+    def spy(
+        spec: OrderSpec, book: BookUpdate, start_ns: int, data: CalibrationData | None
+    ) -> ScheduleParams:
+        seen.append(book)
+        return TwapParams()
+
+    monkeypatch.setattr("slipstream.runner.schedule_params", spy)
+    runner = ExecutionRunner(
+        fake_engine,
+        SPEC,
+        "BTC/USD",
+        logging.getLogger("t"),
+        venues=("kraken", "coinbase"),
+        fee_bps={"kraken": 0.0, "coinbase": 100.0},
+    )
+    runner.on_message(snapshot(), 100, "kraken")
+    runner.on_message(cb_snapshot(), 200, "coinbase")
+    (book,) = seen
+    # pytest.approx() on this pytest version does not support nesting past one level, so the
+    # per-price tolerance is applied by hand instead of wrapping the whole tuple of tuples.
+    assert book.asks == ((pytest.approx(101.0), 1.0), (pytest.approx(102.01), 1.0))
+    assert book.bids == ((pytest.approx(99.0), 1.0), (pytest.approx(98.01), 1.0))
+
+
+def test_calibration_book_includes_deltas_since_the_first_snapshot(
+    fake_engine: FakeEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: list[BookUpdate] = []
+
+    def spy(
+        spec: OrderSpec, book: BookUpdate, start_ns: int, data: CalibrationData | None
+    ) -> ScheduleParams:
+        seen.append(book)
+        return TwapParams()
+
+    monkeypatch.setattr("slipstream.runner.schedule_params", spy)
+    runner = ExecutionRunner(
+        fake_engine, SPEC, "BTC/USD", logging.getLogger("t"), venues=("kraken", "coinbase")
+    )
+    runner.on_message(snapshot(), 100, "kraken")
+    delta = {
+        "channel": "book",
+        "type": "update",
+        "data": [{"symbol": "BTC/USD", "bids": [], "asks": [{"price": 100.5, "qty": 2.0}]}],
+    }
+    runner.on_message(json.dumps(delta), 150, "kraken")
+    runner.on_message(cb_snapshot(), 200, "coinbase")
+    (book,) = seen
+    assert book.asks == ((100.5, 2.0), (101.0, 1.0), (101.0, 1.0))
+
+
+def test_fill_log_carries_venue_and_fee(
+    fake_engine: FakeEngine, caplog: pytest.LogCaptureFixture
+) -> None:
+    fake_engine.fills_per_step = [[Fill("o-1", 5, 0.25, 101.0, "coinbase", 0.02)]]
+    runner = make_runner(fake_engine)
+    with caplog.at_level(logging.INFO):
+        runner.on_message(snapshot(), 5)
+    fields = [r.fields for r in caplog.records if getattr(r, "fields", {}).get("event") == "fill"]
+    assert fields[0]["venue"] == "coinbase"
+    assert fields[0]["fee"] == 0.02
+
+
+def test_runner_exposes_its_venues(fake_engine: FakeEngine) -> None:
+    runner = ExecutionRunner(
+        fake_engine, SPEC, "BTC/USD", logging.getLogger("t"), venues=("coinbase", "kraken")
+    )
+    assert runner.venues == frozenset({"kraken", "coinbase"})
