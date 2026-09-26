@@ -22,7 +22,14 @@ std::vector<Level> to_levels(const google::protobuf::RepeatedPtrField<v1::PriceL
 
 bool valid_trade(const v1::Trade& trade) {
     return std::isfinite(trade.price()) && std::isfinite(trade.qty()) && trade.price() > 0.0 &&
-           trade.qty() > 0.0;
+           trade.qty() > 0.0 && trade.price() <= MarketValidator::kMaxValue &&
+           trade.qty() <= MarketValidator::kMaxValue;
+}
+
+bool within_caps(const std::vector<Level>& levels) {
+    return std::all_of(levels.begin(), levels.end(), [](const Level& level) {
+        return level.price <= MarketValidator::kMaxValue && level.qty <= MarketValidator::kMaxValue;
+    });
 }
 
 }  // namespace
@@ -53,7 +60,8 @@ Admission MarketValidator::book(const v1::BookUpdate& update, std::size_t venue)
     auto asks = to_levels(update.asks());
     const bool allow_zero_qty = !update.is_snapshot();
     if (!OrderBook::valid_levels(bids, allow_zero_qty) ||
-        !OrderBook::valid_levels(asks, allow_zero_qty)) {
+        !OrderBook::valid_levels(asks, allow_zero_qty) || !within_caps(bids) ||
+        !within_caps(asks)) {
         return invalid("invalid price level");
     }
     return MarketItem{

@@ -25,6 +25,8 @@ class MarketValidator {
 public:
     static constexpr int kMaxLevelsPerUpdate = 1000;
     static constexpr int kMaxTradesPerBatch = 1000;
+    // Bounds every price and quantity, so running totals such as traded volume stay finite.
+    static constexpr double kMaxValue = 1e12;
     // Streamed events wait in a queue of up to 10,000 items, so they carry fewer levels.
     static constexpr int kMinStreamLevels = 100;
 

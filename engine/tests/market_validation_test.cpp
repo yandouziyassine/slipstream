@@ -2,6 +2,7 @@
 
 #include <gtest/gtest.h>
 
+#include <cmath>
 #include <cstdint>
 #include <limits>
 #include <string>
@@ -273,4 +274,37 @@ TEST_F(MarketValidationTest, StreamLevelCapFollowsADeeperBook) {
     auto stream = StreamAdmission::live(deep, 0);
     EXPECT_EQ(code(stream.admit(wide_book_event("", 0, 250))), grpc::StatusCode::OK);
     EXPECT_EQ(code(stream.admit(wide_book_event("", 0, 251))), grpc::StatusCode::INVALID_ARGUMENT);
+}
+
+TEST_F(MarketValidationTest, CapsTradePriceAndQuantity) {
+    const double cap = MarketValidator::kMaxValue;
+    const double above = std::nextafter(cap, 2 * cap);
+    const auto with = [](double price, double qty) {
+        auto event = trade_event("");
+        event.mutable_trades()->mutable_trades(0)->set_price(price);
+        event.mutable_trades()->mutable_trades(0)->set_qty(qty);
+        return event;
+    };
+    EXPECT_EQ(code(validator.trades(with(cap, cap).trades(), 0)), grpc::StatusCode::OK);
+    EXPECT_EQ(code(validator.trades(with(above, 1.0).trades(), 0)),
+              grpc::StatusCode::INVALID_ARGUMENT);
+    EXPECT_EQ(code(validator.trades(with(100.0, above).trades(), 0)),
+              grpc::StatusCode::INVALID_ARGUMENT);
+}
+
+TEST_F(MarketValidationTest, CapsLevelPriceAndQuantity) {
+    const double cap = MarketValidator::kMaxValue;
+    const double above = std::nextafter(cap, 2 * cap);
+    auto at_cap = book_update("", 0);
+    at_cap.mutable_asks(0)->set_price(cap);
+    at_cap.mutable_asks(0)->set_qty(cap);
+    EXPECT_EQ(code(validator.book(at_cap, 0)), grpc::StatusCode::OK);
+
+    auto big_price = book_update("", 0);
+    big_price.mutable_asks(0)->set_price(above);
+    EXPECT_EQ(code(validator.book(big_price, 0)), grpc::StatusCode::INVALID_ARGUMENT);
+
+    auto big_qty = book_update("", 0, false);
+    big_qty.mutable_bids(0)->set_qty(above);
+    EXPECT_EQ(code(validator.book(big_qty, 0)), grpc::StatusCode::INVALID_ARGUMENT);
 }
