@@ -119,5 +119,17 @@ def two_venue_engine_address() -> Iterator[str]:
 
 
 @pytest.fixture
+def live_engine_address() -> Iterator[str]:
+    yield from _run_engine("--clock", "live")
+
+
+@pytest.fixture
+def two_venue_live_engine_address() -> Iterator[str]:
+    yield from _run_engine(
+        "--venue", "kraken:fee_bps=0", "--venue", "coinbase:fee_bps=1", "--clock", "live"
+    )
+
+
+@pytest.fixture
 def kraken_min_qty_engine_address() -> Iterator[str]:
     yield from _run_engine("--venue", "kraken:fee_bps=0,min_qty=0.00005")
