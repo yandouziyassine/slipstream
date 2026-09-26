@@ -414,3 +414,15 @@ def test_heartbeat_after_submit_keeps_the_venue_fresh(fake_engine: FakeEngine) -
 def test_heartbeat_before_submit_sends_no_keepalive(fake_engine: FakeEngine) -> None:
     make_runner(fake_engine).on_message(HEARTBEAT, 50)
     assert fake_engine.books == []
+
+
+def test_heartbeats_cannot_keep_a_silent_book_fresh_forever(fake_engine: FakeEngine) -> None:
+    # Heartbeats prove the connection is alive, not that the book feed is. After 30 s without a
+    # book change the keep-alive stops, so the engine's normal staleness rule takes over.
+    runner = make_runner(fake_engine)
+    runner.on_message(snapshot(), 100)
+    runner.on_message(HEARTBEAT, 100 + 29_000_000_000)
+    assert fake_engine.book_recv_ns[-1] == 100 + 29_000_000_000
+    books_before = len(fake_engine.books)
+    runner.on_message(HEARTBEAT, 100 + 31_000_000_000)
+    assert len(fake_engine.books) == books_before

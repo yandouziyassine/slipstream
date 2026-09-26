@@ -22,6 +22,8 @@ from slipstream.models import (
 from slipstream.v1 import execution_pb2 as pb
 
 _VALID_VENUES: frozenset[Venue] = frozenset(VENUES)
+# Heartbeats may keep a venue fresh only this long after its last real book change.
+MAX_QUIET_BOOK_NS = 30_000_000_000
 
 _Parser = Callable[[str | bytes], BookUpdate | TradeBatch | None]
 
@@ -76,6 +78,7 @@ class ExecutionRunner:
             self._parsers["coinbase"] = CoinbaseStream(symbol, book_depth).parse
         self._snapshot_venues: set[Venue] = set()
         self._submitted = False
+        self._last_book_ns: dict[Venue, int] = {}
         self._working = 0
         self.fills: list[Fill] = []
 
@@ -91,6 +94,7 @@ class ExecutionRunner:
         if isinstance(update, BookUpdate):
             self._check_symbol(update.symbol)
             self._engine.apply_book(update, now_ns)
+            self._last_book_ns[venue] = now_ns
             if not self._submitted:
                 self._books[venue].apply(update)
                 if update.is_snapshot:
@@ -101,7 +105,9 @@ class ExecutionRunner:
             self._check_symbol(update.symbol)
             if not update.is_snapshot:
                 self._engine.apply_trades(update)
-        elif self._submitted:
+        elif (
+            self._submitted and now_ns - self._last_book_ns.get(venue, now_ns) <= MAX_QUIET_BOOK_NS
+        ):
             # A heartbeat on a live connection means this venue's book is unchanged, not stale.
             # An empty delta refreshes the engine's freshness clock without touching any level.
             self._engine.apply_book(BookUpdate(self._symbol, False, (), (), venue), now_ns)
