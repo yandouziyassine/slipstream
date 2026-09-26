@@ -107,15 +107,18 @@ class EngineLoop {
 public:
     static constexpr std::chrono::milliseconds kTickInterval{50};
     static constexpr std::size_t kCommandCapacity = 1024;
+    static constexpr std::chrono::milliseconds kReplayPushTimeout{5000};
 
     EngineLoop(Engine& engine, ClockMode mode, std::size_t market_capacity = 10'000,
-               std::size_t subscriber_capacity = 10'000);
+               std::size_t subscriber_capacity = 10'000,
+               std::chrono::milliseconds replay_push_timeout = kReplayPushTimeout);
     ~EngineLoop();
 
     EngineLoop(const EngineLoop&) = delete;
     EngineLoop& operator=(const EngineLoop&) = delete;
 
-    // False when the queue is full or the loop stopped.
+    // False when the queue is full or the loop stopped. Live mode fails at once so a live feed
+    // never blocks; replay waits up to replay_push_timeout for room, since a replay can slow down.
     bool push(MarketItem item);
 
     // Runs fn(engine) on the engine thread and returns its result or rethrows its exception.
@@ -172,6 +175,7 @@ private:
     Engine& engine_;
     const ClockMode mode_;
     const std::size_t subscriber_capacity_;
+    const std::chrono::milliseconds replay_push_timeout_;
     const LiveClock clock_;
     BoundedQueue<Slot> market_;
     BoundedQueue<Command> commands_;

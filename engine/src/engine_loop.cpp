@@ -17,10 +17,12 @@ std::int64_t steady_now_ns() {
 }  // namespace
 
 EngineLoop::EngineLoop(Engine& engine, ClockMode mode, std::size_t market_capacity,
-                       std::size_t subscriber_capacity)
+                       std::size_t subscriber_capacity,
+                       std::chrono::milliseconds replay_push_timeout)
     : engine_(engine),
       mode_(mode),
       subscriber_capacity_(subscriber_capacity),
+      replay_push_timeout_(replay_push_timeout),
       market_(market_capacity),
       commands_(kCommandCapacity) {
     engine_thread_ = std::thread([this] { engine_main(); });
@@ -37,7 +39,11 @@ EngineLoop::EngineLoop(Engine& engine, ClockMode mode, std::size_t market_capaci
 EngineLoop::~EngineLoop() { stop(); }
 
 bool EngineLoop::push(MarketItem item) {
-    if (mode_ == ClockMode::Live) item.ingest_ns = clock_.now_ns();
+    if (mode_ == ClockMode::Replay) {
+        return market_.push_for(Slot{Pending{std::move(item), steady_now_ns()}},
+                                replay_push_timeout_);
+    }
+    item.ingest_ns = clock_.now_ns();
     return market_.try_push(Slot{Pending{std::move(item), steady_now_ns()}});
 }
 

@@ -14,135 +14,16 @@
 
 #include "engine_loop.h"
 #include "service.h"
+#include "stream_harness.h"
 
 using namespace slipstream;
+using namespace slipstream::test;
 using namespace std::chrono_literals;
 
 namespace {
 
 constexpr std::int64_t kSec = 1'000'000'000;
 constexpr std::int64_t kDay = 86'400 * kSec;
-
-// A real gRPC server in this process, reached through its in-process channel.
-class Harness {
-public:
-    explicit Harness(ClockMode mode, std::size_t market_capacity = 10'000,
-                     std::size_t subscriber_capacity = 10'000)
-        : engine_(RiskLimits{1'000'000.0, 100.0}, 10, {{"kraken", 0.0}, {"coinbase", 0.0}},
-                  2 * kSec),
-          loop_(engine_, mode, market_capacity, subscriber_capacity),
-          service_(loop_, "BTC/USD") {
-        grpc::ServerBuilder builder;
-        builder.RegisterService(&service_);
-        server_ = builder.BuildAndStart();
-        stub_ = v1::ExecutionEngine::NewStub(server_->InProcessChannel(grpc::ChannelArguments{}));
-    }
-
-    ~Harness() {
-        server_->Shutdown(std::chrono::system_clock::now() + 2s);
-        loop_.stop();
-    }
-
-    Harness(const Harness&) = delete;
-    Harness& operator=(const Harness&) = delete;
-
-    v1::ExecutionEngine::Stub& stub() { return *stub_; }
-    EngineLoop& loop() { return loop_; }
-
-    v1::StatusReply status() {
-        grpc::ClientContext context;
-        v1::StatusReply reply;
-        EXPECT_TRUE(stub_->GetStatus(&context, v1::StatusRequest{}, &reply).ok());
-        return reply;
-    }
-
-    // Polls GetStatus: commands run ahead of queued market items, so one call is not a barrier.
-    bool eventually(const std::function<bool(const v1::StatusReply&)>& done) {
-        const auto deadline = std::chrono::steady_clock::now() + 10s;
-        while (std::chrono::steady_clock::now() < deadline) {
-            if (done(status())) return true;
-            std::this_thread::sleep_for(2ms);
-        }
-        return false;
-    }
-
-    v1::SubmitReply submit(const std::string& id, std::int64_t start_ns, std::int64_t duration_ns,
-                           int slices) {
-        v1::ParentOrder order;
-        order.set_order_id(id);
-        order.set_side(v1::SIDE_BUY);
-        order.set_qty(1.0);
-        order.set_start_ns(start_ns);
-        order.set_duration_ns(duration_ns);
-        order.set_num_slices(slices);
-        grpc::ClientContext context;
-        v1::SubmitReply reply;
-        EXPECT_TRUE(stub_->SubmitParentOrder(&context, order, &reply).ok());
-        return reply;
-    }
-
-private:
-    Engine engine_;
-    EngineLoop loop_;
-    ExecutionService service_;
-    std::unique_ptr<grpc::Server> server_;
-    std::unique_ptr<v1::ExecutionEngine::Stub> stub_;
-};
-
-class Stream {
-public:
-    Stream(v1::ExecutionEngine::Stub& stub, const std::optional<std::string>& venue) {
-        context_.set_deadline(std::chrono::system_clock::now() + 30s);
-        if (venue) context_.AddMetadata("slipstream-venue", *venue);
-        writer_ = stub.MarketStream(&context_, &summary_);
-    }
-
-    // The result is ignored on purpose: after the server ends the call, writes just fail and
-    // finish() reports the status.
-    void send(const v1::MarketEvent& event) { (void)writer_->Write(event); }
-
-    grpc::Status finish() {
-        (void)writer_->WritesDone();
-        return writer_->Finish();
-    }
-
-    std::uint64_t events() const { return summary_.events(); }
-
-private:
-    grpc::ClientContext context_;
-    v1::MarketStreamSummary summary_;
-    std::unique_ptr<grpc::ClientWriter<v1::MarketEvent>> writer_;
-};
-
-class Subscription {
-public:
-    explicit Subscription(v1::ExecutionEngine::Stub& stub) {
-        context_.set_deadline(std::chrono::system_clock::now() + 30s);
-        reader_ = stub.Subscribe(&context_, v1::SubscribeRequest{});
-    }
-
-    // The server sends initial metadata once the subscription is active.
-    void wait_active() { reader_->WaitForInitialMetadata(); }
-
-    std::optional<v1::EngineEvent> next() {
-        v1::EngineEvent event;
-        if (!reader_->Read(&event)) return std::nullopt;
-        return event;
-    }
-
-    grpc::Status finish() { return reader_->Finish(); }
-
-    grpc::Status cancel() {
-        context_.TryCancel();
-        while (next()) {
-        }
-        return finish();
-    }
-
-private:
-    grpc::ClientContext context_;
-    std::unique_ptr<grpc::ClientReader<v1::EngineEvent>> reader_;
-};
 
 v1::MarketEvent book(const std::string& venue, std::int64_t recv_ns, double bid_qty,
                      bool snapshot = true) {
@@ -177,6 +58,39 @@ double bid_qty(const v1::StatusReply& status, int venue) {
 std::function<bool(const v1::StatusReply&)> booked(int venue) {
     return [venue](const v1::StatusReply& status) { return status.venues(venue).has_book(); };
 }
+
+// Holds the engine thread inside a command until release() or destruction.
+class EngineGate {
+public:
+    explicit EngineGate(EngineLoop& loop) {
+        auto entered = entered_.get_future();
+        holder_ = std::async(std::launch::async, [this, &loop] {
+            loop.run([this](Engine&) {
+                entered_.set_value();
+                released_.wait();
+            });
+        });
+        entered.wait();
+    }
+
+    ~EngineGate() { release(); }
+
+    EngineGate(const EngineGate&) = delete;
+    EngineGate& operator=(const EngineGate&) = delete;
+
+    void release() {
+        if (holder_.valid()) {
+            release_.set_value();
+            holder_.get();
+        }
+    }
+
+private:
+    std::promise<void> entered_;
+    std::promise<void> release_;
+    std::shared_future<void> released_ = release_.get_future().share();
+    std::future<void> holder_;
+};
 
 grpc::Status stream_one(Harness& harness, const std::optional<std::string>& venue,
                         const v1::MarketEvent& event) {
@@ -309,25 +223,46 @@ TEST(StreamTest, InvalidEventEndsOnlyItsOwnStream) {
     }));
 }
 
-TEST(StreamTest, FullEngineQueueEndsTheStreamWithResourceExhausted) {
-    Harness harness(ClockMode::Replay, 1);
-    std::promise<void> release;
-    std::shared_future<void> released = release.get_future().share();
-    std::promise<void> entered;
-    auto gate = std::async(std::launch::async, [&] {
-        harness.loop().run([&](Engine&) {
-            entered.set_value();
-            released.wait();
+TEST(StreamTest, ReplayWaitsForRoomInAFullEngineQueue) {
+    constexpr int kCapacity = 4;
+    constexpr int kEvents = 3 * kCapacity;
+    Harness harness(ClockMode::Replay, kCapacity);
+    {
+        EngineGate gate(harness.loop());
+        Stream stream(harness.stub(), std::nullopt);
+        // In-process writes complete only once the handler reads them, so send from another thread.
+        auto sender = std::async(std::launch::async, [&] {
+            for (int i = 1; i <= kEvents; ++i) stream.send(book("kraken", i * kSec, i));
+            return stream.finish();
         });
-    });
-    entered.get_future().wait();
+        // Meanwhile the handler fills the queue, then waits instead of failing the stream.
+        std::this_thread::sleep_for(200ms);
+        gate.release();
+        const auto status = sender.get();
+        ASSERT_TRUE(status.ok()) << status.error_message();
+        EXPECT_EQ(stream.events(), static_cast<std::uint64_t>(kEvents));
+    }
+    EXPECT_TRUE(harness.eventually([](const v1::StatusReply& s) {
+        return s.stats().events() == static_cast<std::uint64_t>(kEvents);
+    }));
+    EXPECT_DOUBLE_EQ(bid_qty(harness.status(), 0), kEvents);
+}
 
+TEST(StreamTest, ReplayQueueStillFullAfterTheWaitEndsTheStream) {
+    Harness harness(ClockMode::Replay, 1, 10'000, 50ms);
+    EngineGate gate(harness.loop());
     Stream stream(harness.stub(), std::nullopt);
     for (int i = 1; i <= 3; ++i) stream.send(book("kraken", i * kSec, 1.0));
-    const auto status = stream.finish();
-    release.set_value();
-    gate.get();
-    EXPECT_EQ(status.error_code(), grpc::StatusCode::RESOURCE_EXHAUSTED);
+    EXPECT_EQ(stream.finish().error_code(), grpc::StatusCode::RESOURCE_EXHAUSTED);
+}
+
+TEST(StreamTest, LiveFullEngineQueueFailsTheStreamAtOnce) {
+    Harness harness(ClockMode::Live, 1);
+    EngineGate gate(harness.loop());
+    Stream stream(harness.stub(), "kraken");
+    for (int i = 1; i <= 3; ++i) stream.send(book("", 0, 1.0));
+    // The stream ends while the engine thread is still held, so the live push never waited.
+    EXPECT_EQ(stream.finish().error_code(), grpc::StatusCode::RESOURCE_EXHAUSTED);
 }
 
 TEST(StreamTest, SubscriberReceivesFillsAndTheTerminalUpdate) {

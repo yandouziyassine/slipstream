@@ -69,6 +69,58 @@ TEST(BoundedQueueTest, PushFailsAfterCloseButPopsStillDrain) {
     EXPECT_FALSE(queue.try_pop());
 }
 
+TEST(BoundedQueueTest, PushForWaitsUntilAPopFreesSpace) {
+    BoundedQueue<int> queue(1);
+    ASSERT_TRUE(queue.try_push(1));
+    std::atomic<bool> pushed{false};
+    std::thread producer([&] { pushed.store(queue.push_for(2, std::chrono::seconds(5))); });
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    EXPECT_FALSE(pushed.load());
+    EXPECT_EQ(queue.try_pop(), 1);
+    producer.join();
+    EXPECT_TRUE(pushed.load());
+    EXPECT_EQ(queue.try_pop(), 2);
+}
+
+TEST(BoundedQueueTest, PushForWakesAfterAPopFor) {
+    BoundedQueue<int> queue(1);
+    ASSERT_TRUE(queue.try_push(1));
+    std::thread producer([&] { EXPECT_TRUE(queue.push_for(2, std::chrono::seconds(5))); });
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    EXPECT_EQ(queue.pop_for(std::chrono::milliseconds(0)), 1);
+    producer.join();
+    EXPECT_EQ(queue.try_pop(), 2);
+}
+
+TEST(BoundedQueueTest, CloseWakesABlockedPushForWhichFails) {
+    BoundedQueue<int> queue(1);
+    ASSERT_TRUE(queue.try_push(1));
+    const auto start = std::chrono::steady_clock::now();
+    std::thread producer([&] { EXPECT_FALSE(queue.push_for(2, std::chrono::seconds(5))); });
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    queue.close();
+    producer.join();
+    EXPECT_LT(std::chrono::steady_clock::now() - start, std::chrono::seconds(4));
+    EXPECT_EQ(queue.try_pop(), 1);
+    EXPECT_FALSE(queue.try_pop());
+}
+
+TEST(BoundedQueueTest, PushForTimesOutWhenStillFull) {
+    BoundedQueue<int> queue(1);
+    ASSERT_TRUE(queue.try_push(1));
+    const auto start = std::chrono::steady_clock::now();
+    EXPECT_FALSE(queue.push_for(2, std::chrono::milliseconds(20)));
+    EXPECT_GE(std::chrono::steady_clock::now() - start, std::chrono::milliseconds(15));
+    EXPECT_EQ(queue.size(), 1u);
+}
+
+TEST(BoundedQueueTest, PushForSucceedsAtOnceWithRoom) {
+    BoundedQueue<int> queue(2);
+    EXPECT_TRUE(queue.push_for(1, std::chrono::milliseconds(0)));
+    EXPECT_EQ(queue.high_water(), 1u);
+    EXPECT_EQ(queue.try_pop(), 1);
+}
+
 TEST(BoundedQueueTest, ManyProducersPreserveEveryItemAndPerProducerOrder) {
     constexpr int kProducers = 4;
     constexpr int kItemsPerProducer = 25'000;

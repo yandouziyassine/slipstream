@@ -32,7 +32,8 @@ public:
                              v1::TradeAck*) override;
     // Live: one stream per venue, named by the kVenueMetadataKey request metadata.
     // Replay: one stream at a time. Ends with INVALID_ARGUMENT on the first invalid event and
-    // RESOURCE_EXHAUSTED when the engine queue is full.
+    // RESOURCE_EXHAUSTED when the engine queue is full (replay: still full after
+    // EngineLoop's replay wait).
     grpc::Status MarketStream(grpc::ServerContext* context,
                               grpc::ServerReader<v1::MarketEvent>* reader,
                               v1::MarketStreamSummary* summary) override;
