@@ -27,10 +27,11 @@ constexpr std::int64_t kDay = 86'400 * kSec;
 class Harness {
 public:
     explicit Harness(ClockMode mode, std::size_t market_capacity = 10'000,
-                     std::size_t subscriber_capacity = 10'000)
+                     std::size_t subscriber_capacity = 10'000,
+                     std::chrono::milliseconds replay_push_timeout = EngineLoop::kReplayPushTimeout)
         : engine_(RiskLimits{1'000'000.0, 100.0}, 10, {{"kraken", 0.0}, {"coinbase", 0.0}},
                   2 * kSec),
-          loop_(engine_, mode, market_capacity, subscriber_capacity),
+          loop_(engine_, mode, market_capacity, subscriber_capacity, replay_push_timeout),
           service_(loop_, "BTC/USD") {
         grpc::ServerBuilder builder;
         builder.RegisterService(&service_);
@@ -178,6 +179,39 @@ std::function<bool(const v1::StatusReply&)> booked(int venue) {
     return [venue](const v1::StatusReply& status) { return status.venues(venue).has_book(); };
 }
 
+// Holds the engine thread inside a command until release() or destruction.
+class EngineGate {
+public:
+    explicit EngineGate(EngineLoop& loop) {
+        auto entered = entered_.get_future();
+        holder_ = std::async(std::launch::async, [this, &loop] {
+            loop.run([this](Engine&) {
+                entered_.set_value();
+                released_.wait();
+            });
+        });
+        entered.wait();
+    }
+
+    ~EngineGate() { release(); }
+
+    EngineGate(const EngineGate&) = delete;
+    EngineGate& operator=(const EngineGate&) = delete;
+
+    void release() {
+        if (holder_.valid()) {
+            release_.set_value();
+            holder_.get();
+        }
+    }
+
+private:
+    std::promise<void> entered_;
+    std::promise<void> release_;
+    std::shared_future<void> released_ = release_.get_future().share();
+    std::future<void> holder_;
+};
+
 grpc::Status stream_one(Harness& harness, const std::optional<std::string>& venue,
                         const v1::MarketEvent& event) {
     Stream stream(harness.stub(), venue);
@@ -309,25 +343,46 @@ TEST(StreamTest, InvalidEventEndsOnlyItsOwnStream) {
     }));
 }
 
-TEST(StreamTest, FullEngineQueueEndsTheStreamWithResourceExhausted) {
-    Harness harness(ClockMode::Replay, 1);
-    std::promise<void> release;
-    std::shared_future<void> released = release.get_future().share();
-    std::promise<void> entered;
-    auto gate = std::async(std::launch::async, [&] {
-        harness.loop().run([&](Engine&) {
-            entered.set_value();
-            released.wait();
+TEST(StreamTest, ReplayWaitsForRoomInAFullEngineQueue) {
+    constexpr int kCapacity = 4;
+    constexpr int kEvents = 3 * kCapacity;
+    Harness harness(ClockMode::Replay, kCapacity);
+    {
+        EngineGate gate(harness.loop());
+        Stream stream(harness.stub(), std::nullopt);
+        // In-process writes complete only once the handler reads them, so send from another thread.
+        auto sender = std::async(std::launch::async, [&] {
+            for (int i = 1; i <= kEvents; ++i) stream.send(book("kraken", i * kSec, i));
+            return stream.finish();
         });
-    });
-    entered.get_future().wait();
+        // Meanwhile the handler fills the queue, then waits instead of failing the stream.
+        std::this_thread::sleep_for(200ms);
+        gate.release();
+        const auto status = sender.get();
+        ASSERT_TRUE(status.ok()) << status.error_message();
+        EXPECT_EQ(stream.events(), static_cast<std::uint64_t>(kEvents));
+    }
+    EXPECT_TRUE(harness.eventually([](const v1::StatusReply& s) {
+        return s.stats().events() == static_cast<std::uint64_t>(kEvents);
+    }));
+    EXPECT_DOUBLE_EQ(bid_qty(harness.status(), 0), kEvents);
+}
 
+TEST(StreamTest, ReplayQueueStillFullAfterTheWaitEndsTheStream) {
+    Harness harness(ClockMode::Replay, 1, 10'000, 50ms);
+    EngineGate gate(harness.loop());
     Stream stream(harness.stub(), std::nullopt);
     for (int i = 1; i <= 3; ++i) stream.send(book("kraken", i * kSec, 1.0));
-    const auto status = stream.finish();
-    release.set_value();
-    gate.get();
-    EXPECT_EQ(status.error_code(), grpc::StatusCode::RESOURCE_EXHAUSTED);
+    EXPECT_EQ(stream.finish().error_code(), grpc::StatusCode::RESOURCE_EXHAUSTED);
+}
+
+TEST(StreamTest, LiveFullEngineQueueFailsTheStreamAtOnce) {
+    Harness harness(ClockMode::Live, 1);
+    EngineGate gate(harness.loop());
+    Stream stream(harness.stub(), "kraken");
+    for (int i = 1; i <= 3; ++i) stream.send(book("", 0, 1.0));
+    // The stream ends while the engine thread is still held, so the live push never waited.
+    EXPECT_EQ(stream.finish().error_code(), grpc::StatusCode::RESOURCE_EXHAUSTED);
 }
 
 TEST(StreamTest, SubscriberReceivesFillsAndTheTerminalUpdate) {
