@@ -31,6 +31,13 @@ add_library(slipstream_core STATIC
 )
 target_include_directories(slipstream_core PUBLIC src)
 target_compile_options(slipstream_core PRIVATE ${SLIPSTREAM_WARNINGS})
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+  # With optimization on, GCC 13 falsely reports (maybe-)uninitialized members when a queue slot
+  # (a std::variant holding a std::variant) is moved out of the deque, which breaks -O2 and -O3
+  # builds under -Werror. Only this file instantiates that move.
+  set_source_files_properties(src/engine_loop.cpp PROPERTIES COMPILE_OPTIONS
+    "-Wno-maybe-uninitialized;-Wno-uninitialized")
+endif()
 find_package(Threads REQUIRED)
 target_link_libraries(slipstream_core PUBLIC Threads::Threads)
 
