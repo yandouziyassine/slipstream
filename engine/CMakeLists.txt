@@ -27,9 +27,12 @@ add_library(slipstream_core STATIC
   src/config.cpp
   src/router.cpp
   src/clock.cpp
+  src/engine_loop.cpp
 )
 target_include_directories(slipstream_core PUBLIC src)
 target_compile_options(slipstream_core PRIVATE ${SLIPSTREAM_WARNINGS})
+find_package(Threads REQUIRED)
+target_link_libraries(slipstream_core PUBLIC Threads::Threads)
 
 find_package(Protobuf REQUIRED)
 find_package(PkgConfig REQUIRED)
@@ -71,7 +74,6 @@ target_compile_options(slipstream_engine PRIVATE ${SLIPSTREAM_WARNINGS})
 
 enable_testing()
 find_package(GTest REQUIRED)
-find_package(Threads REQUIRED)
 include(GoogleTest)
 
 add_executable(engine_tests
@@ -91,6 +93,7 @@ add_executable(engine_tests
   tests/engine_routing_test.cpp
   tests/clock_test.cpp
   tests/bounded_queue_test.cpp
+  tests/engine_loop_test.cpp
 )
 target_link_libraries(engine_tests PRIVATE slipstream_service GTest::gtest_main Threads::Threads)
 target_compile_options(engine_tests PRIVATE ${SLIPSTREAM_WARNINGS})
