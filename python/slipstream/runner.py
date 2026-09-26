@@ -15,12 +15,12 @@ from slipstream.models import (
     MarketDataError,
     OrderSpec,
     ScheduleParams,
+    StepResult,
     TradeBatch,
     Venue,
 )
 from slipstream.v1 import execution_pb2 as pb
 
-_TERMINAL_STATES = (pb.ORDER_STATE_COMPLETED, pb.ORDER_STATE_HALTED)
 _VALID_VENUES: frozenset[Venue] = frozenset(VENUES)
 
 _Parser = Callable[[str | bytes], BookUpdate | TradeBatch | None]
@@ -32,7 +32,7 @@ class Engine(Protocol):
     def submit(
         self, spec: OrderSpec, start_ns: int, params: ScheduleParams | None = None
     ) -> tuple[bool, str]: ...
-    def step(self, now_ns: int) -> list[Fill]: ...
+    def step(self, now_ns: int) -> StepResult: ...
     def status(self) -> pb.StatusReply: ...
 
 
@@ -76,6 +76,7 @@ class ExecutionRunner:
             self._parsers["coinbase"] = CoinbaseStream(symbol, book_depth).parse
         self._snapshot_venues: set[Venue] = set()
         self._submitted = False
+        self._working = 0
         self.fills: list[Fill] = []
 
     @property
@@ -111,10 +112,7 @@ class ExecutionRunner:
         return statuses[0] if statuses else None
 
     def is_done(self) -> bool:
-        statuses = self.order_statuses()
-        return len(statuses) == len(self._specs) and all(
-            status.state in _TERMINAL_STATES for status in statuses
-        )
+        return self._submitted and self._working == 0
 
     def _check_symbol(self, symbol: str) -> None:
         if symbol != self._symbol:
@@ -145,9 +143,12 @@ class ExecutionRunner:
                 },
             )
         self._submitted = True
+        self._working = len(self._specs)
 
     def _step(self, now_ns: int) -> None:
-        for fill in self._engine.step(now_ns):
+        result = self._engine.step(now_ns)
+        self._working = result.working_orders
+        for fill in result.fills:
             self.fills.append(fill)
             self._log.info(
                 "fill",

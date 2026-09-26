@@ -14,6 +14,7 @@ from slipstream.models import (
     OrderSpec,
     PovParams,
     ScheduleParams,
+    StepResult,
     TradeBatch,
     Venue,
     VwapParams,
@@ -100,12 +101,16 @@ class EngineClient:
     def apply_trades(self, batch: TradeBatch) -> None:
         self._call(self._stub.ApplyTrades, trade_batch_to_proto(batch))
 
-    def step(self, now_ns: int) -> list[Fill]:
+    def step(self, now_ns: int) -> StepResult:
         reply = cast(pb.StepReply, self._call(self._stub.Step, pb.StepRequest(now_ns=now_ns)))
-        return [Fill(f.order_id, f.ts_ns, f.qty, f.price, f.venue, f.fee) for f in reply.fills]
+        fills = [Fill(f.order_id, f.ts_ns, f.qty, f.price, f.venue, f.fee) for f in reply.fills]
+        return StepResult(fills=fills, working_orders=reply.working_orders)
 
     def status(self) -> pb.StatusReply:
         return cast(pb.StatusReply, self._call(self._stub.GetStatus, pb.StatusRequest()))
+
+    def book_depth(self) -> int:
+        return self.status().book_depth
 
     def venue_fees(self) -> dict[Venue, float]:
         fees: dict[Venue, float] = {}

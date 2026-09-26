@@ -88,7 +88,27 @@ def test_records_fills_and_reports_done(fake_engine: FakeEngine) -> None:
     assert runner.fills == [fill]
     assert not runner.is_done()
     fake_engine.state = pb.ORDER_STATE_COMPLETED
+    runner.on_message(HEARTBEAT, 200)
     assert runner.is_done()
+
+
+def test_is_done_reflects_the_last_step_without_calling_get_status(
+    fake_engine: FakeEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake_engine.done_after_steps = 1
+    calls = 0
+    orig_status = fake_engine.status
+
+    def spy_status() -> pb.StatusReply:
+        nonlocal calls
+        calls += 1
+        return orig_status()
+
+    monkeypatch.setattr(fake_engine, "status", spy_status)
+    runner = make_runner(fake_engine)
+    runner.on_message(snapshot(), 100)
+    assert runner.is_done()
+    assert calls == 0
 
 
 def trade(msg_type: str = "update", symbol: str = "BTC/USD") -> str:
@@ -136,7 +156,22 @@ def test_done_only_when_every_order_is_terminal(fake_engine: FakeEngine) -> None
     runner.on_message(snapshot(), 100)
     assert not runner.is_done()
     fake_engine.state = pb.ORDER_STATE_COMPLETED
+    runner.on_message(HEARTBEAT, 200)
     assert runner.is_done()
+
+
+def test_working_orders_is_set_right_after_submit_before_any_step(
+    fake_engine: FakeEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Regression guard for the D1 ordering requirement: even if step() were never called,
+    # a freshly submitted runner must not report done.
+    monkeypatch.setattr(fake_engine, "step", lambda now_ns: pytest.fail("step should not run"))
+    runner = ExecutionRunner(
+        fake_engine, [OrderSpec("a", "buy", 1.0, 4, 4)], "BTC/USD", logging.getLogger("test")
+    )
+    runner._submit_all(100)  # exercising the ordering guarantee directly, before any step
+    assert runner._working == 1
+    assert not runner.is_done()
 
 
 def test_calibrated_algo_without_data_fails_before_submitting(fake_engine: FakeEngine) -> None:
