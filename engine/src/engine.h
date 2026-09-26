@@ -64,6 +64,18 @@ struct VenueSettings {
     double min_notional = 0.0;
 };
 
+struct VenueBookView {
+    std::string venue;
+    std::vector<Level> bids;  // best first
+    std::vector<Level> asks;  // best first
+};
+
+struct VenueState {
+    std::string name;
+    bool has_book;
+    bool fresh;
+};
+
 struct VenueCost {
     std::string venue;
     double all_in_bps;
@@ -125,6 +137,8 @@ public:
     std::optional<std::size_t> venue_index(std::string_view name) const;
     std::size_t venue_count() const;
     std::vector<VenueSettings> venue_settings() const;
+    std::vector<VenueBookView> books(std::size_t depth) const;
+    std::vector<VenueState> venue_states(std::int64_t now_ns) const;
 
 private:
     struct ParentOrder {

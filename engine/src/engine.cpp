@@ -436,4 +436,29 @@ std::vector<VenueSettings> Engine::venue_settings() const {
     return out;
 }
 
+std::vector<VenueBookView> Engine::books(std::size_t depth) const {
+    std::lock_guard lock(mu_);
+    const auto top = [depth](std::vector<Level> levels) {
+        if (levels.size() > depth) levels.resize(depth);
+        return levels;
+    };
+    std::vector<VenueBookView> out;
+    out.reserve(venues_.size());
+    for (const auto& venue : venues_) {
+        out.push_back({venue.settings.name, top(venue.book.liquidity_for(Side::Sell)),
+                       top(venue.book.liquidity_for(Side::Buy))});
+    }
+    return out;
+}
+
+std::vector<VenueState> Engine::venue_states(std::int64_t now_ns) const {
+    std::lock_guard lock(mu_);
+    std::vector<VenueState> out;
+    out.reserve(venues_.size());
+    for (std::size_t v = 0; v < venues_.size(); ++v) {
+        out.push_back({venues_[v].settings.name, !venues_[v].book.empty(), fresh_locked(v, now_ns)});
+    }
+    return out;
+}
+
 }  // namespace slipstream

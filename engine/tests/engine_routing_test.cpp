@@ -379,3 +379,58 @@ TEST(RoutingVenueRules, CompletionBelowTheVenueMinimumIsReportedWithoutAFill) {
     EXPECT_EQ(out.updates[0].reason, "remaining 0.5 below venue minimum");
     EXPECT_DOUBLE_EQ(out.updates[0].filled_qty, 0.0);
 }
+
+TEST_F(RoutingTest, BooksShowTheTopLevelsOfEachVenueBestFirst) {
+    ASSERT_TRUE(engine.apply_book_update(0, {{98.0, 2.0}}, {{101.0, 3.0}}, kSec));
+    const auto top = engine.books(1);
+    ASSERT_EQ(top.size(), 2u);
+    EXPECT_EQ(top[0].venue, "kraken");
+    ASSERT_EQ(top[0].bids.size(), 1u);
+    EXPECT_DOUBLE_EQ(top[0].bids[0].price, 99.0);
+    EXPECT_DOUBLE_EQ(top[0].bids[0].qty, 5.0);
+    ASSERT_EQ(top[0].asks.size(), 1u);
+    EXPECT_DOUBLE_EQ(top[0].asks[0].price, 100.0);
+    EXPECT_EQ(top[1].venue, "coinbase");
+    ASSERT_EQ(top[1].asks.size(), 1u);
+    EXPECT_DOUBLE_EQ(top[1].asks[0].price, 100.3);
+    EXPECT_DOUBLE_EQ(top[1].asks[0].qty, 0.5);
+
+    const auto all = engine.books(10);
+    ASSERT_EQ(all[0].bids.size(), 2u);
+    EXPECT_DOUBLE_EQ(all[0].bids[1].price, 98.0);
+    ASSERT_EQ(all[1].asks.size(), 2u);
+    EXPECT_DOUBLE_EQ(all[1].asks[1].price, 100.6);
+
+    const auto none = engine.books(0);
+    EXPECT_TRUE(none[0].bids.empty());
+    EXPECT_TRUE(none[0].asks.empty());
+}
+
+TEST_F(RoutingTest, VenueStatesReportBookAndFreshness) {
+    auto states = engine.venue_states(kSec);
+    ASSERT_EQ(states.size(), 2u);
+    EXPECT_EQ(states[0].name, "kraken");
+    EXPECT_TRUE(states[0].has_book);
+    EXPECT_TRUE(states[0].fresh);
+    EXPECT_EQ(states[1].name, "coinbase");
+    EXPECT_TRUE(states[1].has_book);
+    EXPECT_TRUE(states[1].fresh);
+
+    ASSERT_TRUE(engine.apply_book_snapshot(1, {{99.5, 5.0}}, {{100.3, 5.0}}, 4 * kSec));
+    states = engine.venue_states(4 * kSec);
+    EXPECT_TRUE(states[0].has_book);
+    EXPECT_FALSE(states[0].fresh);
+    EXPECT_TRUE(states[1].fresh);
+
+    ASSERT_TRUE(engine.apply_book_snapshot(1, {}, {}, 4 * kSec));
+    EXPECT_FALSE(engine.venue_states(4 * kSec)[1].has_book);
+}
+
+TEST(RoutingHeartbeat, HeartbeatBeforeAnyBookLeavesHasBookFalse) {
+    Engine engine(RiskLimits{1'000'000.0, 100.0}, 10, {{"kraken", 0.0}, {"coinbase", 0.0}}, kSec);
+    ASSERT_TRUE(engine.apply_heartbeat(0, kSec));
+    const auto states = engine.venue_states(kSec);
+    EXPECT_FALSE(states[0].has_book);
+    EXPECT_FALSE(states[1].has_book);
+    EXPECT_TRUE(engine.books(10)[0].bids.empty());
+}
