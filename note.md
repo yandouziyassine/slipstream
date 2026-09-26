@@ -30,13 +30,17 @@ Large orders move the price against the trader (market impact). Institutions pay
 | Route by all-in price (price + taker fee) inside the C++ engine | Fees often exceed slippage on crypto venues; routing inside the engine keeps one deterministic risk gate over the total position |
 | Fees configured once on the engine; Python reads them back from `GetStatus` | Two fee configs would drift; the CLI refuses to run when `--venues` differs from the engine's venues |
 | Coinbase parser mirrors the full book and sends a top-N view | Coinbase sends full-book deltas but the engine keeps only N levels, so deleted top levels could never be refilled |
+| Exchange trading rules fetched at startup and passed as engine flags | Always current, with no keys. The engine stays the single source of truth, and it never makes network calls |
+| Slices wait for the cheapest exchange's minimum; the risk check uses the routed cost including fees | A small slice sent to a pricier exchange cost 20 bps more in a live run, and checking at the mid let book-walking and fees exceed the limit |
+| Heartbeats keep a quiet exchange fresh | A healthy Kraken book can stay unchanged for more than 2 s, and marking it stale pushed fills to the more expensive exchange |
 | Cross between venues is allowed within fees; a cross that survives fees, or a venue whose own book is crossed, skips the step | Live venues sit crossed by ~0.15 bps all day because fees make it unprofitable; only a post-fee arbitrage or a self-crossed book signals bad data |
 
 ## Known limitations (v1)
 - Paper fills do not consume book liquidity. Each fill assumes the displayed book is still there at the next step.
 - Prices and quantities are `double`. Fixed-point decimals are planned before any live trading.
 - The Kraken book checksum is not verified yet. With two venues, a corrupted book is caught only if it crosses itself or crosses the other venue by more than the fees.
-- `record` to a Windows path from WSL once captured only 2.7 s of a 15 s window: both feeds' first messages arrived about 12 s late. The cause is not our parsing (62 ms for the 5 MB Coinbase snapshot) and not DNS (20-60 ms); the suspect is a blocked filesystem write across WSL. Open item: time the connect, snapshot and write phases separately.
+- Each market message still costs up to three blocking loopback gRPC calls (about 0.25–0.3 ms each). Phase 2 replaces them with one concurrent stream per exchange.
+- The repository lives in a OneDrive folder. OneDrive locks files under `.git/worktrees` and slows writes, which is the likely cause of the old recording gap. Moving the repo outside OneDrive is recommended.
 - The slippage comparison includes market drift during the execution window. It illustrates one run; it does not prove an edge statistically.
 - If one of several orders submitted together is rejected by the engine, the orders accepted before it keep working in that engine process; the CLI exits with an error. The demo scripts start a fresh engine per run and stop it on exit. A cancel RPC is planned.
 
@@ -75,3 +79,33 @@ Large orders move the price against the trader (market impact). Institutions pay
 - Bug found by the first live two-venue run: every order was rejected with "no market data". A recording showed Coinbase's bid sitting $1.24 above Kraken's ask in 43 of 43 book states, and the engine refused any crossed consolidated book. Root cause: the spec treated a cross between venues as stale data. Fix, test-first: a venue whose own book is crossed, or a cross that survives fees, still skips the step; a cross within fees is normal data. The failing recording now replays to a completed order.
 - End-to-end test through the real engine with hand-derived legs, including a case where the fee flips the choice (Kraken's 100030 beats Coinbase's cheaper-gross 100025 at 1 bps). Every number matched on the first run.
 - Live result (0.02 BTC over 10 minutes, two runs at the same time): with 40/60 bps fees, all 43 fills went to Kraken and the gain was 0. With equal 40/40 fees, 9 of 39 fills went to Coinbase, saving 0.11-0.14 bps against the best single venue. The fee tier matters more than routing for small orders. Calibrated η on the consolidated book was 19.4, against 166 on Kraken alone in the previous run. A deeper combined book should lower the estimated impact, but those runs were on different days, so this is one sample, not a measurement.
+
+### 2026-09-26 — Phase 1: accuracy, safety and latency fixes
+- The code review (9 findings) and the system design review (20 items, P0–P2) ran in parallel. The Phase 1 plan was written from both, and the engine, exchange-rules and recorder tasks ran in parallel worktrees.
+- Exchange trading rules are now fetched at startup from the public APIs:
+  - Kraken: minimum 0.00005 BTC, $0.50.
+  - Coinbase: minimum 1e-8 BTC, $1.
+- The router floors each leg to the quantity step and drops any leg below a minimum, then re-routes it.
+- Before this, POV made fills of about 1e-8 BTC that no exchange accepts.
+- The risk check moved to after routing: real cost including fees. A 50 bps price collar was added. TWAP, VWAP and Almgren-Chriss now stop at their deadline (only POV did before).
+- Bugs found by review and by live runs, all fixed test-first:
+  - an order stuck on a remainder too small for the cheaper exchange;
+  - an order that could finish early when the small-minimum exchange was briefly stale;
+  - a stranded 0.00004 BTC tail;
+  - small POV slices paying Coinbase's 20 bps higher fee;
+  - a routing gain of 20 bps that came only from the minimum-size rule;
+  - quiet but healthy Kraken books marked stale; heartbeats now keep an exchange fresh.
+- The recorder now:
+  - stamps each message on arrival;
+  - starts its window once every feed is connected;
+  - writes raw text once, from a writer thread, keeping the exchange's exact decimal strings.
+- Measured latency over loopback:
+  - about 0.25–0.3 ms per gRPC call;
+  - per message, 1.28 ms with the debug build and 0.86 ms with the release build;
+  - removing the per-message status call saves another ~0.3 ms.
+- Live check (0.01 BTC over 60 s, four algorithms):
+  - every order was 100% filled;
+  - every fill went to the cheaper exchange;
+  - the smallest fill was 0.000052 BTC;
+  - no `-0.00` values.
+- Phase 2 design has started: one concurrent market stream per exchange, a live/replay clock owned by the engine, and bounded queues.
