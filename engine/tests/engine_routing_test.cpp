@@ -175,6 +175,79 @@ TEST(RoutingVenueRules, EngineAppliesEachVenuesQtyStep) {
     EXPECT_DOUBLE_EQ(settings.min_notional, 1.0);
 }
 
+TEST(RoutingVenueRules, PovAccumulatesTinyPrintsUntilTheVenueMinimum) {
+    constexpr double kMinQty = 0.00005;
+    Engine engine(RiskLimits{1'000'000.0, 100.0}, 10, {{"kraken", 0.0, kMinQty, 0.00000001, 0.0}},
+                  0);
+    ASSERT_TRUE(engine.apply_book_snapshot(0, {{99.0, 5.0}}, {{101.0, 5.0}}, 0));
+    ASSERT_TRUE(engine.submit({"p", Side::Buy, 0.001, 0, 1000 * kSec, 1}, PovSpec{0.5}).accepted);
+    std::vector<Fill> fills;
+    int prints = 0;
+    while (fills.empty() && prints < 200) {
+        ASSERT_TRUE(engine.apply_trades({{100.0, 0.000001}}));
+        ++prints;
+        fills = engine.step(prints);
+    }
+    ASSERT_EQ(fills.size(), 1u);
+    EXPECT_GE(fills[0].qty, kMinQty * (1.0 - 1e-9));
+    EXPECT_GE(0.5 * engine.market_volume(), kMinQty * (1.0 - 1e-9));
+    EXPECT_LT(0.5 * (engine.market_volume() - 0.000001), kMinQty);
+    EXPECT_EQ(engine.statuses().at(0).state, OrderState::Working);
+}
+
+TEST(RoutingVenueRules, ChildBelowMinNotionalWaitsForTheNextSlice) {
+    Engine engine(RiskLimits{1'000'000.0, 100.0}, 10, {{"kraken", 0.0, 0.0, 0.0, 1.0}}, 0);
+    ASSERT_TRUE(engine.apply_book_snapshot(0, {{99.0, 5.0}}, {{101.0, 5.0}}, 0));
+    ASSERT_TRUE(engine.submit({"t", Side::Buy, 0.015, 0, 2 * kSec, 2}).accepted);
+    EXPECT_TRUE(engine.step(0).empty());
+    const auto fills = engine.step(kSec);
+    ASSERT_EQ(fills.size(), 1u);
+    EXPECT_DOUBLE_EQ(fills[0].qty, 0.015);
+    EXPECT_EQ(engine.statuses().at(0).state, OrderState::Completed);
+}
+
+TEST(RoutingVenueRules, TwapCompletesWhenTheRemainderIsBelowTheVenueMinimum) {
+    Engine engine(RiskLimits{1'000'000.0, 100.0}, 10, {{"kraken", 0.0, 0.0001, 0.0001, 0.0}}, 0);
+    ASSERT_TRUE(engine.apply_book_snapshot(0, {{99.0, 5.0}}, {{101.0, 5.0}}, 0));
+    ASSERT_TRUE(engine.submit({"t", Side::Buy, 0.20001, 0, 2 * kSec, 2}).accepted);
+    auto fills = engine.step(0);
+    ASSERT_EQ(fills.size(), 1u);
+    EXPECT_NEAR(fills[0].qty, 0.1, 1e-12);
+    EXPECT_EQ(engine.statuses().at(0).state, OrderState::Working);
+    fills = engine.step(kSec);
+    ASSERT_EQ(fills.size(), 1u);
+    EXPECT_NEAR(fills[0].qty, 0.1, 1e-12);
+    const auto status = engine.statuses().at(0);
+    EXPECT_EQ(status.state, OrderState::Completed);
+    EXPECT_EQ(status.halt_reason, "remaining 1e-05 below venue minimum");
+    EXPECT_NEAR(status.filled_qty, 0.2, 1e-12);
+}
+
+TEST(RoutingVenueRules, OrderBelowEveryVenueMinimumCompletesWithoutFills) {
+    Engine engine(RiskLimits{1'000'000.0, 100.0}, 10,
+                  {{"kraken", 0.0, 1.0, 0.0, 0.0}, {"coinbase", 0.0, 0.0, 0.0, 100.0}}, kSec);
+    ASSERT_TRUE(engine.apply_book_snapshot(0, {{99.0, 5.0}}, {{101.0, 5.0}}, 0));
+    ASSERT_TRUE(engine.apply_book_snapshot(1, {{99.0, 5.0}}, {{101.0, 5.0}}, 0));
+    ASSERT_TRUE(engine.submit({"t", Side::Buy, 0.5, 0, 10 * kSec, 1}).accepted);
+    EXPECT_TRUE(engine.step(0).empty());
+    const auto status = engine.statuses().at(0);
+    EXPECT_EQ(status.state, OrderState::Completed);
+    EXPECT_EQ(status.halt_reason, "remaining 0.5 below venue minimum");
+    EXPECT_DOUBLE_EQ(status.filled_qty, 0.0);
+}
+
+TEST(RoutingVenueRules, SmallestVenueMinimumGatesTheChild) {
+    Engine engine(RiskLimits{1'000'000.0, 100.0}, 10,
+                  {{"kraken", 0.0, 1.0, 0.0, 0.0}, {"coinbase", 0.0, 0.0, 0.0, 10.0}}, kSec);
+    ASSERT_TRUE(engine.apply_book_snapshot(0, {{99.0, 5.0}}, {{101.0, 5.0}}, 0));
+    ASSERT_TRUE(engine.apply_book_snapshot(1, {{99.0, 5.0}}, {{100.9, 5.0}}, 0));
+    ASSERT_TRUE(engine.submit({"t", Side::Buy, 0.5, 0, 10 * kSec, 1}).accepted);
+    const auto fills = engine.step(0);
+    ASSERT_EQ(fills.size(), 1u);
+    EXPECT_EQ(fills[0].venue, "coinbase");
+    EXPECT_DOUBLE_EQ(fills[0].qty, 0.5);
+}
+
 TEST_F(RoutingTest, VenueWithEmptyAskSideIsSkippedForBuys) {
     ASSERT_TRUE(engine.apply_book_snapshot(1, {{99.5, 5.0}}, {}, kSec));
     ASSERT_TRUE(engine.submit({"o", Side::Buy, 0.5, kSec, kSec, 1}).accepted);

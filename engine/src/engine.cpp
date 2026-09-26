@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <memory>
 #include <utility>
 
@@ -11,6 +12,7 @@
 namespace slipstream {
 namespace {
 
+// Float noise only: venue minimums decide what is too small to trade.
 constexpr double kDustFraction = 1e-9;
 
 bool valid_order_id(const std::string& id) {
@@ -25,6 +27,17 @@ double cost_bps(Side side, double avg_price, double reference) {
     if (avg_price <= 0.0 || reference <= 0.0) return 0.0;
     const double diff = side == Side::Buy ? avg_price - reference : reference - avg_price;
     return diff / reference * 1e4;
+}
+
+// Smallest quantity some venue with liquidity would accept, or nullopt when none has any.
+std::optional<double> min_executable(const std::vector<VenueLiquidity>& venues, double ref_price) {
+    std::optional<double> smallest;
+    for (const auto& venue : venues) {
+        if (venue.levels.empty()) continue;
+        const double minimum = std::max(venue.min_qty, venue.min_notional / ref_price);
+        if (!smallest || minimum < *smallest) smallest = minimum;
+    }
+    return smallest;
 }
 
 }  // namespace
@@ -205,6 +218,11 @@ void Engine::advance_locked(ParentOrder& order, std::int64_t now_ns,
     const double child = order.schedule->target_qty_at(now_ns, market) - order.filled_qty;
     if (child <= dust || !ref_price) return;
 
+    const auto liquidity = liquidity_locked(order.request.side, now_ns, std::nullopt);
+    const auto minimum = min_executable(liquidity, *ref_price);
+    if (minimum && complete_if_below_minimum(order, *minimum)) return;
+    if (minimum && child < *minimum) return;
+
     const auto decision = risk_.check_child(order.request.side, child, *ref_price, position_,
                                             order.filled_notional);
     if (!decision.ok) {
@@ -213,8 +231,7 @@ void Engine::advance_locked(ParentOrder& order, std::int64_t now_ns,
         return;
     }
 
-    const auto result =
-        route(order.request.side, child, liquidity_locked(order.request.side, now_ns, std::nullopt));
+    const auto result = route(order.request.side, child, liquidity);
     if (result.filled_qty <= 0.0) return;
 
     for (const auto& leg : result.legs) {
@@ -242,7 +259,21 @@ void Engine::advance_locked(ParentOrder& order, std::int64_t now_ns,
         }
     }
 
-    if (order.request.qty - order.filled_qty <= dust) order.state = OrderState::Completed;
+    if (order.request.qty - order.filled_qty <= dust) {
+        order.state = OrderState::Completed;
+    } else if (minimum) {
+        complete_if_below_minimum(order, *minimum);
+    }
+}
+
+bool Engine::complete_if_below_minimum(ParentOrder& order, double minimum) {
+    const double remaining = order.request.qty - order.filled_qty;
+    if (remaining >= minimum) return false;
+    char reason[64];
+    std::snprintf(reason, sizeof reason, "remaining %.8g below venue minimum", remaining);
+    order.state = OrderState::Completed;
+    order.halt_reason = reason;
+    return true;
 }
 
 std::vector<OrderStatus> Engine::statuses() const {
