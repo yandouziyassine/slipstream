@@ -111,11 +111,17 @@ message OrderStatus {
   repeated VenueCost venue_costs = 15;
 }
 
+message VenueInfo {
+  string name = 1;
+  double fee_bps = 2;
+}
+
 message StatusReply {
   double position = 1;
   bool has_mid = 2;
   double mid = 3;
   repeated OrderStatus orders = 4;
+  repeated VenueInfo venues = 5;
 }
 
 message Trade {

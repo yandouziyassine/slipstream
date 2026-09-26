@@ -98,6 +98,7 @@ public:
     double market_volume() const;
     std::optional<std::size_t> venue_index(std::string_view name) const;
     std::size_t venue_count() const;
+    std::vector<VenueSettings> venue_settings() const;
 
 private:
     struct ParentOrder {
@@ -116,6 +117,7 @@ private:
 
     struct Venue {
         std::string name;
+        double fee_bps;
         double fee_rate;
         OrderBook book;
         std::int64_t last_update_ns;

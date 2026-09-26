@@ -155,6 +155,11 @@ grpc::Status ExecutionService::GetStatus(grpc::ServerContext*, const v1::StatusR
             out_cost->set_available(venue_cost.available);
         }
     }
+    for (const auto& venue : engine_.venue_settings()) {
+        auto* info = reply->add_venues();
+        info->set_name(venue.name);
+        info->set_fee_bps(venue.fee_bps);
+    }
     return grpc::Status::OK;
 }
 

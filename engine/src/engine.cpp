@@ -37,8 +37,9 @@ Engine::Engine(RiskLimits limits, std::size_t book_depth, std::vector<VenueSetti
     : stale_ns_(stale_ns), risk_(limits) {
     venues_.reserve(venues.size());
     for (auto& venue : venues) {
-        venues_.push_back(Venue{std::move(venue.name), venue.fee_bps / 1e4, OrderBook(book_depth),
-                                0});
+        const double fee_bps = venue.fee_bps;
+        venues_.push_back(Venue{std::move(venue.name), fee_bps, fee_bps / 1e4,
+                                OrderBook(book_depth), 0});
     }
 }
 
@@ -287,6 +288,14 @@ std::optional<std::size_t> Engine::venue_index(std::string_view name) const {
 std::size_t Engine::venue_count() const {
     std::lock_guard lock(mu_);
     return venues_.size();
+}
+
+std::vector<VenueSettings> Engine::venue_settings() const {
+    std::lock_guard lock(mu_);
+    std::vector<VenueSettings> out;
+    out.reserve(venues_.size());
+    for (const auto& venue : venues_) out.push_back({venue.name, venue.fee_bps});
+    return out;
 }
 
 }  // namespace slipstream
