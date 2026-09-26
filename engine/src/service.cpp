@@ -191,7 +191,9 @@ std::vector<std::string> venue_names(EngineLoop& loop) {
 }  // namespace
 
 ExecutionService::ExecutionService(EngineLoop& loop, std::string symbol)
-    : loop_(loop), validator_(std::move(symbol), venue_names(loop)) {}
+    : loop_(loop),
+      validator_(std::move(symbol), venue_names(loop),
+                 loop.run([](Engine& engine) { return engine.book_depth(); })) {}
 
 std::int64_t ExecutionService::now_or(std::int64_t client_ns) const {
     return loop_.mode() == ClockMode::Live ? loop_.live_now_ns() : client_ns;

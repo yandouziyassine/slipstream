@@ -65,9 +65,25 @@ grpc::StatusCode code(const Admission& admission) {
 
 const MarketItem& item(const Admission& admission) { return std::get<MarketItem>(admission); }
 
+// A book event with `levels` bids, all at distinct valid prices.
+v1::MarketEvent wide_book_event(const std::string& venue, std::int64_t recv_ns, int levels) {
+    v1::MarketEvent event;
+    auto* update = event.mutable_book();
+    update->set_symbol("BTC/USD");
+    update->set_is_snapshot(true);
+    update->set_venue(venue);
+    update->set_recv_ns(recv_ns);
+    for (int i = 0; i < levels; ++i) {
+        auto* bid = update->add_bids();
+        bid->set_price(1.0 + i);
+        bid->set_qty(1.0);
+    }
+    return event;
+}
+
 class MarketValidationTest : public ::testing::Test {
 protected:
-    MarketValidator validator{"BTC/USD", {"kraken", "coinbase"}};
+    MarketValidator validator{"BTC/USD", {"kraken", "coinbase"}, 10};
 };
 
 }  // namespace
@@ -76,7 +92,7 @@ TEST_F(MarketValidationTest, ResolvesExactVenueNames) {
     EXPECT_EQ(validator.resolve_venue("coinbase"), 1u);
     EXPECT_FALSE(validator.resolve_venue("Kraken"));
     EXPECT_FALSE(validator.resolve_venue(""));  // ambiguous with two venues
-    MarketValidator single{"BTC/USD", {"kraken"}};
+    MarketValidator single{"BTC/USD", {"kraken"}, 10};
     EXPECT_EQ(single.resolve_venue(""), 0u);
 }
 
@@ -201,7 +217,7 @@ TEST_F(MarketValidationTest, ReplayStreamNeedsVenuesAndTimes) {
     ASSERT_EQ(code(ticked), grpc::StatusCode::OK);
     EXPECT_EQ(std::get<TickData>(item(ticked).data).now_ns, 2 * kSec);
 
-    MarketValidator single{"BTC/USD", {"kraken"}};
+    MarketValidator single{"BTC/USD", {"kraken"}, 10};
     auto single_stream = StreamAdmission::replay(single);
     const auto heartbeat = single_stream.admit(heartbeat_event());
     ASSERT_EQ(code(heartbeat), grpc::StatusCode::OK);
@@ -229,4 +245,32 @@ TEST_F(MarketValidationTest, ReplayRejectsAnInvalidBookBeforeRecordingItsTime) {
     bad.mutable_book()->mutable_bids(0)->set_price(-1.0);
     EXPECT_EQ(code(stream.admit(bad)), grpc::StatusCode::INVALID_ARGUMENT);
     EXPECT_EQ(code(stream.admit(book_event("kraken", kSec))), grpc::StatusCode::OK);
+}
+
+TEST_F(MarketValidationTest, StreamsCapLevelsPerSideAtBookDepthOrOneHundred) {
+    auto live = StreamAdmission::live(validator, 0);
+    EXPECT_EQ(code(live.admit(wide_book_event("", 0, 100))), grpc::StatusCode::OK);
+    EXPECT_EQ(code(live.admit(wide_book_event("", 0, 101))), grpc::StatusCode::INVALID_ARGUMENT);
+    auto asks = wide_book_event("", 0, 0);
+    for (int i = 0; i < 101; ++i) {
+        auto* ask = asks.mutable_book()->add_asks();
+        ask->set_price(1.0 + i);
+        ask->set_qty(1.0);
+    }
+    EXPECT_EQ(code(live.admit(asks)), grpc::StatusCode::INVALID_ARGUMENT);
+
+    auto replay = StreamAdmission::replay(validator);
+    EXPECT_EQ(code(replay.admit(wide_book_event("kraken", kSec, 100))), grpc::StatusCode::OK);
+    EXPECT_EQ(code(replay.admit(wide_book_event("kraken", kSec, 101))),
+              grpc::StatusCode::INVALID_ARGUMENT);
+
+    // The unary path keeps its own, wider cap.
+    EXPECT_EQ(code(validator.book(wide_book_event("", 0, 101).book(), 0)), grpc::StatusCode::OK);
+}
+
+TEST_F(MarketValidationTest, StreamLevelCapFollowsADeeperBook) {
+    MarketValidator deep{"BTC/USD", {"kraken"}, 250};
+    auto stream = StreamAdmission::live(deep, 0);
+    EXPECT_EQ(code(stream.admit(wide_book_event("", 0, 250))), grpc::StatusCode::OK);
+    EXPECT_EQ(code(stream.admit(wide_book_event("", 0, 251))), grpc::StatusCode::INVALID_ARGUMENT);
 }
