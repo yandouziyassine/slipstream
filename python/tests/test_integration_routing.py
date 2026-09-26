@@ -100,7 +100,8 @@ def test_pov_only_fills_once_the_target_reaches_the_venue_minimum(
         assert status is not None
         assert status.state == pb.ORDER_STATE_COMPLETED
         assert status.filled_qty == pytest.approx(sum(fill.qty for fill in runner.fills))
-        assert status.filled_qty < 0.00025  # the unfillable dust tail never traded
-        assert "below venue minimum" in status.halt_reason
+        # The engine never strands a remainder below the venue minimum: the last fill takes it.
+        assert status.filled_qty == pytest.approx(0.00025)
+        assert status.halt_reason == ""
     finally:
         client.close()

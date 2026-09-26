@@ -285,3 +285,19 @@ TEST(RoutingVenueRules, StaleSmallMinimumVenueDoesNotCompleteTheOrderEarly) {
     EXPECT_EQ(fills[0].venue, "coinbase");
     EXPECT_DOUBLE_EQ(fills[0].qty, 0.5);
 }
+
+TEST(RoutingVenueRules, NeverLeavesARemainderBelowTheVenueMinimum) {
+    // 0.25 in 5 TWAP slices of 0.05 with a 0.1 minimum: fills of 0.1 and 0.1 would strand 0.05,
+    // so the second fill takes the whole remainder instead.
+    Engine engine(RiskLimits{1'000'000.0, 100.0}, 10, {{"kraken", 0.0, 0.1, 0.0, 0.0}}, kSec);
+    ASSERT_TRUE(engine.apply_book_snapshot(0, {{99.0, 5.0}}, {{101.0, 5.0}}, 0));
+    ASSERT_TRUE(engine.submit({"t", Side::Buy, 0.25, 0, 10 * kSec, 5}).accepted);
+    double filled = 0.0;
+    for (std::int64_t t = 0; t <= 10 * kSec; t += kSec / 2) {
+        for (const auto& fill : engine.step(t)) filled += fill.qty;
+    }
+    const auto status = engine.statuses().at(0);
+    EXPECT_EQ(status.state, OrderState::Completed);
+    EXPECT_EQ(status.halt_reason, "");
+    EXPECT_NEAR(filled, 0.25, 1e-12);
+}

@@ -229,7 +229,7 @@ void Engine::advance_locked(ParentOrder& order, std::int64_t now_ns,
                             std::optional<double> ref_price, const MarketState& market,
                             std::vector<Fill>& fills) {
     const double dust = order.request.qty * kDustFraction;
-    const double child = order.schedule->target_qty_at(now_ns, market) - order.filled_qty;
+    double child = order.schedule->target_qty_at(now_ns, market) - order.filled_qty;
     if (child <= dust || !ref_price) return;
 
     const auto liquidity = liquidity_locked(order.request.side, now_ns, std::nullopt, *ref_price);
@@ -239,6 +239,10 @@ void Engine::advance_locked(ParentOrder& order, std::int64_t now_ns,
     if (complete_if_below_minimum(order, registered_minimum)) return;
     const auto minimum = min_executable(liquidity, *ref_price);
     if (minimum && child < *minimum) return;
+    // Never strand a stub no venue will accept: if this child would leave less than every
+    // venue's minimum, take the whole remainder now.
+    const double remaining = order.request.qty - order.filled_qty;
+    if (remaining - child < registered_minimum) child = remaining;
 
     const auto result = route(order.request.side, child, liquidity);
     if (result.filled_qty <= 0.0) return;
