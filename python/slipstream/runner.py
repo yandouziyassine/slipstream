@@ -91,11 +91,12 @@ class ExecutionRunner:
         if isinstance(update, BookUpdate):
             self._check_symbol(update.symbol)
             self._engine.apply_book(update, now_ns)
-            self._books[venue].apply(update)
-            if update.is_snapshot and not self._submitted:
-                self._snapshot_venues.add(venue)
-                if self._snapshot_venues >= self._venues:
-                    self._submit_all(now_ns)
+            if not self._submitted:
+                self._books[venue].apply(update)
+                if update.is_snapshot:
+                    self._snapshot_venues.add(venue)
+                    if self._snapshot_venues >= self._venues:
+                        self._submit_all(now_ns)
         elif isinstance(update, TradeBatch):
             self._check_symbol(update.symbol)
             if not update.is_snapshot:

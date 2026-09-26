@@ -373,3 +373,30 @@ def test_runner_exposes_its_venues(fake_engine: FakeEngine) -> None:
         fake_engine, SPEC, "BTC/USD", logging.getLogger("t"), venues=("coinbase", "kraken")
     )
     assert runner.venues == frozenset({"kraken", "coinbase"})
+
+
+def test_local_books_stop_updating_after_submission(
+    fake_engine: FakeEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from slipstream.book import LocalBook
+
+    calls = 0
+    orig_apply = LocalBook.apply
+
+    def spy_apply(self: LocalBook, update: BookUpdate) -> None:
+        nonlocal calls
+        calls += 1
+        orig_apply(self, update)
+
+    monkeypatch.setattr(LocalBook, "apply", spy_apply)
+    runner = make_runner(fake_engine)
+    runner.on_message(snapshot(), 100)  # triggers submission
+    assert calls == 1
+    delta = {
+        "channel": "book",
+        "type": "update",
+        "data": [{"symbol": "BTC/USD", "bids": [], "asks": [{"price": 100.5, "qty": 2.0}]}],
+    }
+    runner.on_message(json.dumps(delta), 200)
+    assert calls == 1  # still only the pre-submission apply; the engine still sees the update
+    assert len(fake_engine.books) == 2
