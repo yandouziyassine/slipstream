@@ -46,7 +46,12 @@ It also measures the router's value on every run. For each child, the engine pri
   - The result is a list of legs, one per venue used: `{venue, qty, gross_avg_price, fee_paid}`.
   - A partial fill leaves the remainder for the next step, as before.
 - **Reference price (consolidated mid).** Take the best bid and best ask across the fresh venues, using gross prices, and use their midpoint.
-  - If the consolidated book is crossed (best bid ≥ best ask), the engine skips the step and tries again on the next one. It never trades into a cross that is probably stale.
+  - *Amended 2026-09-25 (PR 3, found by the first live two-venue run).* The engine now uses two crossed-book rules; the old rule rejected every live order.
+    - **Old rule:** skip the step whenever the consolidated gross book was crossed.
+    - **What the live run showed:** Coinbase's best bid sat about $1.24 (0.15 bps) above Kraken's best ask for the whole session, so every live order was rejected with "no market data". Separate venues are routinely crossed by a little, because roughly 100 bps of round-trip taker fees make the cross unprofitable to trade, and staleness is already caught by `recv_ns`.
+    - **Rule 1, a venue's own book is crossed:** that is bad data, because a matching engine never rests a crossed book. The engine skips the step.
+    - **Rule 2, a cross between venues:** the engine skips the step only if the cross survives fees, that is, the best fee-adjusted bid is at or above the best fee-adjusted ask. That would be an arbitrage real venues do not leave standing.
+    - **Reference mid:** the gross consolidated mid is still used, even while the venues are crossed.
   - With a single venue this is exactly the old `mid()`.
 - **Risk.** Checks are unchanged in structure. `check_parent` and `check_child` use the consolidated mid. The notional budget and position limits apply to the **total** across venues. Fees are not added to the notional budget; they are reported separately.
 
