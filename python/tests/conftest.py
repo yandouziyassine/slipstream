@@ -64,8 +64,7 @@ def fake_engine() -> FakeEngine:
     return FakeEngine()
 
 
-@pytest.fixture
-def engine_address() -> Iterator[str]:
+def _run_engine(*extra: str) -> Iterator[str]:
     if not ENGINE_BIN.exists():
         pytest.fail(f"engine binary not found at {ENGINE_BIN}; run scripts/build_engine.sh")
     proc = subprocess.Popen(
@@ -79,6 +78,7 @@ def engine_address() -> Iterator[str]:
             "10000",
             "--max-position",
             "1.0",
+            *extra,
         ],
         stdout=subprocess.PIPE,
         text=True,
@@ -93,3 +93,13 @@ def engine_address() -> Iterator[str]:
     finally:
         proc.terminate()
         proc.wait(timeout=10)
+
+
+@pytest.fixture
+def engine_address() -> Iterator[str]:
+    yield from _run_engine()
+
+
+@pytest.fixture
+def two_venue_engine_address() -> Iterator[str]:
+    yield from _run_engine("--venue", "kraken:fee_bps=0", "--venue", "coinbase:fee_bps=1")
