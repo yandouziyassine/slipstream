@@ -140,11 +140,12 @@ def routing_gain_bps(status: pb.OrderStatus) -> float | None:
 
 
 def _num(value: float | None) -> str:
-    return "n/a" if value is None else f"{value:.2f}"
+    # Adding 0.0 turns a rounded -0.0 (float noise such as -1e-13) into 0.0, so it prints "0.00".
+    return "n/a" if value is None else f"{round(value, 2) + 0.0:.2f}"
 
 
 def _bps(value: float | None) -> str:
-    return "n/a" if value is None else f"{value:.2f} bps"
+    return "n/a" if value is None else f"{_num(value)} bps"
 
 
 def format_summary(status: pb.OrderStatus) -> str:

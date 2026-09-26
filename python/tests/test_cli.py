@@ -422,3 +422,11 @@ def test_comparison_table_marks_unavailable_venue_na() -> None:
     status.venue_costs[1].available = False
     row = format_comparison([status], []).splitlines()[1]
     assert row.split()[-4:] == ["1.95", "n/a", "0.10", "0"]
+
+
+def test_float_noise_gain_never_prints_negative_zero() -> None:
+    status = two_venue_status()
+    status.routed_all_in_bps = status.venue_costs[0].all_in_bps + 1e-13
+    assert "routing gain 0.00 bps" in format_summary(status)
+    row = format_comparison([status], []).splitlines()[1]
+    assert "-0.00" not in row
