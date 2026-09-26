@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <limits>
 #include <memory>
 #include <utility>
 
@@ -232,8 +233,11 @@ void Engine::advance_locked(ParentOrder& order, std::int64_t now_ns,
     if (child <= dust || !ref_price) return;
 
     const auto liquidity = liquidity_locked(order.request.side, now_ns, std::nullopt, *ref_price);
+    // "Never executable" is judged against every registered venue, so a venue that is only
+    // briefly stale cannot make the order give up; the child waits for fresh venues instead.
+    const double registered_minimum = registered_minimum_locked(*ref_price);
+    if (complete_if_below_minimum(order, registered_minimum)) return;
     const auto minimum = min_executable(liquidity, *ref_price);
-    if (minimum && complete_if_below_minimum(order, *minimum)) return;
     if (minimum && child < *minimum) return;
 
     const auto result = route(order.request.side, child, liquidity);
@@ -275,9 +279,18 @@ void Engine::advance_locked(ParentOrder& order, std::int64_t now_ns,
 
     if (order.request.qty - order.filled_qty <= dust) {
         order.state = OrderState::Completed;
-    } else if (minimum) {
-        complete_if_below_minimum(order, *minimum);
+    } else {
+        complete_if_below_minimum(order, registered_minimum);
     }
+}
+
+double Engine::registered_minimum_locked(double ref_price) const {
+    double smallest = std::numeric_limits<double>::infinity();
+    for (const auto& venue : venues_) {
+        const auto& rules = venue.settings;
+        smallest = std::min(smallest, std::max(rules.min_qty, rules.min_notional / ref_price));
+    }
+    return smallest;
 }
 
 bool Engine::complete_if_below_minimum(ParentOrder& order, double minimum) {

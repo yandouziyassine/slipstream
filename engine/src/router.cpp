@@ -41,12 +41,14 @@ void floor_to_step(std::vector<Piece>& pieces, double step) {
 
 bool below(double value, double minimum) { return value < minimum * (1.0 - kRuleTolerance); }
 
-}  // namespace
-
-RouteResult route(Side taker_side, double qty, const std::vector<VenueLiquidity>& venues) {
-    if (!(qty > 0.0)) return {};
+// One walk over the venues not yet excluded. A venue whose leg breaks its own rules is marked
+// in `excluded` so the caller can send that quantity elsewhere.
+RouteResult route_once(Side taker_side, double qty, const std::vector<VenueLiquidity>& venues,
+                       std::vector<char>& excluded, bool& dropped) {
+    dropped = false;
     std::vector<Candidate> candidates;
     for (std::size_t i = 0; i < venues.size(); ++i) {
+        if (excluded[i]) continue;
         const auto& venue = venues[i];
         const double multiplier =
             taker_side == Side::Buy ? 1.0 + venue.fee_rate : 1.0 - venue.fee_rate;
@@ -71,6 +73,7 @@ RouteResult route(Side taker_side, double qty, const std::vector<VenueLiquidity>
 
     RouteResult result;
     for (std::size_t i = 0; i < venues.size(); ++i) {
+        if (pieces[i].empty()) continue;
         const auto& venue = venues[i];
         floor_to_step(pieces[i], venue.qty_step);
         RouteLeg leg{venue.venue, 0.0, 0.0, 0.0};
@@ -82,6 +85,8 @@ RouteResult route(Side taker_side, double qty, const std::vector<VenueLiquidity>
         }
         if (!(leg.qty > 0.0) || below(leg.qty, venue.min_qty) ||
             below(leg.gross_notional, venue.min_notional)) {
+            excluded[i] = 1;
+            dropped = true;
             continue;
         }
         result.legs.push_back(leg);
@@ -91,6 +96,19 @@ RouteResult route(Side taker_side, double qty, const std::vector<VenueLiquidity>
     }
     std::sort(result.legs.begin(), result.legs.end(),
               [](const RouteLeg& a, const RouteLeg& b) { return a.venue < b.venue; });
+    return result;
+}
+
+}  // namespace
+
+RouteResult route(Side taker_side, double qty, const std::vector<VenueLiquidity>& venues) {
+    if (!(qty > 0.0)) return {};
+    // A leg below its venue's minimum is dropped; walk again without that venue so the quantity
+    // goes to the next-best venue instead of stalling. Each pass excludes at least one venue.
+    std::vector<char> excluded(venues.size(), 0);
+    bool dropped = true;
+    RouteResult result;
+    while (dropped) result = route_once(taker_side, qty, venues, excluded, dropped);
     return result;
 }
 

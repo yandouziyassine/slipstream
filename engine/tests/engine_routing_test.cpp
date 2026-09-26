@@ -256,3 +256,32 @@ TEST_F(RoutingTest, VenueWithEmptyAskSideIsSkippedForBuys) {
     EXPECT_EQ(fills[0].venue, "kraken");
     EXPECT_FALSE(engine.statuses().at(0).venue_costs[1].available);
 }
+
+TEST(RoutingVenueRules, RemainderBelowTheCheapVenueMinimumFillsOnTheOtherVenue) {
+    // Kraken is cheaper after fees but needs 1.0; Coinbase accepts 0.1, so 0.5 must not stall.
+    Engine engine(RiskLimits{1'000'000.0, 100.0}, 10,
+                  {{"kraken", 0.0, 1.0, 0.0, 0.0}, {"coinbase", 10.0, 0.1, 0.0, 0.0}}, kSec);
+    ASSERT_TRUE(engine.apply_book_snapshot(0, {{99.0, 5.0}}, {{100.0, 5.0}}, 0));
+    ASSERT_TRUE(engine.apply_book_snapshot(1, {{99.0, 5.0}}, {{100.0, 5.0}}, 0));
+    ASSERT_TRUE(engine.submit({"t", Side::Buy, 0.5, 0, 10 * kSec, 1}).accepted);
+    const auto fills = engine.step(0);
+    ASSERT_EQ(fills.size(), 1u);
+    EXPECT_EQ(fills[0].venue, "coinbase");
+    EXPECT_DOUBLE_EQ(fills[0].qty, 0.5);
+    EXPECT_EQ(engine.statuses().at(0).state, OrderState::Completed);
+}
+
+TEST(RoutingVenueRules, StaleSmallMinimumVenueDoesNotCompleteTheOrderEarly) {
+    Engine engine(RiskLimits{1'000'000.0, 100.0}, 10,
+                  {{"kraken", 0.0, 1.0, 0.0, 0.0}, {"coinbase", 0.0, 0.1, 0.0, 0.0}}, 2 * kSec);
+    ASSERT_TRUE(engine.apply_book_snapshot(1, {{99.0, 5.0}}, {{101.0, 5.0}}, 0));
+    ASSERT_TRUE(engine.apply_book_snapshot(0, {{99.0, 5.0}}, {{101.0, 5.0}}, 10 * kSec));
+    ASSERT_TRUE(engine.submit({"t", Side::Buy, 0.5, 10 * kSec, 10 * kSec, 1}).accepted);
+    EXPECT_TRUE(engine.step(10 * kSec).empty());
+    EXPECT_EQ(engine.statuses().at(0).state, OrderState::Working);
+    ASSERT_TRUE(engine.apply_book_snapshot(1, {{99.0, 5.0}}, {{101.0, 5.0}}, 11 * kSec));
+    const auto fills = engine.step(11 * kSec);
+    ASSERT_EQ(fills.size(), 1u);
+    EXPECT_EQ(fills[0].venue, "coinbase");
+    EXPECT_DOUBLE_EQ(fills[0].qty, 0.5);
+}

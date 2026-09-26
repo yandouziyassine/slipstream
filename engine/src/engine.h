@@ -134,6 +134,7 @@ private:
 
     // The remainder can never trade when it is below every venue's minimum.
     static bool complete_if_below_minimum(ParentOrder& order, double minimum);
+    double registered_minimum_locked(double ref_price) const;
     double projected_position_locked() const;
     void advance_locked(ParentOrder& order, std::int64_t now_ns, std::optional<double> ref_price,
                         const MarketState& market, std::vector<Fill>& fills);

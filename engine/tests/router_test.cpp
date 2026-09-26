@@ -178,3 +178,14 @@ TEST(Router, RoutedAllInNeverWorseThanAnySingleVenue) {
         }
     }
 }
+
+TEST(Router, DroppedLegIsReroutedToTheNextVenue) {
+    // Venue 0 is cheaper but its minimum is above the child, so the child goes to venue 1.
+    VenueLiquidity big_minimum{0, 0.0, {{100.0, 1.0}}};
+    big_minimum.min_qty = 0.6;
+    const auto result = route(Side::Buy, 0.5, {big_minimum, {1, 0.0, {{100.1, 1.0}}}});
+    ASSERT_EQ(result.legs.size(), 1u);
+    EXPECT_EQ(result.legs[0].venue, 1u);
+    EXPECT_DOUBLE_EQ(result.filled_qty, 0.5);
+    EXPECT_DOUBLE_EQ(result.gross_notional, 0.5 * 100.1);
+}
