@@ -47,7 +47,10 @@ Engine::Engine(RiskLimits limits, std::size_t book_depth)
 
 Engine::Engine(RiskLimits limits, std::size_t book_depth, std::vector<VenueSettings> venues,
                std::int64_t stale_ns, double max_deviation_bps)
-    : stale_ns_(stale_ns), max_deviation_(max_deviation_bps / 1e4), risk_(limits) {
+    : book_depth_(book_depth),
+      stale_ns_(stale_ns),
+      max_deviation_(max_deviation_bps / 1e4),
+      risk_(limits) {
     venues_.reserve(venues.size());
     for (auto& venue : venues) {
         const double fee_rate = venue.fee_bps / 1e4;
@@ -198,7 +201,8 @@ SubmitResult Engine::submit(const ParentOrderRequest& request, const ScheduleSpe
 
     orders_.push_back(ParentOrder{request, std::move(schedule), OrderState::Working, 0.0, 0.0, 0.0,
                                   *arrival_mid, cost_bps(request.side, immediate_avg, *arrival_mid),
-                                  "", std::vector<double>(venues_.size(), 0.0),
+                                  immediate.filled_qty, "",
+                                  std::vector<double>(venues_.size(), 0.0),
                                   std::vector<char>(venues_.size(), 1)});
     return {true, ""};
 }
@@ -235,9 +239,9 @@ void Engine::advance_locked(ParentOrder& order, std::int64_t now_ns,
     const auto result = route(order.request.side, child, liquidity);
     if (result.filled_qty <= 0.0) return;
 
-    const auto decision =
-        risk_.check_child(order.request.side, result.filled_qty, result.gross_notional + result.fees,
-                          position_, order.filled_notional + order.fees);
+    const double fill_cost = result.gross_notional + result.fees;
+    const auto decision = risk_.check_child(order.request.side, result.filled_qty, fill_cost,
+                                            position_, order.filled_notional + order.fees);
     if (!decision.ok) {
         order.state = OrderState::Halted;
         order.halt_reason = decision.reason;
@@ -318,10 +322,20 @@ std::vector<OrderStatus> Engine::statuses() const {
                        order.filled_qty, avg, order.arrival_mid,
                        cost_bps(order.request.side, avg, order.arrival_mid),
                        order.immediate_cost_bps, order.halt_reason, order.schedule->name(),
-                       order.fees, fees_bps, routed_all_in_bps, std::move(venue_costs)});
+                       order.fees, fees_bps, routed_all_in_bps, std::move(venue_costs),
+                       order.immediate_filled_qty});
     }
     return out;
 }
+
+std::size_t Engine::working_orders() const {
+    std::lock_guard lock(mu_);
+    return static_cast<std::size_t>(
+        std::count_if(orders_.begin(), orders_.end(),
+                      [](const ParentOrder& order) { return order.state == OrderState::Working; }));
+}
+
+std::size_t Engine::book_depth() const { return book_depth_; }
 
 double Engine::position() const {
     std::lock_guard lock(mu_);

@@ -129,8 +129,9 @@ TEST(Config, ParsesVenueRules) {
 }
 
 TEST(Config, AcceptsVenueRulesAtTheirBounds) {
-    const auto result = parse_args(
-        {"--venue", "kraken:fee_bps=1000,min_qty=1000000,qty_step=1000000,min_notional=1000000000"});
+    const auto result = parse_args({"--venue",
+                                    "kraken:fee_bps=1000,min_qty=1000000,qty_step=1000000,"
+                                    "min_notional=1000000000"});
     ASSERT_TRUE(result.config) << result.error;
     EXPECT_DOUBLE_EQ(result.config->venues.at(0).min_notional, 1e9);
 }

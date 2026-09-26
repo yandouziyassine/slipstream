@@ -73,6 +73,7 @@ struct OrderStatus {
     double fees_bps;
     double routed_all_in_bps;
     std::vector<VenueCost> venue_costs;
+    double immediate_filled_qty;
 };
 
 class Engine {
@@ -99,6 +100,8 @@ public:
     std::vector<Fill> step(std::int64_t now_ns);
 
     std::vector<OrderStatus> statuses() const;
+    std::size_t working_orders() const;
+    std::size_t book_depth() const;
     double position() const;
     std::optional<double> mid() const;
     double market_volume() const;
@@ -116,6 +119,7 @@ private:
         double fees;
         double arrival_mid;
         double immediate_cost_bps;
+        double immediate_filled_qty;
         std::string halt_reason;
         std::vector<double> venue_all_in_notional;
         std::vector<char> venue_available;
@@ -142,6 +146,7 @@ private:
 
     mutable std::mutex mu_;
     std::vector<Venue> venues_;
+    std::size_t book_depth_;
     std::int64_t stale_ns_;
     double max_deviation_;
     std::int64_t latest_ns_ = 0;

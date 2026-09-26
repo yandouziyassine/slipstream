@@ -137,8 +137,9 @@ TEST(Router, SellLegsAreFlooredAndCheckedToo) {
 TEST(Router, ZeroRulesReproduceTheUnconstrainedWalk) {
     const std::vector<VenueLiquidity> plain{{0, 0.004, {{100.0, 1.0}}},
                                             {1, 0.0, {{100.3, 0.5}, {100.6, 5.0}}}};
-    const std::vector<VenueLiquidity> zero_rules{{0, 0.004, {{100.0, 1.0}}, 0.0, 0.0, 0.0},
-                                                 {1, 0.0, {{100.3, 0.5}, {100.6, 5.0}}, 0.0, 0.0, 0.0}};
+    const std::vector<VenueLiquidity> zero_rules{
+        {0, 0.004, {{100.0, 1.0}}, 0.0, 0.0, 0.0},
+        {1, 0.0, {{100.3, 0.5}, {100.6, 5.0}}, 0.0, 0.0, 0.0}};
     const auto a = route(Side::Buy, 1.2, plain);
     const auto b = route(Side::Buy, 1.2, zero_rules);
     ASSERT_EQ(a.legs.size(), b.legs.size());
