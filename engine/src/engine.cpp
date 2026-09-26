@@ -46,8 +46,8 @@ Engine::Engine(RiskLimits limits, std::size_t book_depth)
     : Engine(limits, book_depth, {{"kraken", 0.0}}, 0) {}
 
 Engine::Engine(RiskLimits limits, std::size_t book_depth, std::vector<VenueSettings> venues,
-              std::int64_t stale_ns)
-    : stale_ns_(stale_ns), risk_(limits) {
+               std::int64_t stale_ns, double max_deviation_bps)
+    : stale_ns_(stale_ns), max_deviation_(max_deviation_bps / 1e4), risk_(limits) {
     venues_.reserve(venues.size());
     for (auto& venue : venues) {
         const double fee_rate = venue.fee_bps / 1e4;
@@ -149,13 +149,21 @@ std::optional<double> Engine::consolidated_mid_locked(std::int64_t now_ns) const
 }
 
 std::vector<VenueLiquidity> Engine::liquidity_locked(Side side, std::int64_t now_ns,
-                                                     std::optional<std::size_t> only) const {
+                                                     std::optional<std::size_t> only,
+                                                     double ref_price) const {
+    const double limit =
+        side == Side::Buy ? ref_price * (1.0 + max_deviation_) : ref_price * (1.0 - max_deviation_);
     std::vector<VenueLiquidity> out;
     for (std::size_t v = 0; v < venues_.size(); ++v) {
         if (only && *only != v) continue;
         if (!fresh_locked(v, now_ns)) continue;
+        auto levels = venues_[v].book.liquidity_for(side);
+        const auto beyond = std::find_if(levels.begin(), levels.end(), [&](const Level& level) {
+            return side == Side::Buy ? level.price > limit : level.price < limit;
+        });
+        levels.erase(beyond, levels.end());
         const auto& settings = venues_[v].settings;
-        out.push_back({v, venues_[v].fee_rate, venues_[v].book.liquidity_for(side), settings.min_qty,
+        out.push_back({v, venues_[v].fee_rate, std::move(levels), settings.min_qty,
                        settings.qty_step, settings.min_notional});
     }
     return out;
@@ -182,8 +190,9 @@ SubmitResult Engine::submit(const ParentOrderRequest& request, const ScheduleSpe
         risk_.check_parent(request.side, request.qty, *arrival_mid, projected_position_locked());
     if (!decision.ok) return {false, decision.reason};
 
-    const auto immediate =
-        route(request.side, request.qty, liquidity_locked(request.side, request.start_ns, std::nullopt));
+    const auto immediate = route(request.side, request.qty,
+                                 liquidity_locked(request.side, request.start_ns, std::nullopt,
+                                                  *arrival_mid));
     const double immediate_avg =
         immediate.filled_qty > 0.0 ? immediate.gross_notional / immediate.filled_qty : 0.0;
 
@@ -218,21 +227,22 @@ void Engine::advance_locked(ParentOrder& order, std::int64_t now_ns,
     const double child = order.schedule->target_qty_at(now_ns, market) - order.filled_qty;
     if (child <= dust || !ref_price) return;
 
-    const auto liquidity = liquidity_locked(order.request.side, now_ns, std::nullopt);
+    const auto liquidity = liquidity_locked(order.request.side, now_ns, std::nullopt, *ref_price);
     const auto minimum = min_executable(liquidity, *ref_price);
     if (minimum && complete_if_below_minimum(order, *minimum)) return;
     if (minimum && child < *minimum) return;
 
-    const auto decision = risk_.check_child(order.request.side, child, *ref_price, position_,
-                                            order.filled_notional);
+    const auto result = route(order.request.side, child, liquidity);
+    if (result.filled_qty <= 0.0) return;
+
+    const auto decision =
+        risk_.check_child(order.request.side, result.filled_qty, result.gross_notional + result.fees,
+                          position_, order.filled_notional + order.fees);
     if (!decision.ok) {
         order.state = OrderState::Halted;
         order.halt_reason = decision.reason;
         return;
     }
-
-    const auto result = route(order.request.side, child, liquidity);
-    if (result.filled_qty <= 0.0) return;
 
     for (const auto& leg : result.legs) {
         fills.push_back({order.request.order_id, now_ns, leg.qty, leg.gross_notional / leg.qty,
@@ -251,7 +261,7 @@ void Engine::advance_locked(ParentOrder& order, std::int64_t now_ns,
             continue;
         }
         const auto alone = route(order.request.side, result.filled_qty,
-                                 liquidity_locked(order.request.side, now_ns, v));
+                                 liquidity_locked(order.request.side, now_ns, v, *ref_price));
         if (alone.filled_qty < result.filled_qty * (1.0 - 1e-9)) {
             order.venue_available[v] = 0;
         } else {

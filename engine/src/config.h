@@ -29,6 +29,7 @@ struct EngineConfig {
     std::size_t book_depth = 10;
     std::vector<VenueConfig> venues{{"kraken", 0.0}};
     std::int64_t stale_ns = 2'000'000'000;
+    double max_deviation_bps = 50.0;
 };
 
 struct ParseResult {

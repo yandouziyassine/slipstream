@@ -11,6 +11,7 @@
 namespace slipstream {
 namespace {
 
+constexpr double kMaxDeviationBps = 10000.0;
 constexpr std::array<std::string_view, 3> kLoopbackPrefixes{"127.0.0.1:", "localhost:", "[::1]:"};
 
 bool all_digits(const std::string& s) {
@@ -168,6 +169,12 @@ ParseResult parse_args(const std::vector<std::string>& args) {
                 [&](const VenueConfig& registered) { return registered.name == parsed->name; });
             if (duplicate) return {std::nullopt, "duplicate --venue"};
             config.venues.push_back(*parsed);
+        } else if (flag == "--max-deviation-bps") {
+            const auto parsed = parse_plain_decimal(value, kMaxDeviationBps);
+            if (!parsed || *parsed <= 0.0) {
+                return {std::nullopt, "invalid --max-deviation-bps (plain decimal, 0<N<=10000)"};
+            }
+            config.max_deviation_bps = *parsed;
         } else if (flag == "--stale-ms") {
             const auto parsed = parse_stale_ms(value);
             if (!parsed) return {std::nullopt, "invalid --stale-ms (1-600000)"};

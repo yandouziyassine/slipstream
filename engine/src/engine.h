@@ -81,8 +81,11 @@ public:
     static constexpr std::size_t kMaxOrderIdLength = 64;
 
     Engine(RiskLimits limits, std::size_t book_depth);
+    // Widest collar the --max-deviation-bps flag allows; the flag itself defaults to 50.
+    static constexpr double kWidestDeviationBps = 10000.0;
+
     Engine(RiskLimits limits, std::size_t book_depth, std::vector<VenueSettings> venues,
-           std::int64_t stale_ns);
+           std::int64_t stale_ns, double max_deviation_bps = kWidestDeviationBps);
 
     bool apply_book_snapshot(const std::vector<Level>& bids, const std::vector<Level>& asks);
     bool apply_book_update(const std::vector<Level>& bids, const std::vector<Level>& asks);
@@ -132,12 +135,15 @@ private:
                         const MarketState& market, std::vector<Fill>& fills);
     bool fresh_locked(std::size_t venue, std::int64_t now_ns) const;
     std::optional<double> consolidated_mid_locked(std::int64_t now_ns) const;
+    // Levels beyond the price collar around ref_price are left out.
     std::vector<VenueLiquidity> liquidity_locked(Side side, std::int64_t now_ns,
-                                                 std::optional<std::size_t> only) const;
+                                                 std::optional<std::size_t> only,
+                                                 double ref_price) const;
 
     mutable std::mutex mu_;
     std::vector<Venue> venues_;
     std::int64_t stale_ns_;
+    double max_deviation_;
     std::int64_t latest_ns_ = 0;
     RiskCheck risk_;
     double position_ = 0.0;

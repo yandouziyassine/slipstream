@@ -3,6 +3,7 @@
 #include <gtest/gtest.h>
 
 #include <string>
+#include <utility>
 
 using slipstream::parse_args;
 
@@ -146,6 +147,28 @@ TEST(Config, RejectsBadVenueRules) {
           "kraken:fee_bps=40,min_notional=inf", "kraken:fee_bps=40;min_qty=1",
           "kraken:fee_bps=40,MIN_QTY=1", "kraken:fee_bps=40,min_qty==1"}) {
         EXPECT_FALSE(parse_args({"--venue", value}).config) << value;
+    }
+}
+
+TEST(Config, MaxDeviationDefaultsTo50Bps) {
+    const auto result = parse_args({});
+    ASSERT_TRUE(result.config);
+    EXPECT_DOUBLE_EQ(result.config->max_deviation_bps, 50.0);
+}
+
+TEST(Config, ParsesMaxDeviation) {
+    for (const auto& [text, expected] :
+         {std::pair{"25.5", 25.5}, std::pair{"10000", 10000.0}, std::pair{"0.01", 0.01}}) {
+        const auto result = parse_args({"--max-deviation-bps", text});
+        ASSERT_TRUE(result.config) << text << ": " << result.error;
+        EXPECT_DOUBLE_EQ(result.config->max_deviation_bps, expected);
+    }
+}
+
+TEST(Config, RejectsBadMaxDeviation) {
+    for (const char* value :
+         {"0", "0.0", "10000.1", "-1", "+5", "1e2", "abc", "", "nan", "inf", " 5", "5 ", "."}) {
+        EXPECT_FALSE(parse_args({"--max-deviation-bps", value}).config) << value;
     }
 }
 

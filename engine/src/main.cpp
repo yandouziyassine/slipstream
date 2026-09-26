@@ -36,7 +36,8 @@ int main(int argc, char** argv) {
             {venue.name, venue.fee_bps, venue.min_qty, venue.qty_step, venue.min_notional});
     }
 
-    slipstream::Engine engine(config.limits, config.book_depth, venues, config.stale_ns);
+    slipstream::Engine engine(config.limits, config.book_depth, venues, config.stale_ns,
+                              config.max_deviation_bps);
     slipstream::ExecutionService service(engine, config.symbol);
 
     int bound_port = 0;
@@ -59,7 +60,7 @@ int main(int argc, char** argv) {
                   << ",qty_step=" << venue.qty_step << ",min_notional=" << venue.min_notional
                   << ')';
     }
-    std::cout << ")" << std::endl;
+    std::cout << ", max deviation " << config.max_deviation_bps << "bps)" << std::endl;
 
     while (!g_stop.load()) std::this_thread::sleep_for(std::chrono::milliseconds(100));
     server->Shutdown();
