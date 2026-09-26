@@ -5,9 +5,8 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 export PYTHONPATH="$PWD/python"
-if [[ ! -x build/release/slipstream_engine ]]; then
-  bash scripts/build_release.sh
-fi
+# Always build: Ninja is a no-op when nothing changed, and a stale binary would hide engine fixes.
+bash scripts/build_release.sh > /dev/null
 mapfile -t VENUE_ARGS < <(python -m slipstream.cli venue-flags --venues kraken,coinbase \
   --fees "kraken=${KRAKEN_FEE_BPS:-40},coinbase=${COINBASE_FEE_BPS:-60}")
 if [[ ${#VENUE_ARGS[@]} -eq 0 ]]; then
