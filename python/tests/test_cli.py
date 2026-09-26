@@ -6,6 +6,7 @@ import pytest
 from slipstream.cli import build_parser, format_comparison, format_summary, main, routing_gain_bps
 from slipstream.models import Fill
 from slipstream.v1 import execution_pb2 as pb
+from slipstream.venue_rules import VenueRules, VenueRulesError
 
 BASE = ["replay", "--file", "x.jsonl", "--side", "buy", "--duration", "6", "--slices", "3"]
 
@@ -430,3 +431,117 @@ def test_float_noise_gain_never_prints_negative_zero() -> None:
     assert "routing gain 0.00 bps" in format_summary(status)
     row = format_comparison([status], []).splitlines()[1]
     assert "-0.00" not in row
+
+
+VENUE_FLAGS_BASE = ["venue-flags", "--venues", "kraken,coinbase", "--fees", "kraken=40,coinbase=60"]
+
+
+def test_fees_parses_valid_list() -> None:
+    args = build_parser().parse_args(VENUE_FLAGS_BASE)
+    assert args.fees == {"kraken": 40.0, "coinbase": 60.0}
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "",
+        "kraken",
+        "kraken=",
+        "kraken=abc",
+        "kraken=-1",
+        "kraken=1001",
+        "kraken=nan",
+        "kraken=inf",
+        "kraken=40,kraken=50",
+        "binance=1",
+        ",",
+    ],
+)
+def test_fees_rejects_bad_entries(value: str) -> None:
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["venue-flags", "--venues", "kraken", "--fees", value])
+
+
+def test_venue_flags_requires_fees() -> None:
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["venue-flags", "--venues", "kraken"])
+
+
+def test_venue_flags_default_symbol() -> None:
+    args = build_parser().parse_args(VENUE_FLAGS_BASE)
+    assert args.symbol == "BTC/USD"
+
+
+def test_venue_flags_prints_plain_decimal_engine_args(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def fake_fetch(venues: object, symbol: str) -> dict[str, VenueRules]:
+        assert symbol == "BTC/USD"
+        return {
+            "kraken": VenueRules(min_qty=0.00005, qty_step=1e-08, min_notional=0.5),
+            "coinbase": VenueRules(min_qty=1e-08, qty_step=1e-08, min_notional=1.0),
+        }
+
+    monkeypatch.setattr("slipstream.cli.fetch_venue_rules", fake_fetch)
+    assert main(VENUE_FLAGS_BASE) == 0
+    out = capsys.readouterr().out.splitlines()
+    assert out == [
+        "--venue",
+        "kraken:fee_bps=40,min_qty=0.00005,qty_step=0.00000001,min_notional=0.5",
+        "--venue",
+        "coinbase:fee_bps=60,min_qty=0.00000001,qty_step=0.00000001,min_notional=1",
+    ]
+    for line in out:
+        assert "e-" not in line
+        assert "E" not in line
+
+
+def test_venue_flags_zero_rules_print_as_bare_zero(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def fake_fetch(venues: object, symbol: str) -> dict[str, VenueRules]:
+        return {"kraken": VenueRules(min_qty=0.0, qty_step=0.0, min_notional=0.0)}
+
+    monkeypatch.setattr("slipstream.cli.fetch_venue_rules", fake_fetch)
+    assert main(["venue-flags", "--venues", "kraken", "--fees", "kraken=0"]) == 0
+    out = capsys.readouterr().out.splitlines()
+    assert out == ["--venue", "kraken:fee_bps=0,min_qty=0,qty_step=0,min_notional=0"]
+
+
+def test_venue_flags_missing_fee_for_venue_is_refused(capsys: pytest.CaptureFixture[str]) -> None:
+    assert main(["venue-flags", "--venues", "kraken,coinbase", "--fees", "kraken=40"]) == 1
+    assert "coinbase" in capsys.readouterr().err
+
+
+def test_venue_flags_exits_1_on_venue_rules_error(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def fake_fetch(venues: object, symbol: str) -> dict[str, VenueRules]:
+        raise VenueRulesError("boom")
+
+    monkeypatch.setattr("slipstream.cli.fetch_venue_rules", fake_fetch)
+    assert main(VENUE_FLAGS_BASE) == 1
+    assert "boom" in capsys.readouterr().err
+
+
+def test_venue_flags_exits_1_on_os_error(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def fake_fetch(venues: object, symbol: str) -> dict[str, VenueRules]:
+        raise OSError("network down")
+
+    monkeypatch.setattr("slipstream.cli.fetch_venue_rules", fake_fetch)
+    assert main(VENUE_FLAGS_BASE) == 1
+    assert "network down" in capsys.readouterr().err
+
+
+def test_venue_flags_does_not_require_paper_mode_or_engine(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("SLIPSTREAM_PAPER_MODE", "false")
+
+    def fake_fetch(venues: object, symbol: str) -> dict[str, VenueRules]:
+        return {"kraken": VenueRules(min_qty=0.0, qty_step=0.0, min_notional=0.0)}
+
+    monkeypatch.setattr("slipstream.cli.fetch_venue_rules", fake_fetch)
+    assert main(["venue-flags", "--venues", "kraken", "--fees", "kraken=1"]) == 0

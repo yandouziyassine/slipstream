@@ -22,6 +22,7 @@ from slipstream.recorder import RecordError, open_new_file, record_stream, write
 from slipstream.replay import ReplayError, read_calibration, read_replay, run_replay
 from slipstream.runner import ExecutionRunner, OrderRejectedError
 from slipstream.v1 import execution_pb2 as pb
+from slipstream.venue_rules import VenueRules, VenueRulesError, fetch_venue_rules
 
 _SYMBOL = re.compile(r"^[A-Z0-9]{2,10}/[A-Z0-9]{2,10}$")
 _ORDER_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
@@ -85,6 +86,36 @@ def _venues(value: str) -> tuple[Venue, ...]:
     return tuple(cast(Venue, name) for name in dict.fromkeys(names))
 
 
+def _fees(value: str) -> dict[Venue, float]:
+    fees: dict[Venue, float] = {}
+    entries = [entry.strip() for entry in value.split(",") if entry.strip()]
+    if not entries:
+        raise argparse.ArgumentTypeError(f"fees must be a comma list of {', '.join(VENUES)}=bps")
+    for entry in entries:
+        name, sep, raw = entry.partition("=")
+        if not sep or not raw or name not in VENUES:
+            raise argparse.ArgumentTypeError(
+                f"fees must be a comma list of {', '.join(VENUES)}=bps"
+            )
+        if name in fees:
+            raise argparse.ArgumentTypeError(f"duplicate fee for {name!r}")
+        try:
+            bps = float(raw)
+        except ValueError as exc:
+            raise argparse.ArgumentTypeError(f"fee for {name!r} is not a number") from exc
+        if not math.isfinite(bps) or not 0 <= bps <= 1000:
+            raise argparse.ArgumentTypeError(f"fee for {name!r} must be in [0, 1000]")
+        fees[name] = bps
+    return fees
+
+
+def _plain(value: float) -> str:
+    # format(x, "f") only keeps 6 decimal digits by default, which rounds a qty_step of
+    # 1e-08 down to zero. 12 digits covers Kraken's lot_decimals (0..12) without exponents.
+    text = format(value, ".12f").rstrip("0").rstrip(".")
+    return text if text else "0"
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="slipstream",
@@ -129,6 +160,12 @@ def build_parser() -> argparse.ArgumentParser:
             default=("kraken",),
             help="comma list of venues; must match the engine's --venue flags",
         )
+    venue_flags = commands.add_parser(
+        "venue-flags", help="fetch venue trading rules and print engine --venue flags"
+    )
+    venue_flags.add_argument("--venues", type=_venues, default=("kraken",))
+    venue_flags.add_argument("--fees", type=_fees, required=True, help="kraken=40,coinbase=60")
+    venue_flags.add_argument("--symbol", type=_symbol, default="BTC/USD")
     return parser
 
 
@@ -263,11 +300,33 @@ def _record(args: argparse.Namespace, log: logging.Logger) -> int:
     return 0
 
 
+def _venue_flags(args: argparse.Namespace, log: logging.Logger) -> int:
+    missing = [venue for venue in args.venues if venue not in args.fees]
+    if missing:
+        log.error(f"missing --fees entries for {', '.join(missing)}")
+        return 1
+    try:
+        rules: dict[Venue, VenueRules] = fetch_venue_rules(args.venues, args.symbol)
+    except (VenueRulesError, OSError) as exc:
+        log.error(str(exc))
+        return 1
+    for venue in args.venues:
+        r = rules[venue]
+        print("--venue")
+        print(
+            f"{venue}:fee_bps={_plain(args.fees[venue])},min_qty={_plain(r.min_qty)},"
+            f"qty_step={_plain(r.qty_step)},min_notional={_plain(r.min_notional)}"
+        )
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     log = configure_logging()
     if args.command == "record":
         return _record(args, log)
+    if args.command == "venue-flags":
+        return _venue_flags(args, log)
     try:
         settings = load_settings()
         specs = _order_specs(args)
