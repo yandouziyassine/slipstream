@@ -64,6 +64,12 @@ struct LoopStats {
     std::int64_t p99_ns;
 };
 
+// The loop's current time (live: the engine clock; replay: the latest event time) and stats.
+struct LoopView {
+    std::int64_t now_ns;
+    LoopStats stats;
+};
+
 class Subscriber {
 public:
     explicit Subscriber(std::size_t capacity) : queue_(capacity) {}
@@ -117,6 +123,17 @@ public:
     template <class F>
     std::invoke_result_t<F&, Engine&> run(F&& fn);
 
+    // Like run, but fn(engine, view) also sees the loop's time and stats, all in one snapshot.
+    template <class F>
+    std::invoke_result_t<F&, Engine&, const LoopView&> inspect(F&& fn);
+
+    // Submits on the engine thread. Live mode replaces start_ns with the engine clock. While a
+    // subscriber is active, the order is stepped at once so its first slice executes at
+    // submission and the subscriber receives those events.
+    SubmitResult submit_and_step(ParentOrderRequest request, ScheduleSpec spec);
+
+    ClockMode mode() const { return mode_; }
+
     bool bind_venue(std::size_t venue);
     void unbind_venue(std::size_t venue);
     bool bind_replay();
@@ -148,7 +165,9 @@ private:
     void process(const Pending& pending);
     std::int64_t item_time(const MarketItem& item) const;
     void apply(const MarketItem& item);
-    void publish(StepOutput output);
+    void step_if_subscribed();
+    void publish(Subscriber& subscriber, StepOutput output);
+    LoopView view() const;
 
     Engine& engine_;
     const ClockMode mode_;
@@ -190,6 +209,11 @@ std::invoke_result_t<F&, Engine&> EngineLoop::run(F&& fn) {
     auto result = task->get_future();
     post([task](Engine& engine) { (*task)(engine); });
     return result.get();
+}
+
+template <class F>
+std::invoke_result_t<F&, Engine&, const LoopView&> EngineLoop::inspect(F&& fn) {
+    return run([this, &fn](Engine& engine) { return fn(engine, view()); });
 }
 
 }  // namespace slipstream

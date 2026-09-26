@@ -318,3 +318,78 @@ TEST(LatencyHistogramTest, ClampsExtremes) {
     slow.record(std::int64_t{1} << 40);
     EXPECT_EQ(slow.percentile(50), std::int64_t{1} << 32);
 }
+
+TEST_F(EngineLoopTest, SubmitAndStepFillsTheFirstSliceForASubscriber) {
+    EngineLoop loop(engine, ClockMode::Replay);
+    ASSERT_TRUE(loop.push(deep_book(kSec)));
+    wait_for_events(loop, 1);
+    auto subscriber = loop.subscribe();
+
+    const auto result = loop.submit_and_step({"o", Side::Buy, 1.0, 2 * kSec, kSec, 2}, TwapSpec{});
+    ASSERT_TRUE(result.accepted) << result.reason;
+
+    const auto fills = fills_of(drain(*subscriber));
+    ASSERT_EQ(fills.size(), 1u);
+    EXPECT_DOUBLE_EQ(fills[0].qty, 0.5);
+    EXPECT_EQ(fills[0].ts_ns, 2 * kSec);
+    EXPECT_EQ(loop.inspect([](Engine&, const LoopView& view) { return view.now_ns; }), 2 * kSec);
+}
+
+TEST_F(EngineLoopTest, WithoutASubscriberTheLoopNeverSteps) {
+    EngineLoop loop(engine, ClockMode::Replay);
+    ASSERT_TRUE(loop.push(deep_book(kSec)));
+    wait_for_events(loop, 1);
+
+    ASSERT_TRUE(loop.submit_and_step({"o", Side::Buy, 1.0, kSec, kSec, 2}, TwapSpec{}).accepted);
+    ASSERT_TRUE(loop.push(tick(2 * kSec)));
+    wait_for_events(loop, 2);
+    const auto filled = loop.run([](Engine& e) { return e.statuses().at(0).filled_qty; });
+    EXPECT_DOUBLE_EQ(filled, 0.0);
+
+    // A legacy client steps the order itself and reads the fills from the step output.
+    const auto output = loop.run([](Engine& e) { return e.step(kSec); });
+    ASSERT_EQ(output.fills.size(), 1u);
+}
+
+TEST_F(EngineLoopTest, LiveSubmitUsesTheEngineClock) {
+    EngineLoop loop(engine, ClockMode::Live);
+    const auto before = loop.live_now_ns();
+    ASSERT_TRUE(loop.push(deep_book(0)));
+    const auto deadline = std::chrono::steady_clock::now() + 5s;
+    while (!loop.run([](Engine& e) { return e.venue_states(0).at(0).has_book; })) {
+        ASSERT_LT(std::chrono::steady_clock::now(), deadline);
+        std::this_thread::sleep_for(1ms);
+    }
+    auto subscriber = loop.subscribe();
+
+    // A client start time of 0 would put the whole schedule in the past.
+    const auto result = loop.submit_and_step({"o", Side::Buy, 1.0, 0, 10 * kSec, 2}, TwapSpec{});
+    ASSERT_TRUE(result.accepted) << result.reason;
+
+    const auto fills = fills_of(drain(*subscriber));
+    ASSERT_EQ(fills.size(), 1u);
+    EXPECT_DOUBLE_EQ(fills[0].qty, 0.5);
+    EXPECT_GE(fills[0].ts_ns, before);
+}
+
+TEST_F(EngineLoopTest, InspectSeesTheEventTimeAndStatsInOneCommand) {
+    EngineLoop loop(engine, ClockMode::Replay);
+    EXPECT_EQ(loop.mode(), ClockMode::Replay);
+    ASSERT_TRUE(loop.push(deep_book(5 * kSec)));
+    wait_for_events(loop, 1);
+    const auto view = loop.inspect([](Engine& e, const LoopView& v) {
+        return std::pair{v, e.venue_states(v.now_ns).at(0).fresh};
+    });
+    EXPECT_EQ(view.first.now_ns, 5 * kSec);
+    EXPECT_EQ(view.first.stats.events, 1u);
+    EXPECT_TRUE(view.second);
+}
+
+TEST_F(EngineLoopTest, LiveInspectUsesTheLiveClock) {
+    EngineLoop loop(engine, ClockMode::Live);
+    EXPECT_EQ(loop.mode(), ClockMode::Live);
+    const auto before = loop.live_now_ns();
+    const auto now = loop.inspect([](Engine&, const LoopView& v) { return v.now_ns; });
+    EXPECT_GE(now, before);
+    EXPECT_LE(now, loop.live_now_ns());
+}

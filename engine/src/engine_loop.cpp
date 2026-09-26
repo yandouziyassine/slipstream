@@ -80,10 +80,26 @@ void EngineLoop::unsubscribe(const std::shared_ptr<Subscriber>& subscriber) {
 }
 
 LoopStats EngineLoop::stats() {
-    return run([this](Engine&) {
-        return LoopStats{events_, market_.high_water(), latency_.percentile(50),
-                         latency_.percentile(99)};
+    return inspect([](Engine&, const LoopView& view) { return view.stats; });
+}
+
+SubmitResult EngineLoop::submit_and_step(ParentOrderRequest request, ScheduleSpec spec) {
+    return run([this, request = std::move(request), spec = std::move(spec)](Engine& engine) {
+        auto timed = request;
+        if (mode_ == ClockMode::Live) timed.start_ns = std::max(clock_.now_ns(), event_time_);
+        auto result = engine.submit(timed, spec);
+        if (result.accepted) {
+            event_time_ = std::max(event_time_, timed.start_ns);
+            step_if_subscribed();
+        }
+        return result;
     });
+}
+
+LoopView EngineLoop::view() const {
+    const std::int64_t now = mode_ == ClockMode::Live ? clock_.now_ns() : event_time_;
+    return {now, LoopStats{events_, market_.high_water(), latency_.percentile(50),
+                           latency_.percentile(99)}};
 }
 
 void EngineLoop::stop() {
@@ -144,7 +160,7 @@ void EngineLoop::drain_commands() {
 void EngineLoop::process(const Pending& pending) {
     event_time_ = std::max(event_time_, item_time(pending.item));
     apply(pending.item);
-    publish(engine_.step(event_time_));
+    step_if_subscribed();
     ++events_;
     latency_.record(steady_now_ns() - pending.ingest_steady_ns);
 }
@@ -171,16 +187,20 @@ void EngineLoop::apply(const MarketItem& item) {
     }
 }
 
-void EngineLoop::publish(StepOutput output) {
-    if (output.fills.empty() && output.updates.empty()) return;
+// Until PR 3 removes the unary Step RPC, a client without a subscription steps orders itself
+// and reads the fills from StepReply, so the loop must not step (and consume) them first.
+void EngineLoop::step_if_subscribed() {
     std::shared_ptr<Subscriber> subscriber;
     {
         std::lock_guard lock(subscriber_mutex_);
         subscriber = subscriber_;
     }
+    if (subscriber) publish(*subscriber, engine_.step(event_time_));
+}
+
+void EngineLoop::publish(Subscriber& subscriber, StepOutput output) {
     const auto emit = [&](std::variant<Fill, OrderUpdate> event) {
-        EngineEventData data{next_seq_++, std::move(event)};
-        if (subscriber) subscriber->publish(std::move(data));
+        subscriber.publish(EngineEventData{next_seq_++, std::move(event)});
     };
     for (auto& fill : output.fills) emit(std::move(fill));
     for (auto& update : output.updates) emit(std::move(update));
