@@ -22,7 +22,9 @@ export TSAN_OPTIONS="ignore_noninstrumented_modules=1"
 no_aslr cmake -S engine -B build/tsan -G Ninja -DSLIPSTREAM_TSAN=ON -DSLIPSTREAM_SANITIZE=OFF \
   -DCMAKE_BUILD_TYPE=RelWithDebInfo
 no_aslr cmake --build build/tsan
-no_aslr ctest --test-dir build/tsan -R "EngineLoop|Stream|BoundedQueue" --output-on-failure
+# The wake-latency test asserts speed, not thread safety; TSan slows it past its threshold.
+no_aslr ctest --test-dir build/tsan -R "EngineLoop|Stream|BoundedQueue" \
+  -E "CommandWakesAnIdleLoopImmediately" --output-on-failure
 unset TSAN_OPTIONS
 
 echo "== Python lint + types"
