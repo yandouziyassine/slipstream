@@ -2,21 +2,19 @@
 
 #include <grpcpp/grpcpp.h>
 
-#include <cstddef>
-#include <optional>
 #include <string>
 
-#include "engine.h"
+#include "engine_loop.h"
+#include "market_validation.h"
 #include "slipstream/v1/execution.grpc.pb.h"
 
 namespace slipstream {
 
+// Every call reaches the engine through the loop. In live mode client-supplied times (recv_ns,
+// now_ns, start_ns) are ignored and replaced by the engine clock.
 class ExecutionService final : public v1::ExecutionEngine::Service {
 public:
-    static constexpr int kMaxLevelsPerUpdate = 1000;
-    static constexpr int kMaxTradesPerBatch = 1000;
-
-    ExecutionService(Engine& engine, std::string symbol);
+    ExecutionService(EngineLoop& loop, std::string symbol);
 
     grpc::Status ApplyBookUpdate(grpc::ServerContext*, const v1::BookUpdate* request,
                                  v1::BookAck*) override;
@@ -30,10 +28,10 @@ public:
                              v1::TradeAck*) override;
 
 private:
-    std::optional<std::size_t> resolve_venue(const std::string& name) const;
+    std::int64_t now_or(std::int64_t client_ns) const;
 
-    Engine& engine_;
-    std::string symbol_;
+    EngineLoop& loop_;
+    MarketValidator validator_;
 };
 
 }  // namespace slipstream
