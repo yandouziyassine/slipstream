@@ -37,8 +37,9 @@ Engine::Engine(RiskLimits limits, std::size_t book_depth, std::vector<VenueSetti
     : stale_ns_(stale_ns), risk_(limits) {
     venues_.reserve(venues.size());
     for (auto& venue : venues) {
-        venues_.push_back(Venue{std::move(venue.name), venue.fee_bps / 1e4, OrderBook(book_depth),
-                                0});
+        const double fee_bps = venue.fee_bps;
+        venues_.push_back(Venue{std::move(venue.name), fee_bps, fee_bps / 1e4,
+                                OrderBook(book_depth), 0});
     }
 }
 
@@ -103,16 +104,35 @@ bool Engine::fresh_locked(std::size_t venue, std::int64_t now_ns) const {
 std::optional<double> Engine::consolidated_mid_locked(std::int64_t now_ns) const {
     std::optional<double> best_bid;
     std::optional<double> best_ask;
+    std::optional<double> best_effective_bid;
+    std::optional<double> best_effective_ask;
     for (std::size_t v = 0; v < venues_.size(); ++v) {
         if (!fresh_locked(v, now_ns)) continue;
-        if (const auto bid = venues_[v].book.best_bid()) {
+        const auto bid = venues_[v].book.best_bid();
+        const auto ask = venues_[v].book.best_ask();
+        // A venue's matching engine never rests a crossed book, so one here means bad data.
+        if (bid && ask && bid->price >= ask->price) return std::nullopt;
+        const double fee_rate = venues_[v].fee_rate;
+        if (bid) {
             if (!best_bid || bid->price > *best_bid) best_bid = bid->price;
+            const double effective = bid->price * (1.0 - fee_rate);
+            if (!best_effective_bid || effective > *best_effective_bid) {
+                best_effective_bid = effective;
+            }
         }
-        if (const auto ask = venues_[v].book.best_ask()) {
+        if (ask) {
             if (!best_ask || ask->price < *best_ask) best_ask = ask->price;
+            const double effective = ask->price * (1.0 + fee_rate);
+            if (!best_effective_ask || effective < *best_effective_ask) {
+                best_effective_ask = effective;
+            }
         }
     }
-    if (!best_bid || !best_ask || *best_bid >= *best_ask) return std::nullopt;
+    if (!best_bid || !best_ask) return std::nullopt;
+    // Separate venues are routinely crossed by a little, because taker fees make the cross
+    // unprofitable to trade. A cross that survives fees is an arbitrage real venues do not leave
+    // standing, so treat it as bad data.
+    if (*best_effective_bid >= *best_effective_ask) return std::nullopt;
     return (*best_bid + *best_ask) / 2.0;
 }
 
@@ -287,6 +307,14 @@ std::optional<std::size_t> Engine::venue_index(std::string_view name) const {
 std::size_t Engine::venue_count() const {
     std::lock_guard lock(mu_);
     return venues_.size();
+}
+
+std::vector<VenueSettings> Engine::venue_settings() const {
+    std::lock_guard lock(mu_);
+    std::vector<VenueSettings> out;
+    out.reserve(venues_.size());
+    for (const auto& venue : venues_) out.push_back({venue.name, venue.fee_bps});
+    return out;
 }
 
 }  // namespace slipstream

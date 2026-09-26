@@ -7,6 +7,7 @@ Side = Literal["buy", "sell"]
 Algo = Literal["twap", "vwap", "pov", "almgren_chriss"]
 Urgency = Literal["low", "medium", "high"]
 Venue = Literal["kraken", "coinbase"]
+VENUES: tuple[Venue, ...] = ("kraken", "coinbase")
 
 
 class MarketDataError(ValueError):
@@ -49,6 +50,8 @@ class Fill:
     ts_ns: int
     qty: float
     price: float
+    venue: str = "kraken"
+    fee: float = 0.0
 
 
 @dataclass(frozen=True)

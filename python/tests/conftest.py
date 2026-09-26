@@ -16,6 +16,7 @@ ENGINE_BIN = Path(__file__).resolve().parents[2] / "build" / "engine" / "slipstr
 class FakeEngine:
     def __init__(self) -> None:
         self.books: list[BookUpdate] = []
+        self.book_recv_ns: list[int] = []
         self.submits: list[tuple[OrderSpec, int, ScheduleParams | None]] = []
         self.steps: list[int] = []
         self.accept = True
@@ -26,8 +27,9 @@ class FakeEngine:
         self.trades: list[TradeBatch] = []
         self.reject_ids: set[str] = set()
 
-    def apply_book(self, update: BookUpdate) -> None:
+    def apply_book(self, update: BookUpdate, recv_ns: int) -> None:
         self.books.append(update)
+        self.book_recv_ns.append(recv_ns)
 
     def submit(
         self, spec: OrderSpec, start_ns: int, params: ScheduleParams | None = None
@@ -62,8 +64,7 @@ def fake_engine() -> FakeEngine:
     return FakeEngine()
 
 
-@pytest.fixture
-def engine_address() -> Iterator[str]:
+def _run_engine(*extra: str) -> Iterator[str]:
     if not ENGINE_BIN.exists():
         pytest.fail(f"engine binary not found at {ENGINE_BIN}; run scripts/build_engine.sh")
     proc = subprocess.Popen(
@@ -77,6 +78,7 @@ def engine_address() -> Iterator[str]:
             "10000",
             "--max-position",
             "1.0",
+            *extra,
         ],
         stdout=subprocess.PIPE,
         text=True,
@@ -91,3 +93,13 @@ def engine_address() -> Iterator[str]:
     finally:
         proc.terminate()
         proc.wait(timeout=10)
+
+
+@pytest.fixture
+def engine_address() -> Iterator[str]:
+    yield from _run_engine()
+
+
+@pytest.fixture
+def two_venue_engine_address() -> Iterator[str]:
+    yield from _run_engine("--venue", "kraken:fee_bps=0", "--venue", "coinbase:fee_bps=1")

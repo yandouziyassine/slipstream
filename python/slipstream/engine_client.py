@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import math
 from typing import Any, cast
 
 import grpc
 
 from slipstream.config import validate_engine_address
 from slipstream.models import (
+    VENUES,
     AlmgrenChrissParams,
     BookUpdate,
     Fill,
@@ -13,6 +15,7 @@ from slipstream.models import (
     PovParams,
     ScheduleParams,
     TradeBatch,
+    Venue,
     VwapParams,
 )
 from slipstream.v1 import execution_pb2 as pb
@@ -26,12 +29,14 @@ class EngineError(RuntimeError):
     pass
 
 
-def book_update_to_proto(update: BookUpdate) -> pb.BookUpdate:
+def book_update_to_proto(update: BookUpdate, recv_ns: int) -> pb.BookUpdate:
     return pb.BookUpdate(
         symbol=update.symbol,
         is_snapshot=update.is_snapshot,
         bids=[pb.PriceLevel(price=price, qty=qty) for price, qty in update.bids],
         asks=[pb.PriceLevel(price=price, qty=qty) for price, qty in update.asks],
+        venue=update.venue,
+        recv_ns=recv_ns,
     )
 
 
@@ -63,6 +68,7 @@ def trade_batch_to_proto(batch: TradeBatch) -> pb.TradeBatch:
     return pb.TradeBatch(
         symbol=batch.symbol,
         trades=[pb.Trade(price=price, qty=qty) for price, qty in batch.trades],
+        venue=batch.venue,
     )
 
 
@@ -79,8 +85,8 @@ class EngineClient:
         except grpc.FutureTimeoutError as exc:
             raise EngineError("engine not reachable") from exc
 
-    def apply_book(self, update: BookUpdate) -> None:
-        self._call(self._stub.ApplyBookUpdate, book_update_to_proto(update))
+    def apply_book(self, update: BookUpdate, recv_ns: int) -> None:
+        self._call(self._stub.ApplyBookUpdate, book_update_to_proto(update, recv_ns))
 
     def submit(
         self, spec: OrderSpec, start_ns: int, params: ScheduleParams | None = None
@@ -96,10 +102,20 @@ class EngineClient:
 
     def step(self, now_ns: int) -> list[Fill]:
         reply = cast(pb.StepReply, self._call(self._stub.Step, pb.StepRequest(now_ns=now_ns)))
-        return [Fill(f.order_id, f.ts_ns, f.qty, f.price) for f in reply.fills]
+        return [Fill(f.order_id, f.ts_ns, f.qty, f.price, f.venue, f.fee) for f in reply.fills]
 
     def status(self) -> pb.StatusReply:
         return cast(pb.StatusReply, self._call(self._stub.GetStatus, pb.StatusRequest()))
+
+    def venue_fees(self) -> dict[Venue, float]:
+        fees: dict[Venue, float] = {}
+        for info in self.status().venues:
+            if info.name not in VENUES or not math.isfinite(info.fee_bps) or info.fee_bps < 0:
+                raise EngineError(f"engine reported an invalid venue {info.name[:32]!r}")
+            fees[info.name] = info.fee_bps
+        if not fees:
+            raise EngineError("engine reported no venues")
+        return fees
 
     def close(self) -> None:
         self._channel.close()

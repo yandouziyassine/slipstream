@@ -9,6 +9,7 @@ import sys
 import time
 from collections.abc import Sequence
 from pathlib import Path
+from typing import cast
 
 from slipstream.calibration import CalibrationData, CalibrationError
 from slipstream.config import ConfigError, load_settings
@@ -16,7 +17,7 @@ from slipstream.engine_client import EngineClient, EngineError
 from slipstream.kraken_rest import fetch_ohlc, parse_ohlc
 from slipstream.live import LiveFeedError, run_live
 from slipstream.logging_setup import configure_logging
-from slipstream.models import Fill, MarketDataError, OrderSpec
+from slipstream.models import VENUES, Fill, MarketDataError, OrderSpec, Venue
 from slipstream.recorder import RecordError, open_new_file, record_stream, write_ohlc_header
 from slipstream.replay import ReplayError, read_calibration, read_replay, run_replay
 from slipstream.runner import ExecutionRunner, OrderRejectedError
@@ -76,19 +77,28 @@ def _algos(value: str) -> list[str]:
     return list(dict.fromkeys(names))
 
 
+def _venues(value: str) -> tuple[Venue, ...]:
+    names = [name.strip() for name in value.split(",") if name.strip()]
+    unknown = [name for name in names if name not in VENUES]
+    if not names or unknown:
+        raise argparse.ArgumentTypeError(f"venues must be a comma list of {', '.join(VENUES)}")
+    return tuple(cast(Venue, name) for name in dict.fromkeys(names))
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="slipstream",
         description=(
-            "Paper-trade execution schedules against the live or a recorded Kraken order book."
+            "Paper-trade execution schedules across Kraken and Coinbase public order books "
+            "(live or recorded)."
         ),
     )
     commands = parser.add_subparsers(dest="command", required=True)
-    live = commands.add_parser("live", help="stream the live Kraken book (paper fills only)")
+    live = commands.add_parser("live", help="stream live public order books (paper fills only)")
     live.add_argument("--depth", type=int, choices=[10, 25, 100], default=10)
     replay = commands.add_parser("replay", help="replay a recorded JSONL order book file")
     replay.add_argument("--file", type=Path, required=True)
-    record = commands.add_parser("record", help="record the live Kraken book + trades to JSONL")
+    record = commands.add_parser("record", help="record live public order books + trades to JSONL")
     record.add_argument("--duration", type=_positive_int, required=True, help="seconds")
     record.add_argument("--out", type=Path, required=True)
     record.add_argument("--symbol", type=_symbol, default="BTC/USD")
@@ -112,7 +122,30 @@ def build_parser() -> argparse.ArgumentParser:
     for sub in (live, replay):
         sub.add_argument("--algo", choices=ALGOS, default="twap")
         sub.add_argument("--order-id", type=_order_id, default=None)
+    for sub in (live, replay, compare, record):
+        sub.add_argument(
+            "--venues",
+            type=_venues,
+            default=("kraken",),
+            help="comma list of venues; must match the engine's --venue flags",
+        )
     return parser
+
+
+def routing_gain_bps(status: pb.OrderStatus) -> float | None:
+    available = [cost.all_in_bps for cost in status.venue_costs if cost.available]
+    if not available:
+        return None
+    return min(available) - status.routed_all_in_bps
+
+
+def _num(value: float | None) -> str:
+    # Adding 0.0 turns a rounded -0.0 (float noise such as -1e-13) into 0.0, so it prints "0.00".
+    return "n/a" if value is None else f"{round(value, 2) + 0.0:.2f}"
+
+
+def _bps(value: float | None) -> str:
+    return "n/a" if value is None else f"{_num(value)} bps"
 
 
 def format_summary(status: pb.OrderStatus) -> str:
@@ -128,25 +161,47 @@ def format_summary(status: pb.OrderStatus) -> str:
         f"one-shot     {status.immediate_cost_bps:.2f} bps (single market order at arrival)",
         f"saved        {status.immediate_cost_bps - status.slippage_bps:.2f} bps",
     ]
+    lines += [
+        f"fees         {status.fees_bps:.2f} bps ({status.fees_paid:.2f} paid)",
+        f"all-in       {status.routed_all_in_bps:.2f} bps (slippage + fees, routed)",
+    ]
+    if len(status.venue_costs) > 1:
+        for cost in status.venue_costs:
+            alone = cost.all_in_bps if cost.available else None
+            lines.append(f"{'  ' + cost.venue:<13}{_bps(alone)} (all-in on this venue alone)")
+        lines.append(f"routing gain {_bps(routing_gain_bps(status))} (vs best single venue)")
     if status.halt_reason:
         lines.append(f"halt reason  {status.halt_reason}")
     return "\n".join(lines)
 
 
 def format_comparison(statuses: Sequence[pb.OrderStatus], fills: Sequence[Fill]) -> str:
-    rows = [
+    venues = [cost.venue for cost in statuses[0].venue_costs] if statuses else []
+    multi = len(venues) > 1
+    header = (
         f"{'algo':<16}{'state':<11}{'filled':>10}{'avg px':>12}{'slip bps':>10}"
-        f"{'1-shot bps':>12}{'saved bps':>11}{'fills':>7}"
-    ]
+        f"{'1-shot bps':>12}{'saved bps':>11}{'fee bps':>9}{'all-in bps':>12}"
+    )
+    if multi:
+        header += "".join(f"{venue + ' bps':>14}" for venue in venues) + f"{'gain bps':>10}"
+    rows = [header + f"{'fills':>7}"]
     for status in statuses:
         state = pb.OrderState.Name(status.state).removeprefix("ORDER_STATE_")
         count = sum(1 for fill in fills if fill.order_id == status.order_id)
         saved = status.immediate_cost_bps - status.slippage_bps
-        rows.append(
+        row = (
             f"{status.algo:<16}{state:<11}{status.filled_qty:>10.8g}"
             f"{status.avg_fill_price:>12.2f}{status.slippage_bps:>10.2f}"
-            f"{status.immediate_cost_bps:>12.2f}{saved:>11.2f}{count:>7}"
+            f"{status.immediate_cost_bps:>12.2f}{saved:>11.2f}"
+            f"{status.fees_bps:>9.2f}{status.routed_all_in_bps:>12.2f}"
         )
+        if multi:
+            row += "".join(
+                f"{_num(cost.all_in_bps if cost.available else None):>14}"
+                for cost in status.venue_costs
+            )
+            row += f"{_num(routing_gain_bps(status)):>10}"
+        rows.append(row + f"{count:>7}")
     return "\n".join(rows)
 
 
@@ -195,7 +250,9 @@ def _record(args: argparse.Namespace, log: logging.Logger) -> int:
         with open_new_file(args.out) as handle:
             for interval in (15, 1):
                 write_ohlc_header(handle, interval, fetch_ohlc(args.symbol, interval))
-            count = asyncio.run(record_stream(handle, args.symbol, args.depth, args.duration))
+            count = asyncio.run(
+                record_stream(handle, args.symbol, args.depth, args.duration, venues=args.venues)
+            )
     except (RecordError, MarketDataError, OSError) as exc:
         log.error(str(exc))
         return 1
@@ -221,13 +278,31 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
     try:
         client.wait_ready()
-        runner = ExecutionRunner(client, specs, args.symbol, log, calibration)
+        fees = client.venue_fees()
+        if set(fees) != set(args.venues):
+            log.error(
+                f"engine venues {sorted(fees)} do not match --venues {sorted(args.venues)}; "
+                "start the engine with one --venue flag per venue"
+            )
+            return 1
+        runner = ExecutionRunner(
+            client,
+            specs,
+            args.symbol,
+            log,
+            calibration,
+            venues=args.venues,
+            book_depth=getattr(args, "depth", 10),
+            fee_bps=fees,
+        )
         replay_file = getattr(args, "file", None)
         if replay_file is not None:
             run_replay(runner, read_replay(replay_file))
         else:
             deadline_s = args.duration + _DEADLINE_GRACE_S
-            asyncio.run(run_live(runner, args.symbol, args.depth, deadline_s=deadline_s))
+            asyncio.run(
+                run_live(runner, args.symbol, args.depth, deadline_s=deadline_s, venues=args.venues)
+            )
         statuses = runner.order_statuses()
         if not statuses:
             log.error("order was never submitted (no order book snapshot received)")

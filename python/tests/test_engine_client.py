@@ -11,6 +11,7 @@ from slipstream.engine_client import (
 from slipstream.models import (
     AlmgrenChrissParams,
     BookUpdate,
+    Fill,
     OrderSpec,
     PovParams,
     TradeBatch,
@@ -21,9 +22,12 @@ from slipstream.v1 import execution_pb2 as pb
 
 
 def test_book_update_to_proto() -> None:
-    msg = book_update_to_proto(BookUpdate("BTC/USD", True, ((99.0, 1.0),), ((101.0, 2.0),)))
+    update = BookUpdate("BTC/USD", True, ((99.0, 1.0),), ((101.0, 2.0),), "coinbase")
+    msg = book_update_to_proto(update, recv_ns=123)
     assert msg.symbol == "BTC/USD"
     assert msg.is_snapshot
+    assert msg.venue == "coinbase"
+    assert msg.recv_ns == 123
     assert [(level.price, level.qty) for level in msg.bids] == [(99.0, 1.0)]
     assert [(level.price, level.qty) for level in msg.asks] == [(101.0, 2.0)]
 
@@ -87,3 +91,46 @@ def test_trade_batch_to_proto() -> None:
     msg = trade_batch_to_proto(TradeBatch("BTC/USD", False, ((100.5, 0.2), (100.4, 0.3))))
     assert msg.symbol == "BTC/USD"
     assert [(t.price, t.qty) for t in msg.trades] == [(100.5, 0.2), (100.4, 0.3)]
+
+
+def test_trade_batch_to_proto_carries_venue() -> None:
+    msg = trade_batch_to_proto(TradeBatch("BTC/USD", False, ((100.0, 0.5),), "coinbase"))
+    assert msg.venue == "coinbase"
+    assert [(t.price, t.qty) for t in msg.trades] == [(100.0, 0.5)]
+
+
+def fake_status(*venues: tuple[str, float]) -> pb.StatusReply:
+    return pb.StatusReply(venues=[pb.VenueInfo(name=n, fee_bps=f) for n, f in venues])
+
+
+def test_venue_fees_reads_engine_venues(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = EngineClient("127.0.0.1:1")
+    try:
+        monkeypatch.setattr(
+            client, "status", lambda: fake_status(("kraken", 40.0), ("coinbase", 60.0))
+        )
+        assert client.venue_fees() == {"kraken": 40.0, "coinbase": 60.0}
+    finally:
+        client.close()
+
+
+@pytest.mark.parametrize(
+    "venues",
+    [(), (("binance", 10.0),), (("kraken", float("nan")),), (("kraken", -1.0),)],
+    ids=["none", "unknown", "nan", "negative"],
+)
+def test_venue_fees_rejects_bad_engine_venues(
+    monkeypatch: pytest.MonkeyPatch, venues: tuple[tuple[str, float], ...]
+) -> None:
+    client = EngineClient("127.0.0.1:1")
+    try:
+        monkeypatch.setattr(client, "status", lambda: fake_status(*venues))
+        with pytest.raises(EngineError):
+            client.venue_fees()
+    finally:
+        client.close()
+
+
+def test_fill_defaults_keep_single_venue_callers_working() -> None:
+    fill = Fill("o", 1, 0.5, 100.0)
+    assert (fill.venue, fill.fee) == ("kraken", 0.0)

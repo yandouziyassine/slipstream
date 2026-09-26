@@ -83,12 +83,62 @@ def test_snapshot_is_sorted_truncated_and_tagged() -> None:
     )
 
 
-def test_update_passes_deltas_through() -> None:
+def test_update_emits_top_of_book_view() -> None:
     stream = CoinbaseStream("BTC/USD", depth=10)
     stream.parse(l2(0, "snapshot", [upd("bid", "99", "1"), upd("offer", "101", "1")]))
     assert stream.parse(l2(1, "update", [upd("bid", "99", "0"), upd("offer", "100.9", "4")])) == (
-        BookUpdate("BTC/USD", False, ((99.0, 0.0),), ((100.9, 4.0),), "coinbase")
+        BookUpdate("BTC/USD", True, (), ((100.9, 4.0), (101.0, 1.0)), "coinbase")
     )
+
+
+def test_deleting_a_top_level_brings_the_next_level_into_view() -> None:
+    stream = CoinbaseStream("BTC/USD", depth=2)
+    stream.parse(
+        l2(
+            0,
+            "snapshot",
+            [
+                upd("bid", "99", "1"),
+                upd("bid", "98", "1"),
+                upd("bid", "97", "1"),
+                upd("offer", "101", "1"),
+                upd("offer", "102", "1"),
+                upd("offer", "103", "1"),
+            ],
+        )
+    )
+    view = stream.parse(l2(1, "update", [upd("offer", "101", "0"), upd("bid", "99", "0")]))
+    assert view == BookUpdate(
+        "BTC/USD", True, ((98.0, 1.0), (97.0, 1.0)), ((102.0, 1.0), (103.0, 1.0)), "coinbase"
+    )
+
+
+def test_update_before_snapshot_raises() -> None:
+    with pytest.raises(CoinbaseMessageError, match="before snapshot"):
+        CoinbaseStream("BTC/USD", depth=10).parse(l2(0, "update", [upd("bid", "99", "1")]))
+
+
+def test_new_snapshot_replaces_the_book() -> None:
+    stream = CoinbaseStream("BTC/USD", depth=10)
+    stream.parse(l2(0, "snapshot", [upd("bid", "99", "1"), upd("offer", "101", "1")]))
+    view = stream.parse(l2(1, "snapshot", [upd("bid", "50", "2"), upd("offer", "60", "3")]))
+    assert view == BookUpdate("BTC/USD", True, ((50.0, 2.0),), ((60.0, 3.0),), "coinbase")
+
+
+def test_book_level_cap_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("slipstream.coinbase.MAX_BOOK_LEVELS", 2)
+    stream = CoinbaseStream("BTC/USD", depth=10)
+    stream.parse(l2(0, "snapshot", [upd("bid", "99", "1"), upd("bid", "98", "1")]))
+    with pytest.raises(CoinbaseMessageError, match="too many levels"):
+        stream.parse(l2(1, "update", [upd("bid", "97", "1")]))
+
+
+def test_oversized_snapshot_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("slipstream.coinbase.MAX_BOOK_LEVELS", 1)
+    with pytest.raises(CoinbaseMessageError, match="too many levels"):
+        CoinbaseStream("BTC/USD", depth=10).parse(
+            l2(0, "snapshot", [upd("bid", "99", "1"), upd("bid", "98", "1")])
+        )
 
 
 def test_trades_update_and_snapshot() -> None:

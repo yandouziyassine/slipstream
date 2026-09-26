@@ -273,3 +273,28 @@ TEST_F(ServiceTest, PovOrderFillsFromReportedTrades) {
     ASSERT_EQ(step_reply.fills_size(), 1);
     EXPECT_DOUBLE_EQ(step_reply.fills(0).qty(), 0.5);
 }
+
+TEST(ServiceMultiVenue, StatusListsVenuesAndFeesInRegistrationOrder) {
+    Engine engine(RiskLimits{1'000'000.0, 100.0}, 10, {{"kraken", 40.0}, {"coinbase", 60.0}},
+                  2'000'000'000);
+    ExecutionService service{engine, "BTC/USD"};
+    v1::StatusRequest request;
+    v1::StatusReply status;
+    ASSERT_TRUE(service.GetStatus(nullptr, &request, &status).ok());
+    ASSERT_EQ(status.venues_size(), 2);
+    EXPECT_EQ(status.venues(0).name(), "kraken");
+    EXPECT_DOUBLE_EQ(status.venues(0).fee_bps(), 40.0);
+    EXPECT_EQ(status.venues(1).name(), "coinbase");
+    EXPECT_DOUBLE_EQ(status.venues(1).fee_bps(), 60.0);
+}
+
+TEST(ServiceMultiVenue, DefaultEngineListsKrakenWithZeroFee) {
+    Engine engine(RiskLimits{1'000'000.0, 100.0}, 10);
+    ExecutionService service{engine, "BTC/USD"};
+    v1::StatusRequest request;
+    v1::StatusReply status;
+    ASSERT_TRUE(service.GetStatus(nullptr, &request, &status).ok());
+    ASSERT_EQ(status.venues_size(), 1);
+    EXPECT_EQ(status.venues(0).name(), "kraken");
+    EXPECT_DOUBLE_EQ(status.venues(0).fee_bps(), 0.0);
+}

@@ -7,10 +7,10 @@ from typing import Any
 
 from slipstream.kraken import KrakenMessageError
 from slipstream.kraken_rest import SUPPORTED_INTERVALS, Bar, parse_ohlc
-from slipstream.models import Venue
+from slipstream.models import VENUES, Venue
 from slipstream.runner import ExecutionRunner
 
-_VALID_VENUES: frozenset[Venue] = frozenset({"kraken", "coinbase"})
+_VALID_VENUES: frozenset[Venue] = frozenset(VENUES)
 
 
 class ReplayError(ValueError):
@@ -80,6 +80,8 @@ def run_replay(runner: ExecutionRunner, records: Iterable[tuple[int, str, Venue]
         if recv_ns < last_ns:
             raise ReplayError("replay timestamps must be non-decreasing")
         last_ns = recv_ns
+        if venue not in runner.venues:
+            continue
         runner.on_message(raw, recv_ns, venue)
         if runner.is_done():
             return

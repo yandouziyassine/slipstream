@@ -2,7 +2,7 @@
 
 Open-source smart order execution engine. Slipstream slices a large order over time (TWAP), checks every slice against hard risk limits in C++ before it fills, and reports the slippage it paid against what a single market order would have cost at arrival.
 
-> **Status: v0.1, in development. Paper trading only.** Slipstream streams Kraken's public BTC/USD order book. It uses no API keys, places no real orders, and moves no real money.
+> **Status: in development. Paper trading only.** Slipstream streams the public BTC/USD order books of Kraken and Coinbase and routes each slice across both venues. It uses no API keys, places no real orders, and moves no real money.
 
 ## Why
 
@@ -11,11 +11,15 @@ A large market order moves the price against the trader who sends it (market imp
 ## How it works
 
 ```
-Kraken WS v2 (public) ──► Python orchestrator ──gRPC (loopback)──► C++20 engine
-                          validate + parse                         order book (depth-capped)
-                          drive the clock                          TWAP schedule
-                          JSON logs + summary                      risk gate ──► simulated fills
+Kraken WS v2 (public) ───┐
+                         ├─► Python orchestrator ──gRPC (loopback)──► C++20 engine
+Coinbase WS (public) ────┘   validate + parse                         one book per venue
+                             drive the clock                          schedule (TWAP/VWAP/POV/AC)
+                             JSON logs + summary                      smart router (price + fee)
+                                                                      risk gate ──► simulated fills
 ```
+
+- **Smart order routing across venues.** Each child slice is split across Kraken and Coinbase by all-in price, meaning price plus that venue's taker fee. At the same moment the engine also prices the same quantity on each venue alone, so every run reports what routing actually saved.
 
 - **Four execution schedules** behind one C++ `Schedule` interface:
   - **TWAP:** equal slices over time.
@@ -121,18 +125,66 @@ Calibrated live: σ = 5.68 $/√s and η = 166 $·s/BTC², so medium urgency giv
 - **VWAP barely moved off TWAP.** Its time-of-day profile was nearly flat across these 20 minutes.
 - **One run is one sample.** Measuring each algorithm's cost distribution over many recorded sessions is the next milestone. Until then, treat this table as a demonstration of the tooling, not as evidence that one schedule beats another.
 
+## Smart routing across venues
+
+Taker fees on crypto venues are tens of basis points, often more than the slippage itself, so the router ranks liquidity by **all-in price**. For a buy that is `ask × (1 + fee)`; for a sell, `bid × (1 − fee)`. It walks both venues' books best-first until the child is filled.
+
+Every fill is also priced, at the same moment and on the same books, as if the whole child had gone to each venue alone. That gives three numbers per order:
+- **all-in**: slippage plus fees, as routed.
+- **kraken / coinbase**: the all-in cost on that venue alone. It shows `n/a` when a venue could not have filled a child by itself.
+- **gain**: the best single venue's cost minus the routed cost.
+
+Paper fills don't consume liquidity, so these comparisons cost nothing and are exactly simultaneous.
+
+**How fees are set.**
+- Fees are configured once, on the engine: `--venue kraken:fee_bps=40 --venue coinbase:fee_bps=60`.
+- The CLI reads them back from the engine and refuses to run if `--venues` doesn't match.
+- The demo scripts use illustrative entry-tier taker fees. Set your own tier with `KRAKEN_FEE_BPS=… COINBASE_FEE_BPS=…`.
+
+```bash
+PATH="$PWD/.venv/bin:$PATH" bash scripts/demo_compare.sh --side buy --qty 0.02 --duration 600 --slices 10
+```
+
+Two live runs on the same feeds at the same time (2026-09-26 01:21–01:30 UTC, BTC/USD, buy 0.02 BTC over 10 minutes). The first uses the demo fees:
+
+```
+kraken 40 bps, coinbase 60 bps
+algo            state          filled      avg px  slip bps  1-shot bps  saved bps  fee bps  all-in bps    kraken bps  coinbase bps  gain bps  fills
+twap            COMPLETED        0.02    83941.44     -1.03       -0.39       0.64    40.00       38.96         38.96         59.33      0.00     10
+vwap            COMPLETED        0.02    83941.60     -1.01       -0.39       0.62    40.00       38.98         38.98         59.34      0.00     10
+pov             COMPLETED        0.02    83946.80     -0.39       -0.39       0.00    40.00       39.60         39.60         60.37      0.00     13
+almgren_chriss  COMPLETED        0.02    83944.75     -0.64       -0.39       0.24    40.00       39.36         39.36         59.83      0.00     10
+```
+
+The second uses equal fees, to isolate the effect of price:
+
+```
+kraken 40 bps, coinbase 40 bps
+algo            state          filled      avg px  slip bps  1-shot bps  saved bps  fee bps  all-in bps    kraken bps  coinbase bps  gain bps  fills
+twap            COMPLETED        0.02    83940.52     -1.14       -0.39       0.75    40.00       38.85         38.96         39.23      0.11     10
+vwap            COMPLETED        0.02    83940.66     -1.12       -0.39       0.73    40.00       38.87         38.98         39.24      0.11     10
+pov             COMPLETED        0.02    83946.80     -0.39       -0.39       0.00    40.00       39.60         39.60         40.33      0.00      9
+almgren_chriss  COMPLETED        0.02    83943.54     -0.78       -0.39       0.39    40.00       39.21         39.36         39.69      0.14     10
+```
+
+**Reading this honestly:**
+- **Fees dominate.** With a 20 bps fee gap, every one of 43 fills went to Kraken. The router's answer was simply "use the cheaper venue", and the gain was zero. That is the correct answer, and it is the real lesson for small orders: your fee tier matters more than routing.
+- **Routing pays when fees are close.** With equal fees, 9 of 39 fills went to Coinbase whenever its price was better. That saved 0.11 to 0.14 bps against the best single venue. It is small because a 0.02 BTC slice rarely goes past the top level of either book; the gain grows with order size relative to displayed depth.
+- **Negative slippage is real, not a bug.** Kraken's ask sat about $1.20 below Coinbase's bid for the whole session. The reference mid spans both venues, so buying on the cheaper venue lands below it. The engine accepts a cross between venues like this, because fees make it unprofitable to trade. It rejects one that would still be an arbitrage after fees, and any venue whose own book is crossed.
+- **One run is one sample.** As with the algorithm comparison, these tables demonstrate the tooling. They are not evidence of a statistical edge.
+
 ## Security
 
 - **Paper trading is enforced.** `SLIPSTREAM_PAPER_MODE` must be `true`, and v0.1 contains no live order path.
 - **Loopback only.** The gRPC engine binds only to loopback addresses, and both sides validate the address.
 - **Untrusted input.** All exchange data is validated before use: types, finiteness, ranges, and size caps. Hostile JSON (deep nesting, oversized numbers, invalid UTF-8) is rejected cleanly and never crashes the parser.
+- **Venues are an allowlist** (`kraken`, `coinbase`), checked in the CLI, in the parsers, and at the engine's gRPC boundary. Market data connections go only to fixed public WebSocket URLs over TLS, with size caps. A venue whose book is stale or corrupt is excluded, or the step is skipped; the engine never guesses.
 - **Hardened C++.** It builds with `-Wall -Wextra -Wpedantic -Wshadow -Werror` and is tested under AddressSanitizer and UndefinedBehaviorSanitizer.
 - **Supply chain.** Python dependencies are pinned with sha256 hashes and audited with `pip-audit`.
 
 ## Roadmap
 
 - Batch statistics across recorded sessions (`record` + `compare --file`)
-- Second venue and smart routing across venues
 - Property-based and fuzz tests; Kraken book checksum verification
 - Backtest scenarios (e.g. flash-crash windows)
 - Release Docker image

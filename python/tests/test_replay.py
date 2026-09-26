@@ -174,3 +174,21 @@ def test_replay_skips_ohlc_header_and_calibration_reads_it(tmp_path: Path) -> No
 def test_bad_calibration_lines_raise(tmp_path: Path, line: str) -> None:
     with pytest.raises(ReplayError, match="line 1"):
         read_calibration(write_lines(tmp_path / "bad.jsonl", [line]))
+
+
+def test_replay_skips_venues_the_runner_does_not_trade(fake_engine: FakeEngine) -> None:
+    runner = ExecutionRunner(
+        fake_engine, OrderSpec("o-1", "buy", 1.0, 4, 4), "BTC/USD", logging.getLogger("t")
+    )
+    records = [(1, coinbase_snapshot(0), "coinbase"), (2, json.dumps(SNAPSHOT), "kraken")]
+    run_replay(runner, iter(records))
+    assert [book.venue for book in fake_engine.books] == ["kraken"]
+
+
+def test_skipped_records_still_count_for_timestamp_order(fake_engine: FakeEngine) -> None:
+    runner = ExecutionRunner(
+        fake_engine, OrderSpec("o-1", "buy", 1.0, 4, 4), "BTC/USD", logging.getLogger("t")
+    )
+    records = [(5, coinbase_snapshot(0), "coinbase"), (2, json.dumps(SNAPSHOT), "kraken")]
+    with pytest.raises(ReplayError, match="non-decreasing"):
+        run_replay(runner, iter(records))

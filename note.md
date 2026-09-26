@@ -7,10 +7,12 @@ Slipstream is an open-source smart order execution engine. Instead of sending on
 Large orders move the price against the trader (market impact). Institutions pay for execution algorithms and smart order routers to reduce this cost. Retail traders and small funds usually send one market order and absorb the slippage. Slipstream brings the same tools into the open, where they can be audited and measured.
 
 ## Architecture
-    Kraken WS (public) -> Python orchestrator --gRPC (loopback)--> C++ engine
-                          parse + validate                           order book
-                          drive clock                                TWAP schedule
-                          JSON logs + summary                        risk checks -> simulated fills
+    Kraken WS (public)   -+
+                          +-> Python orchestrator --gRPC (loopback)--> C++ engine
+    Coinbase WS (public) -+   parse + validate                           one book per venue
+                              drive clock                                schedules (TWAP/VWAP/POV/AC)
+                              JSON logs + summary                        smart router (price + fee)
+                                                                         risk checks -> simulated fills
 
 - The engine is deterministic. The caller supplies `now_ns`, so live runs, replays, and tests share one code path.
 - Risk checks live in C++ and run before every fill. Live mode, when added later, must pass the same gate.
@@ -25,11 +27,16 @@ Large orders move the price against the trader (market impact). Institutions pay
 | Ubuntu 24.04 dev container | No host C++ toolchain needed; identical environment locally and in CI |
 | Hash-pinned Python deps | Supply-chain protection |
 | Loopback-only gRPC | No network exposure without TLS and auth |
+| Route by all-in price (price + taker fee) inside the C++ engine | Fees often exceed slippage on crypto venues; routing inside the engine keeps one deterministic risk gate over the total position |
+| Fees configured once on the engine; Python reads them back from `GetStatus` | Two fee configs would drift; the CLI refuses to run when `--venues` differs from the engine's venues |
+| Coinbase parser mirrors the full book and sends a top-N view | Coinbase sends full-book deltas but the engine keeps only N levels, so deleted top levels could never be refilled |
+| Cross between venues is allowed within fees; a cross that survives fees, or a venue whose own book is crossed, skips the step | Live venues sit crossed by ~0.15 bps all day because fees make it unprofitable; only a post-fee arbitrage or a self-crossed book signals bad data |
 
 ## Known limitations (v1)
 - Paper fills do not consume book liquidity. Each fill assumes the displayed book is still there at the next step.
 - Prices and quantities are `double`. Fixed-point decimals are planned before any live trading.
-- The Kraken book checksum is not verified yet (planned for week 2).
+- The Kraken book checksum is not verified yet. With two venues, a corrupted book is caught only if it crosses itself or crosses the other venue by more than the fees.
+- `record` to a Windows path from WSL once captured only 2.7 s of a 15 s window: both feeds' first messages arrived about 12 s late. The cause is not our parsing (62 ms for the 5 MB Coinbase snapshot) and not DNS (20-60 ms); the suspect is a blocked filesystem write across WSL. Open item: time the connect, snapshot and write phases separately.
 - The slippage comparison includes market drift during the execution window. It illustrates one run; it does not prove an edge statistically.
 - If one of several orders submitted together is rejected by the engine, the orders accepted before it keep working in that engine process; the CLI exits with an error. The demo scripts start a fresh engine per run and stop it on exit. A cancel RPC is planned.
 
@@ -61,3 +68,10 @@ Large orders move the price against the trader (market impact). Institutions pay
 - Security review fix: the OHLC client refuses HTTP redirects, because urllib would otherwise follow an https-to-http downgrade.
 - Four-algorithm end-to-end test against the real engine: every fill matches a hand derivation, including VWAP weights across a 15-minute bucket boundary, POV volume timing, and Almgren-Chriss at κτ = 0.5.
 - First live comparison (20 min, 0.005 BTC): POV −1.77 bps, Almgren-Chriss −0.47, VWAP +8.31, TWAP +8.89. BTC drifted up during the window, which rewarded the schedules that traded early. Calibrated values: σ = 5.68 $/√s, which matches the 5.7 assumed in the spec, and η = 166. One run is not evidence of an edge; batch statistics come next.
+
+### 2026-09-25 — Week 2: smart routing across venues (PRs #10–#13)
+- Spec, plan, then three PRs. #11 (engine: per-venue books, staleness, fee-aware router, counterfactual per-venue costs) and #12 (Python: Coinbase parser, concurrent feeds, multi-venue record and replay) were built in parallel worktrees; PR 3 wires them together. Each task was followed by `/security-review` and `/caveman:caveman-review`.
+- Bug found while planning PR 3: the engine keeps only the top 10 levels per venue and truncates after every delta. Kraken refills that window itself, but Coinbase sends full-book deltas, so every deleted top level made the Coinbase book thinner. Fix: the parser mirrors the full book (bisect-sorted, capped at 200 000 levels per side) and sends a top-N snapshot on every message. It also fails safe on an update that arrives before any snapshot.
+- Bug found by the first live two-venue run: every order was rejected with "no market data". A recording showed Coinbase's bid sitting $1.24 above Kraken's ask in 43 of 43 book states, and the engine refused any crossed consolidated book. Root cause: the spec treated a cross between venues as stale data. Fix, test-first: a venue whose own book is crossed, or a cross that survives fees, still skips the step; a cross within fees is normal data. The failing recording now replays to a completed order.
+- End-to-end test through the real engine with hand-derived legs, including a case where the fee flips the choice (Kraken's 100030 beats Coinbase's cheaper-gross 100025 at 1 bps). Every number matched on the first run.
+- Live result (0.02 BTC over 10 minutes, two runs at the same time): with 40/60 bps fees, all 43 fills went to Kraken and the gain was 0. With equal 40/40 fees, 9 of 39 fills went to Coinbase, saving 0.11-0.14 bps against the best single venue. The fee tier matters more than routing for small orders. Calibrated η on the consolidated book was 19.4, against 166 on Kraken alone in the previous run. A deeper combined book should lower the estimated impact, but those runs were on different days, so this is one sample, not a measurement.
