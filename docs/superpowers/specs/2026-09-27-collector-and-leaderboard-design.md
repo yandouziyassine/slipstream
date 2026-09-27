@@ -53,7 +53,9 @@ SQLite in WAL mode. Every connection runs `PRAGMA foreign_keys=ON`. Migrations a
 
 | Table | Columns (main) |
 |---|---|
-| `runs` | `id`, `started_at`, `ended_at`, `status` (started/completed/failed/abandoned), `side`, `qty`, `duration_s`, `fees_json`, `venue_rules_json`, `git_commit`, `recording_path`, `recording_sha256`, `error`, `supersedes_id` |
+| `runs` | `id`, `started_at`, `ended_at`, `status` (started/completed/failed/abandoned), `side`, `qty`, `duration_s`, `fees_json`, `venue_rules_json`, `git_commit`, `error`, `supersedes_id` |
+| `recordings` | `run_id`, `path`, `sha256`, `recorded_at` |
+| `recording_deletions` | `run_id`, `deleted_at` (thinning is recorded as a deletion row, never by editing `recordings`) |
 | `results` | `run_id`, `algo`, `state`, `filled_qty`, `filled_pct`, `avg_price`, `arrival_mid`, `slippage_bps`, `fee_bps`, `all_in_bps`, `immediate_cost_bps`, `routing_gain_bps` (nullable), `venue_costs_json`, `fills_count`, `halt_reason` |
 | `fills` | `run_id`, `algo`, `venue`, `qty`, `price`, `fee`, `ts_ns` |
 | `engine_stats` | `run_id`, `latency_p50_ns`, `latency_p99_ns`, `events` |
@@ -63,7 +65,7 @@ SQLite in WAL mode. Every connection runs `PRAGMA foreign_keys=ON`. Migrations a
 - **A correction is a new run** with `supersedes_id` pointing at the old one.
 - **Every query uses parameters.**
 - **Backups:** after each run the collector writes an online backup (SQLite backup API) to `$DATA/backup/slipstream-<date>.db`, keeping 14 days. Oracle Object Storage is added in the VM phase.
-- **Thinning:** once a day, raw recordings older than 30 days are thinned, keeping one per UTC day (the 12:00 run). The DB row keeps its SHA-256 and gains `recording_path = NULL`, so the fact that it existed stays auditable.
+- **Thinning:** once a day, raw recordings older than 30 days are thinned, keeping one per UTC day (the 12:00 run). Each deleted file gets a `recording_deletions` row, and its `recordings` row with the SHA-256 is kept, so the fact that it existed stays auditable.
 
 ## 5. Site (`python -m slipstream.site`)
 
