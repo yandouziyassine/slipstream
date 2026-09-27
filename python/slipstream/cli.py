@@ -12,15 +12,17 @@ from pathlib import Path
 from typing import cast
 
 from slipstream.calibration import CalibrationData, CalibrationError
-from slipstream.config import ConfigError, load_settings
+from slipstream.config import ConfigError, load_settings, validate_engine_address
 from slipstream.engine_client import EngineClient, EngineError
+from slipstream.engine_stream import EngineChannel
 from slipstream.kraken_rest import fetch_ohlc, parse_ohlc
 from slipstream.live import LiveFeedError, run_live
 from slipstream.logging_setup import configure_logging
 from slipstream.models import VENUES, Fill, MarketDataError, OrderSpec, Venue
 from slipstream.recorder import RecordError, open_new_file, record_stream, write_ohlc_header
-from slipstream.replay import ReplayError, read_calibration, read_replay, run_replay
+from slipstream.replay import ReplayError, read_calibration, read_replay
 from slipstream.runner import ExecutionRunner, OrderRejectedError
+from slipstream.session import ReplaySession, check_clock_mode, clock_mode_mismatch
 from slipstream.v1 import execution_pb2 as pb
 from slipstream.venue_rules import VenueRules, VenueRulesError, fetch_venue_rules
 
@@ -357,21 +359,154 @@ def _print_result(
         print(format_summary(statuses[0]))
 
 
+_RUN_ERRORS = (
+    EngineError,
+    MarketDataError,
+    ReplayError,
+    OrderRejectedError,
+    LiveFeedError,
+    CalibrationError,
+    OSError,
+)
+
+
 def _print_best_effort(
-    args: argparse.Namespace, runner: ExecutionRunner | None, log: logging.Logger
+    args: argparse.Namespace, statuses: Sequence[pb.OrderStatus], fills: Sequence[Fill]
 ) -> None:
     """Best-effort summary/table after a failure that happened once an order might already be
-    working: show whatever the engine reports rather than nothing. If the status RPC itself
-    fails, just log it and give up."""
-    if runner is None:
-        return
-    try:
-        statuses = runner.order_statuses()
-    except EngineError as exc:
-        log.error(f"could not fetch final order status: {exc}")
-        return
+    working: show whatever the engine reports rather than nothing. Callers only log a failing
+    status RPC and skip this."""
     if statuses:
-        _print_result(args, statuses, runner.fills)
+        _print_result(args, statuses, fills)
+
+
+def _log_status_error(log: logging.Logger, exc: EngineError) -> None:
+    log.error(f"could not fetch final order status: {exc}")
+
+
+def _venues_mismatch(fees: dict[Venue, float], args: argparse.Namespace) -> str | None:
+    if set(fees) == set(args.venues):
+        return None
+    return (
+        f"engine venues {sorted(fees)} do not match --venues {sorted(args.venues)}; "
+        "start the engine with one --venue flag per venue"
+    )
+
+
+def _depth_mismatch(engine_depth: int, args: argparse.Namespace) -> str | None:
+    if args.command not in _DEPTH_CHECKED_COMMANDS or engine_depth <= args.depth:
+        return None
+    return (
+        f"engine book depth {engine_depth} exceeds --depth {args.depth}: levels "
+        "outside the subscribed depth would look like phantom liquidity"
+    )
+
+
+def _finish(
+    args: argparse.Namespace,
+    statuses: Sequence[pb.OrderStatus],
+    fills: Sequence[Fill],
+    log: logging.Logger,
+) -> int:
+    if not statuses:
+        log.error("order was never submitted (no order book snapshot received)")
+        return 1
+    _print_result(args, statuses, fills)
+    return 0
+
+
+async def _replay(
+    args: argparse.Namespace,
+    address: str,
+    specs: Sequence[OrderSpec],
+    calibration: CalibrationData | None,
+    log: logging.Logger,
+) -> int:
+    channel = EngineChannel(address)
+    session: ReplaySession | None = None
+    try:
+        await channel.wait_ready()
+        await check_clock_mode(channel, pb.CLOCK_MODE_REPLAY)
+        fees = await channel.venue_fees()
+        problem = _venues_mismatch(fees, args)
+        if problem is None and args.command in _DEPTH_CHECKED_COMMANDS:
+            problem = _depth_mismatch(await channel.book_depth(), args)
+        if problem is not None:
+            log.error(problem)
+            return 1
+        session = ReplaySession(
+            channel,
+            specs,
+            args.symbol,
+            log,
+            calibration,
+            venues=args.venues,
+            book_depth=getattr(args, "depth", 10),
+            fee_bps=fees,
+        )
+        result = await session.run(read_replay(args.file))
+        return _finish(args, result.statuses, result.fills, log)
+    except _RUN_ERRORS as exc:
+        log.error(str(exc))
+        if session is not None:
+            try:
+                statuses = await session.order_statuses()
+            except EngineError as status_exc:
+                _log_status_error(log, status_exc)
+            else:
+                _print_best_effort(args, statuses, session.fills)
+        return 1
+    finally:
+        await channel.close()
+
+
+def _live(
+    args: argparse.Namespace,
+    address: str,
+    specs: Sequence[OrderSpec],
+    calibration: CalibrationData | None,
+    log: logging.Logger,
+) -> int:
+    client = EngineClient(address)
+    runner: ExecutionRunner | None = None
+    try:
+        client.wait_ready()
+        problem = clock_mode_mismatch(client.status().clock_mode, pb.CLOCK_MODE_LIVE)
+        if problem is not None:
+            log.error(problem)
+            return 1
+        fees = client.venue_fees()
+        problem = _venues_mismatch(fees, args) or _depth_mismatch(client.book_depth(), args)
+        if problem is not None:
+            log.error(problem)
+            return 1
+        runner = ExecutionRunner(
+            client,
+            specs,
+            args.symbol,
+            log,
+            calibration,
+            venues=args.venues,
+            book_depth=args.depth,
+            fee_bps=fees,
+        )
+        deadline_s = args.duration + _DEADLINE_GRACE_S
+        asyncio.run(
+            run_live(runner, args.symbol, args.depth, deadline_s=deadline_s, venues=args.venues)
+        )
+        return _finish(args, runner.order_statuses(), runner.fills, log)
+    except _RUN_ERRORS as exc:
+        log.error(str(exc))
+        if runner is not None:
+            try:
+                statuses = runner.order_statuses()
+            except EngineError as status_exc:
+                _log_status_error(log, status_exc)
+            else:
+                _print_best_effort(args, statuses, runner.fills)
+        return 1
+    finally:
+        client.close()
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -385,66 +520,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         settings = load_settings()
         specs = _order_specs(args)
         calibration = _load_calibration(args, specs)
-        client = EngineClient(args.engine or settings.engine_address)
+        address = args.engine or settings.engine_address
+        validate_engine_address(address)
     except (ConfigError, CalibrationError, MarketDataError, ReplayError, OSError) as exc:
         log.error(str(exc))
         return 1
-    runner: ExecutionRunner | None = None
-    try:
-        client.wait_ready()
-        fees = client.venue_fees()
-        if set(fees) != set(args.venues):
-            log.error(
-                f"engine venues {sorted(fees)} do not match --venues {sorted(args.venues)}; "
-                "start the engine with one --venue flag per venue"
-            )
-            return 1
-        if args.command in _DEPTH_CHECKED_COMMANDS:
-            engine_depth = client.book_depth()
-            if engine_depth > args.depth:
-                log.error(
-                    f"engine book depth {engine_depth} exceeds --depth {args.depth}: levels "
-                    "outside the subscribed depth would look like phantom liquidity"
-                )
-                return 1
-        runner = ExecutionRunner(
-            client,
-            specs,
-            args.symbol,
-            log,
-            calibration,
-            venues=args.venues,
-            book_depth=getattr(args, "depth", 10),
-            fee_bps=fees,
-        )
-        replay_file = getattr(args, "file", None)
-        if replay_file is not None:
-            run_replay(runner, read_replay(replay_file))
-        else:
-            deadline_s = args.duration + _DEADLINE_GRACE_S
-            asyncio.run(
-                run_live(runner, args.symbol, args.depth, deadline_s=deadline_s, venues=args.venues)
-            )
-        statuses = runner.order_statuses()
-        if not statuses:
-            log.error("order was never submitted (no order book snapshot received)")
-            return 1
-        _print_result(args, statuses, runner.fills)
-        return 0
-    except (
-        EngineError,
-        MarketDataError,
-        ReplayError,
-        OrderRejectedError,
-        LiveFeedError,
-        CalibrationError,
-        OSError,
-    ) as exc:
-        log.error(str(exc))
-        _print_best_effort(args, runner, log)
-        return 1
-    finally:
-        client.close()
+    if getattr(args, "file", None) is not None:
+        return asyncio.run(_replay(args, address, specs, calibration, log))
+    return _live(args, address, specs, calibration, log)
 
 
 if __name__ == "__main__":
