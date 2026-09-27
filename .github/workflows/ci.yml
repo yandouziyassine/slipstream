@@ -28,4 +28,9 @@ jobs:
           python3 -m venv .venv
           .venv/bin/pip install --require-hashes -r python/requirements-dev.txt
       - name: Build, lint, test, audit
-        run: PATH="$PWD/.venv/bin:$PATH" bash scripts/ci.sh
+        # GitHub-hosted runners are shared, slower and noisier than a local dev machine: the
+        # local baseline run in bench/baseline.json already varies close to 2x between back-to-
+        # back runs, so a plain 2x gate would flake here. 3x keeps the gate meaningful for a real
+        # regression while giving CI the extra headroom local runs don't need.
+        run: |
+          PATH="$PWD/.venv/bin:$PATH" SLIPSTREAM_BENCH_TOLERANCE=3.0 bash scripts/ci.sh

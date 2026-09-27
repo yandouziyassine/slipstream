@@ -33,6 +33,14 @@ echo "== Python lint + types"
 echo "== Python tests (unit + integration)"
 (cd python && pytest -q)
 
+echo "== bench lint + types"
+ruff check --config python/pyproject.toml bench
+ruff format --check --config python/pyproject.toml bench
+MYPYPATH=python mypy --config-file python/pyproject.toml bench
+
+echo "== pipeline benchmark"
+bash scripts/bench_pipeline.sh
+
 echo "== dependency audit"
 pip-audit
 
