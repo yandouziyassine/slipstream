@@ -34,18 +34,22 @@ struct BookData {
     std::int64_t recv_ns;
 };
 
+// recv_ns 0 means the item carries no time of its own (always so in live mode).
 struct TradeData {
     std::vector<Trade> trades;
+    std::int64_t recv_ns;
 };
 
-struct HeartbeatData {};
+struct HeartbeatData {
+    std::int64_t recv_ns;
+};
 
 struct TickData {
     std::int64_t now_ns;
 };
 
 // venue is ignored for trades and ticks. In live mode push() overwrites ingest_ns with the
-// engine clock, so the caller's value only matters in replay mode, where it is not used.
+// engine clock and it is the item's time; replay mode ignores it and uses the item's own time.
 struct MarketItem {
     std::size_t venue;
     std::variant<BookData, TradeData, HeartbeatData, TickData> data;
@@ -130,9 +134,8 @@ public:
     template <class F>
     std::invoke_result_t<F&, Engine&, const LoopView&> inspect(F&& fn);
 
-    // Submits on the engine thread. Live mode replaces start_ns with the engine clock. While a
-    // subscriber is active, the order is stepped at once so its first slice executes at
-    // submission and the subscriber receives those events.
+    // Submits on the engine thread, then steps every order at once so the first slice executes at
+    // submission. Live mode replaces start_ns with the engine clock.
     SubmitResult submit_and_step(ParentOrderRequest request, ScheduleSpec spec);
 
     ClockMode mode() const { return mode_; }
@@ -168,7 +171,8 @@ private:
     void process(const Pending& pending);
     std::int64_t item_time(const MarketItem& item) const;
     void apply(const MarketItem& item);
-    void step_if_subscribed();
+    // Steps every order at the event time; the active subscriber, if any, receives the events.
+    void step_and_publish();
     void publish(Subscriber& subscriber, StepOutput output);
     LoopView view() const;
 

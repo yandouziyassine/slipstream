@@ -73,7 +73,7 @@ def market_event(
 ) -> pb.MarketEvent | None:
     """The engine event for one parsed message, or None when there is nothing to send."""
     if update is None:
-        return heartbeat_event(venue)
+        return heartbeat_event(venue, None)
     if update.symbol != symbol:
         raise MarketDataError(f"unexpected symbol {update.symbol[:32]!r}")
     if update.venue != venue:
@@ -83,7 +83,7 @@ def market_event(
     if update.is_snapshot:
         # Historical prints must not count as live volume.
         return None
-    return trade_event(update)
+    return trade_event(update, None)
 
 
 def run_feed(

@@ -279,7 +279,7 @@ TEST(StreamTest, SubscriberReceivesFillsAndTheTerminalUpdate) {
     const auto reply = harness.submit("o-1", kSec, kSec, 2);
     ASSERT_TRUE(reply.accepted()) << reply.reason();
 
-    // With a subscriber active, the first slice executes at submission, before any market event.
+    // The first slice executes at submission, before any market event.
     const auto first = subscription.next();
     ASSERT_TRUE(first);
     ASSERT_TRUE(first->has_fill());
@@ -369,16 +369,17 @@ TEST(StreamTest, SlowSubscriberIsDisconnectedWithResourceExhausted) {
         ASSERT_TRUE(stream.finish().ok());
     }
     ASSERT_TRUE(harness.eventually(booked(0)));
-    // Without a subscriber nothing steps, so all orders fill together at the next tick.
-    for (int i = 0; i < 50; ++i) {
-        ASSERT_TRUE(harness.submit("o-" + std::to_string(i), kSec, kSec, 1).accepted());
-    }
 
     Subscription subscription(harness.stub());
     subscription.wait_active();
+    // Each order fills its first half at submit; one tick then fills every second half and
+    // completes every order in a single burst of 100 events.
+    for (int i = 0; i < 50; ++i) {
+        ASSERT_TRUE(harness.submit("o-" + std::to_string(i), kSec, kSec, 2).accepted());
+    }
     {
         Stream stream(harness.stub(), std::nullopt);
-        stream.send(tick(kSec));
+        stream.send(tick(2 * kSec));
         ASSERT_TRUE(stream.finish().ok());
     }
     while (subscription.next()) {

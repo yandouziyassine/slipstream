@@ -96,7 +96,7 @@ SubmitResult EngineLoop::submit_and_step(ParentOrderRequest request, ScheduleSpe
         auto result = engine.submit(timed, spec);
         if (result.accepted) {
             event_time_ = std::max(event_time_, timed.start_ns);
-            step_if_subscribed();
+            step_and_publish();
         }
         return result;
     });
@@ -166,16 +166,18 @@ void EngineLoop::drain_commands() {
 void EngineLoop::process(const Pending& pending) {
     event_time_ = std::max(event_time_, item_time(pending.item));
     apply(pending.item);
-    step_if_subscribed();
+    step_and_publish();
     ++events_;
     latency_.record(steady_now_ns() - pending.ingest_steady_ns);
 }
 
+// A replay trade or heartbeat without a time (0) leaves the clock where it is.
 std::int64_t EngineLoop::item_time(const MarketItem& item) const {
     if (mode_ == ClockMode::Live) return item.ingest_ns;
     if (const auto* book = std::get_if<BookData>(&item.data)) return book->recv_ns;
-    if (const auto* tick = std::get_if<TickData>(&item.data)) return tick->now_ns;
-    return event_time_;  // replay heartbeats and trades carry no time
+    if (const auto* trades = std::get_if<TradeData>(&item.data)) return trades->recv_ns;
+    if (const auto* heartbeat = std::get_if<HeartbeatData>(&item.data)) return heartbeat->recv_ns;
+    return std::get<TickData>(item.data).now_ns;
 }
 
 void EngineLoop::apply(const MarketItem& item) {
@@ -193,15 +195,14 @@ void EngineLoop::apply(const MarketItem& item) {
     }
 }
 
-// Until PR 3 removes the unary Step RPC, a client without a subscription steps orders itself
-// and reads the fills from StepReply, so the loop must not step (and consume) them first.
-void EngineLoop::step_if_subscribed() {
+void EngineLoop::step_and_publish() {
+    auto output = engine_.step(event_time_);
     std::shared_ptr<Subscriber> subscriber;
     {
         std::lock_guard lock(subscriber_mutex_);
         subscriber = subscriber_;
     }
-    if (subscriber) publish(*subscriber, engine_.step(event_time_));
+    if (subscriber) publish(*subscriber, std::move(output));
 }
 
 void EngineLoop::publish(Subscriber& subscriber, StepOutput output) {

@@ -46,10 +46,17 @@ service ExecutionEngine {
   rpc Subscribe(SubscribeRequest) returns (stream EngineEvent);
   rpc SubmitParentOrder(ParentOrder) returns (SubmitReply);   // unchanged; start_ns ignored in live mode
   rpc GetStatus(StatusRequest) returns (StatusReply);         // + venue freshness, books, engine stats
-  // Temporary, removed in PR 3: ApplyBookUpdate, ApplyTrades, Step.
+  // Removed in PR 3 (chore/pipeline-cleanup): ApplyBookUpdate, ApplyTrades, Step. Their field
+  // numbers and RPC/message names stay reserved.
 }
 
-message Heartbeat {}
+message Heartbeat {
+  // Live mode: empty or the stream's own venue. Replay mode: empty only with a single venue,
+  // otherwise it must name a registered venue.
+  string venue = 1;
+  // Replay mode: receive time, which advances the clock when set. Live mode: must be 0.
+  int64 recv_ns = 2;
+}
 message Tick { int64 now_ns = 1; }                 // replay mode only: advances time
 message MarketEvent {
   oneof event { BookUpdate book = 1; TradeBatch trades = 2; Heartbeat heartbeat = 3; Tick tick = 4; }
@@ -68,6 +75,8 @@ message EngineEvent {
   oneof event { Fill fill = 2; OrderUpdate order = 3; }
 }
 ```
+
+`TradeBatch` (unchanged otherwise) gains a `recv_ns` field with the same meaning as `BookUpdate.recv_ns`: replay receive time, which advances the clock when set; must be 0 in live mode.
 
 `StatusReply` gains the following fields:
 - `repeated VenueBook books`: each venue's top-N levels, used for calibration before submit.

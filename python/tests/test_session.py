@@ -9,12 +9,23 @@ from typing import Any
 
 import pytest
 
-from slipstream.engine_client import EngineError
-from slipstream.engine_stream import EngineChannel, Subscription
-from slipstream.models import MarketDataError, OrderSpec, Venue
+from slipstream.book import LocalBook
+from slipstream.calibration import CalibrationData, CalibrationError
+from slipstream.engine_stream import EngineChannel, EngineError, Subscription
+from slipstream.kraken_rest import Bar
+from slipstream.models import (
+    BookUpdate,
+    MarketDataError,
+    OrderSpec,
+    PovParams,
+    ScheduleParams,
+    TwapParams,
+    Venue,
+)
 from slipstream.replay import ReplayError, read_replay
-from slipstream.runner import OrderRejectedError
 from slipstream.session import (
+    OrderRejectedError,
+    ReplaySession,
     SessionResult,
     check_clock_mode,
     clock_mode_mismatch,
@@ -252,8 +263,6 @@ class _FailingCloseWriter:
 
 
 def _bare_replay_session() -> Any:
-    from slipstream.session import ReplaySession
-
     session = ReplaySession.__new__(ReplaySession)
     session._log = logging.getLogger("test")
     return session
@@ -269,3 +278,316 @@ def test_an_engine_side_failure_is_replaced_by_the_stream_rejection() -> None:
     cause = EngineError("timed out waiting for the engine to catch up")
     with pytest.raises(EngineError, match="market stream failed"):
         asyncio.run(_bare_replay_session()._abandon(_FailingCloseWriter(), cause))
+
+
+# Unit tests of the replay mapping: which engine events each record becomes, and when and how
+# the orders are submitted. They need no engine: the channel only records submits.
+
+
+class _RecordingChannel:
+    def __init__(self, reject_ids: frozenset[str] = frozenset()) -> None:
+        self.submits: list[tuple[OrderSpec, int, ScheduleParams | None]] = []
+        self._reject_ids = reject_ids
+
+    async def submit(
+        self, spec: OrderSpec, start_ns: int, params: ScheduleParams | None = None
+    ) -> tuple[bool, str]:
+        self.submits.append((spec, start_ns, params))
+        if spec.order_id in self._reject_ids:
+            return False, "position limit exceeded"
+        return True, ""
+
+
+_SPEC = OrderSpec("o-1", "buy", 1.0, 4, 4)
+_HEARTBEAT = json.dumps({"channel": "heartbeat"})
+
+
+def _kraken_snapshot(symbol: str = "BTC/USD") -> str:
+    return json.dumps(
+        {
+            "channel": "book",
+            "type": "snapshot",
+            "data": [
+                {
+                    "symbol": symbol,
+                    "bids": [{"price": 99.0, "qty": 1.0}],
+                    "asks": [{"price": 101.0, "qty": 1.0}],
+                }
+            ],
+        }
+    )
+
+
+def _kraken_delta() -> str:
+    return json.dumps(
+        {
+            "channel": "book",
+            "type": "update",
+            "data": [{"symbol": "BTC/USD", "bids": [], "asks": [{"price": 100.5, "qty": 2.0}]}],
+        }
+    )
+
+
+def _kraken_trade(msg_type: str = "update", symbol: str = "BTC/USD") -> str:
+    return json.dumps(
+        {
+            "channel": "trade",
+            "type": msg_type,
+            "data": [{"symbol": symbol, "price": 100.0, "qty": 1.0}],
+        }
+    )
+
+
+def _coinbase_snapshot() -> str:
+    return json.dumps(
+        {
+            "channel": "l2_data",
+            "sequence_num": 0,
+            "events": [
+                {
+                    "type": "snapshot",
+                    "product_id": "BTC-USD",
+                    "updates": [
+                        {"side": "bid", "price_level": "99", "new_quantity": "1"},
+                        {"side": "offer", "price_level": "101", "new_quantity": "1"},
+                    ],
+                }
+            ],
+        }
+    )
+
+
+def _session(
+    channel: _RecordingChannel,
+    specs: Sequence[OrderSpec] = (_SPEC,),
+    venues: Sequence[Venue] = ("kraken",),
+    calibration: CalibrationData | None = None,
+    fee_bps: dict[Venue, float] | None = None,
+) -> ReplaySession:
+    return ReplaySession(
+        channel,  # type: ignore[arg-type]
+        specs,
+        "BTC/USD",
+        logging.getLogger("test"),
+        calibration,
+        venues,
+        fee_bps=fee_bps,
+    )
+
+
+def _kinds(events: Sequence[pb.MarketEvent]) -> list[str | None]:
+    return [event.WhichOneof("event") for event in events]
+
+
+def _submitted(session: ReplaySession, now_ns: int = 100) -> ReplaySession:
+    _, due = session._events(_kraken_snapshot(), now_ns, "kraken")
+    assert due
+    asyncio.run(session._submit_all(now_ns))
+    return session
+
+
+def test_a_book_record_becomes_a_book_event_at_its_receive_time() -> None:
+    events, due = _session(_RecordingChannel())._events(_kraken_snapshot(), 1234, "kraken")
+    assert _kinds(events) == ["book"]
+    assert events[0].book.recv_ns == 1234
+    assert events[0].book.venue == "kraken"
+    assert due
+
+
+def test_orders_wait_for_a_snapshot_from_every_venue_while_trades_flow() -> None:
+    session = _session(_RecordingChannel(), venues=("kraken", "coinbase"))
+    _, due = session._events(_kraken_snapshot(), 100, "kraken")
+    assert not due
+    events, due = session._events(_kraken_trade(), 150, "kraken")
+    assert _kinds(events) == ["trades"]
+    assert (events[0].trades.venue, events[0].trades.recv_ns) == ("kraken", 150)
+    assert not due
+    events, due = session._events(_coinbase_snapshot(), 300, "coinbase")
+    assert [event.book.venue for event in events] == ["coinbase"]
+    assert due
+
+
+def test_trade_snapshots_are_history_and_never_forwarded() -> None:
+    session = _session(_RecordingChannel())
+    events, _ = session._events(_kraken_trade("snapshot"), 1, "kraken")
+    assert events == []
+
+
+def test_another_symbol_is_market_data_error() -> None:
+    session = _session(_RecordingChannel())
+    with pytest.raises(MarketDataError, match="symbol"):
+        session._events(_kraken_trade(symbol="ETH/USD"), 1, "kraken")
+    with pytest.raises(MarketDataError, match="symbol"):
+        session._events(_kraken_snapshot("ETH/USD"), 1, "kraken")
+
+
+def test_submits_every_spec_with_calibrated_params_at_the_snapshot_time() -> None:
+    channel = _RecordingChannel()
+    specs = [
+        OrderSpec("a", "buy", 1.0, 4, 4),
+        OrderSpec("b", "buy", 1.0, 4, 4, algo="pov", participation=0.3),
+    ]
+    _submitted(_session(channel, specs))
+    assert [(s.order_id, start, p) for s, start, p in channel.submits] == [
+        ("a", 100, TwapParams()),
+        ("b", 100, PovParams(0.3)),
+    ]
+
+
+def test_calibrated_algo_without_data_fails_before_submitting() -> None:
+    channel = _RecordingChannel()
+    session = _session(channel, [OrderSpec("v", "buy", 1.0, 4, 4, algo="vwap")])
+    with pytest.raises(CalibrationError):
+        _submitted(session)
+    assert channel.submits == []
+
+
+def _bars_1m(count: int) -> tuple[Bar, ...]:
+    return tuple(
+        Bar(
+            time_s=i * 60,
+            open=100.0,
+            high=100.5,
+            low=99.5,
+            close=100.0 + (0.05 if i % 2 == 0 else -0.05) + 0.01 * i,
+            vwap=100.0,
+            volume=1.0,
+            count=1,
+        )
+        for i in range(count)
+    )
+
+
+def _bars_15m(count: int) -> tuple[Bar, ...]:
+    return tuple(
+        Bar(
+            time_s=i * 900,
+            open=100.0,
+            high=101.0,
+            low=99.0,
+            close=100.0,
+            vwap=100.0,
+            volume=10.0,
+            count=5,
+        )
+        for i in range(count)
+    )
+
+
+def test_calibrates_every_spec_before_submitting_any() -> None:
+    channel = _RecordingChannel()
+    specs = [
+        OrderSpec("t", "buy", 1.0, 4, 4, algo="twap"),
+        OrderSpec("ac", "buy", 1.0, 4, 4, algo="almgren_chriss"),
+    ]
+    session = _session(channel, specs, calibration=CalibrationData(_bars_15m(4), _bars_1m(61)))
+    # The snapshot has only one ask level, too thin to calibrate Almgren-Chriss impact.
+    with pytest.raises(CalibrationError):
+        _submitted(session)
+    assert channel.submits == []
+
+
+def test_a_rejection_leaves_earlier_orders_submitted() -> None:
+    # Documented limitation: "a" was accepted before "b" was rejected, and stays working.
+    channel = _RecordingChannel(reject_ids=frozenset({"b"}))
+    specs = [OrderSpec("a", "buy", 1.0, 4, 4), OrderSpec("b", "buy", 1.0, 4, 4)]
+    with pytest.raises(OrderRejectedError, match="order b rejected: position limit"):
+        _submitted(_session(channel, specs))
+    assert [s.order_id for s, _, _ in channel.submits] == ["a", "b"]
+
+
+def _spy_schedule_params(monkeypatch: pytest.MonkeyPatch) -> list[BookUpdate]:
+    seen: list[BookUpdate] = []
+
+    def spy(
+        spec: OrderSpec, book: BookUpdate, start_ns: int, data: CalibrationData | None
+    ) -> ScheduleParams:
+        seen.append(book)
+        return TwapParams()
+
+    monkeypatch.setattr("slipstream.session.schedule_params", spy)
+    return seen
+
+
+def test_calibration_uses_the_consolidated_fee_adjusted_book(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen = _spy_schedule_params(monkeypatch)
+    session = _session(
+        _RecordingChannel(),
+        venues=("kraken", "coinbase"),
+        fee_bps={"kraken": 0.0, "coinbase": 100.0},
+    )
+    session._events(_kraken_snapshot(), 100, "kraken")
+    _, due = session._events(_coinbase_snapshot(), 200, "coinbase")
+    assert due
+    asyncio.run(session._submit_all(200))
+    (book,) = seen
+    # pytest.approx() does not support nesting past one level, so the per-price tolerance is
+    # applied by hand instead of wrapping the whole tuple of tuples.
+    assert book.asks == ((pytest.approx(101.0), 1.0), (pytest.approx(102.01), 1.0))
+    assert book.bids == ((pytest.approx(99.0), 1.0), (pytest.approx(98.01), 1.0))
+
+
+def test_calibration_book_includes_deltas_since_the_first_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen = _spy_schedule_params(monkeypatch)
+    session = _session(_RecordingChannel(), venues=("kraken", "coinbase"))
+    session._events(_kraken_snapshot(), 100, "kraken")
+    session._events(_kraken_delta(), 150, "kraken")
+    session._events(_coinbase_snapshot(), 200, "coinbase")
+    asyncio.run(session._submit_all(200))
+    (book,) = seen
+    assert book.asks == ((100.5, 2.0), (101.0, 1.0), (101.0, 1.0))
+
+
+def test_local_books_stop_updating_after_submission(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = 0
+    original = LocalBook.apply
+
+    def spy_apply(self: LocalBook, update: BookUpdate) -> None:
+        nonlocal calls
+        calls += 1
+        original(self, update)
+
+    monkeypatch.setattr(LocalBook, "apply", spy_apply)
+    session = _submitted(_session(_RecordingChannel()))
+    assert calls == 1
+    events, due = session._events(_kraken_delta(), 200, "kraken")
+    assert calls == 1  # the engine still receives the delta
+    assert _kinds(events) == ["book"]
+    assert not due
+
+
+def test_heartbeats_go_to_the_engine_with_their_venue_and_time() -> None:
+    # The engine itself bounds how long heartbeats keep a quiet venue fresh.
+    session = _session(_RecordingChannel(), venues=("kraken", "coinbase"))
+    for now_ns in (50, 100 + 31 * _SEC):
+        events, due = session._events(_HEARTBEAT, now_ns, "kraken")
+        assert _kinds(events) == ["heartbeat"]
+        assert (events[0].heartbeat.venue, events[0].heartbeat.recv_ns) == ("kraken", now_ns)
+        assert not due
+
+
+def test_a_trade_after_submit_is_one_event_at_its_own_time() -> None:
+    session = _submitted(_session(_RecordingChannel()))
+    events, _ = session._events(_kraken_trade(), 200, "kraken")
+    assert _kinds(events) == ["trades"]
+    assert events[0].trades.recv_ns == 200
+    # Historical prints only move time forward once orders are working.
+    events, _ = session._events(_kraken_trade("snapshot"), 300, "kraken")
+    assert _kinds(events) == ["tick"]
+    assert events[0].tick.now_ns == 300
+
+
+def test_fill_log_carries_venue_and_fee(caplog: pytest.LogCaptureFixture) -> None:
+    session = _session(_RecordingChannel())
+    with caplog.at_level(logging.INFO):
+        session._record_fill(
+            pb.Fill(order_id="o-1", ts_ns=5, qty=0.25, price=101.0, venue="coinbase", fee=0.02)
+        )
+    fields = [r.fields for r in caplog.records if getattr(r, "fields", {}).get("event") == "fill"]
+    assert fields[0]["venue"] == "coinbase"
+    assert fields[0]["fee"] == 0.02
+    assert [(f.venue, f.fee) for f in session.fills] == [("coinbase", 0.02)]

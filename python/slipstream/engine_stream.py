@@ -10,25 +10,79 @@ import grpc
 import grpc.aio
 
 from slipstream.config import validate_engine_address
-from slipstream.engine_client import (
-    EngineError,
-    book_update_to_proto,
-    order_to_proto,
-    trade_batch_to_proto,
+from slipstream.models import (
+    VENUES,
+    AlmgrenChrissParams,
+    BookUpdate,
+    OrderSpec,
+    PovParams,
+    ScheduleParams,
+    TradeBatch,
+    Venue,
+    VwapParams,
 )
-from slipstream.models import VENUES, BookUpdate, OrderSpec, ScheduleParams, TradeBatch, Venue
 from slipstream.v1 import execution_pb2 as pb
 from slipstream.v1 import execution_pb2_grpc as pb_grpc
 
 _log = logging.getLogger(__name__)
 
+_NS_PER_S = 1_000_000_000
+_SIDES = {"buy": pb.SIDE_BUY, "sell": pb.SIDE_SELL}
 _MARKET_QUEUE_CAPACITY = 1000
 _VENUE_METADATA_KEY = "slipstream-venue"
 _SUBSCRIBED_METADATA_KEY = "slipstream-subscribed"
 
 
+class EngineError(RuntimeError):
+    pass
+
+
 class EngineBackpressureError(EngineError):
     pass
+
+
+def book_update_to_proto(update: BookUpdate, recv_ns: int) -> pb.BookUpdate:
+    return pb.BookUpdate(
+        symbol=update.symbol,
+        is_snapshot=update.is_snapshot,
+        bids=[pb.PriceLevel(price=price, qty=qty) for price, qty in update.bids],
+        asks=[pb.PriceLevel(price=price, qty=qty) for price, qty in update.asks],
+        venue=update.venue,
+        recv_ns=recv_ns,
+    )
+
+
+def order_to_proto(
+    spec: OrderSpec, start_ns: int, params: ScheduleParams | None = None
+) -> pb.ParentOrder:
+    order = pb.ParentOrder(
+        order_id=spec.order_id,
+        side=_SIDES[spec.side],
+        qty=spec.qty,
+        start_ns=start_ns,
+        duration_ns=spec.duration_s * _NS_PER_S,
+        num_slices=spec.num_slices,
+    )
+    if isinstance(params, VwapParams):
+        order.vwap.weights.extend(params.weights)
+    elif isinstance(params, AlmgrenChrissParams):
+        order.almgren_chriss.sigma = params.sigma
+        order.almgren_chriss.eta = params.eta
+        order.almgren_chriss.risk_aversion = params.risk_aversion
+    elif isinstance(params, PovParams):
+        order.pov.participation = params.participation
+    else:
+        order.twap.SetInParent()
+    return order
+
+
+def trade_batch_to_proto(batch: TradeBatch, recv_ns: int) -> pb.TradeBatch:
+    return pb.TradeBatch(
+        symbol=batch.symbol,
+        trades=[pb.Trade(price=price, qty=qty) for price, qty in batch.trades],
+        venue=batch.venue,
+        recv_ns=recv_ns,
+    )
 
 
 def _rpc_error(action: str, exc: grpc.aio.AioRpcError) -> EngineError:
@@ -39,16 +93,14 @@ def book_event(update: BookUpdate, recv_ns: int | None) -> pb.MarketEvent:
     return pb.MarketEvent(book=book_update_to_proto(update, 0 if recv_ns is None else recv_ns))
 
 
-def trade_event(batch: TradeBatch) -> pb.MarketEvent:
-    return pb.MarketEvent(trades=trade_batch_to_proto(batch))
+def trade_event(batch: TradeBatch, recv_ns: int | None) -> pb.MarketEvent:
+    return pb.MarketEvent(trades=trade_batch_to_proto(batch, 0 if recv_ns is None else recv_ns))
 
 
-def heartbeat_event(venue: Venue | None) -> pb.MarketEvent:
-    # Heartbeat carries no fields: live mode binds it to the stream's own venue, and replay
-    # mode accepts it only for a single-venue engine. venue is accepted for API symmetry with
-    # the other converters and to make the caller's intent explicit at the call site.
-    _ = venue
-    return pb.MarketEvent(heartbeat=pb.Heartbeat())
+def heartbeat_event(venue: Venue, recv_ns: int | None) -> pb.MarketEvent:
+    return pb.MarketEvent(
+        heartbeat=pb.Heartbeat(venue=venue, recv_ns=0 if recv_ns is None else recv_ns)
+    )
 
 
 def tick_event(now_ns: int) -> pb.MarketEvent:
@@ -158,6 +210,18 @@ class MarketStreamWriter:
         except asyncio.QueueFull as exc:
             raise EngineBackpressureError("market stream queue is full") from exc
 
+    async def drain(self) -> None:
+        """Waits until every queued event has been written to the engine, not just dequeued."""
+        joined = asyncio.ensure_future(self._queue.join())
+        try:
+            await asyncio.wait({joined, self._task}, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            joined.cancel()
+        if self._error is not None:
+            raise self._error
+        if self._task.done() and not joined.done():
+            raise EngineError("market stream stopped before its queue drained")
+
     async def close(self) -> int:
         if self._closed:
             raise EngineError("market stream is closed")
@@ -191,16 +255,21 @@ class MarketStreamWriter:
     async def _drain_until_closed_or_error(self) -> EngineError | None:
         while True:
             event = await self._queue.get()
-            if event is None:
-                return None
             try:
-                await self._call.write(event)
-            except grpc.aio.AioRpcError as exc:
-                return _rpc_error("market stream", exc)
+                if event is None:
+                    return None
+                try:
+                    await self._call.write(event)
+                except grpc.aio.AioRpcError as exc:
+                    return _rpc_error("market stream", exc)
+            finally:
+                # Marked done only after the write, so drain() means "written", not "dequeued".
+                self._queue.task_done()
 
     async def _discard_until_closed(self) -> None:
         while True:
             event = await self._queue.get()
+            self._queue.task_done()
             if event is None:
                 return
 

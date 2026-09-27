@@ -9,13 +9,14 @@ from dataclasses import dataclass
 from slipstream.book import LocalBook, consolidated_book
 from slipstream.calibration import CalibrationData, schedule_params
 from slipstream.coinbase import CoinbaseStream
-from slipstream.engine_client import EngineError
 from slipstream.engine_stream import (
     EngineBackpressureError,
     EngineChannel,
+    EngineError,
     MarketStreamWriter,
     Subscription,
     book_event,
+    heartbeat_event,
     tick_event,
     trade_event,
 )
@@ -32,7 +33,6 @@ from slipstream.models import (
     Venue,
 )
 from slipstream.replay import ReplayError
-from slipstream.runner import MAX_QUIET_BOOK_NS, OrderRejectedError
 from slipstream.v1 import execution_pb2 as pb
 from slipstream.venue_ws import IDLE_TIMEOUT_S
 
@@ -55,6 +55,10 @@ _BOOK_TIMEOUT_S = 45.0
 DEADLINE_GRACE_S = 60
 
 _Parser = Callable[[str | bytes], BookUpdate | TradeBatch | None]
+
+
+class OrderRejectedError(RuntimeError):
+    pass
 
 
 def clock_mode_mismatch(actual: int, expected: int) -> str | None:
@@ -118,7 +122,6 @@ class ReplaySession:
         if "coinbase" in self._venues:
             self._parsers["coinbase"] = CoinbaseStream(symbol, book_depth).parse
         self._snapshot_venues: set[Venue] = set()
-        self._last_book_ns: dict[Venue, int] = {}
         self._submitted = False
         self._start_ns = 0
         self._engine_ns = 0
@@ -188,49 +191,38 @@ class ReplaySession:
         if self._submitted and not self._done():
             deadline = max(self._start_ns + spec.duration_s * _NS_PER_S for spec in self._specs)
             while self._engine_ns < deadline:
-                next_ns = min(deadline, self._engine_ns + _MAX_TICK_JUMP_NS)
-                await self._send(writer, self._tick(next_ns))
+                self._engine_ns = min(deadline, self._engine_ns + _MAX_TICK_JUMP_NS)
+                await self._send(writer, tick_event(self._engine_ns))
 
     def _events(self, raw: str, recv_ns: int, venue: Venue) -> tuple[list[pb.MarketEvent], bool]:
         """The engine events for one record, and whether the orders are due after them.
 
-        Once orders are working, every record yields exactly one engine step at its recv_ns,
-        as the unary runner did, except a trade record that also moves time forward (two).
+        Every event carries the record's recv_ns, so each record steps the orders once, then.
         """
+        events, due = self._record_events(raw, recv_ns, venue)
+        if events:
+            self._engine_ns = max(self._engine_ns, recv_ns)
+        return events, due
+
+    def _record_events(
+        self, raw: str, recv_ns: int, venue: Venue
+    ) -> tuple[list[pb.MarketEvent], bool]:
         update = self._parsers[venue](raw)
         if isinstance(update, BookUpdate):
             self._check_symbol(update.symbol)
-            self._last_book_ns[venue] = recv_ns
             if self._submitted:
-                return [self._book(update, recv_ns)], False
+                return [book_event(update, recv_ns)], False
             self._books[venue].apply(update)
             if update.is_snapshot:
                 self._snapshot_venues.add(venue)
-            return [self._book(update, recv_ns)], self._snapshot_venues >= self._venues
+            return [book_event(update, recv_ns)], self._snapshot_venues >= self._venues
         if isinstance(update, TradeBatch):
             self._check_symbol(update.symbol)
-            if update.is_snapshot:
-                return ([self._tick(recv_ns)] if self._submitted else []), False
-            # Trades carry no time, so the engine steps them at its current time. Move that time
-            # to this record first, so orders see these trades at this record's time.
-            if self._submitted and recv_ns > self._engine_ns:
-                return [self._tick(recv_ns), trade_event(update)], False
-            return [trade_event(update)], False
-        if not self._submitted:
-            return [], False
-        if recv_ns - self._last_book_ns.get(venue, recv_ns) <= MAX_QUIET_BOOK_NS:
-            # A heartbeat means this venue's book is unchanged, not stale: an empty delta
-            # refreshes the engine's freshness clock without touching any level.
-            return [self._book(BookUpdate(self._symbol, False, (), (), venue), recv_ns)], False
-        return [self._tick(recv_ns)], False
-
-    def _book(self, update: BookUpdate, recv_ns: int) -> pb.MarketEvent:
-        self._engine_ns = max(self._engine_ns, recv_ns)
-        return book_event(update, recv_ns)
-
-    def _tick(self, now_ns: int) -> pb.MarketEvent:
-        self._engine_ns = max(self._engine_ns, now_ns)
-        return tick_event(now_ns)
+            if not update.is_snapshot:
+                return [trade_event(update, recv_ns)], False
+            # Historical prints are not live volume; once orders work, only time moves on.
+            return ([tick_event(recv_ns)] if self._submitted else []), False
+        return [heartbeat_event(venue, recv_ns)], False
 
     def _check_symbol(self, symbol: str) -> None:
         if symbol != self._symbol:
@@ -444,8 +436,8 @@ class LiveSession:
         deadline_grace_s: float = DEADLINE_GRACE_S,
     ) -> SessionResult:
         await check_clock_mode(self._channel, pb.CLOCK_MODE_LIVE)
-        # Open the subscription before any feed starts: the engine only steps orders while
-        # subscribed, so a submit before this would never see a fill or a terminal update.
+        # Open the subscription before any submit: the engine delivers fills and order updates
+        # only to an active subscriber, so events from before it opens are never seen.
         subscription = await asyncio.wait_for(
             Subscription.open(self._channel), timeout=_SUBSCRIBE_TIMEOUT_S
         )

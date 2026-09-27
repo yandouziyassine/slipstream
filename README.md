@@ -11,13 +11,27 @@ A large market order moves the price against the trader who sends it (market imp
 ## How it works
 
 ```
-Kraken WS v2 (public) ───┐
-                         ├─► Python orchestrator ──gRPC (loopback)──► C++20 engine
-Coinbase WS (public) ────┘   validate + parse                         one book per venue
-                             drive the clock                          schedule (TWAP/VWAP/POV/AC)
-                             JSON logs + summary                      smart router (price + fee)
-                                                                      risk gate ──► simulated fills
+Kraken WS v2 (public) ──► feed process ──┐
+                                          │  MarketStream (gRPC, loopback)
+Coinbase WS (public) ───► feed process ──┘  (one per venue)
+                          validate + parse
+                                             ▼
+                               single-writer engine loop
+                               one book per venue
+                               schedule (TWAP/VWAP/POV/AC)
+                               smart router (price + fee)
+                               risk gate ──► simulated fills
+                                             │
+                                             │  Subscribe (fills + order updates)
+      main process  ◄────────────────────────┘
+      JSON logs + summary
 ```
+
+Each venue's WebSocket feed runs in its own OS process, so a slow Coinbase snapshot never delays a Kraken price. Each feed process opens one long-lived `MarketStream` to the engine; a single engine thread reads every venue's stream plus one `Subscribe` stream carrying fills and order updates back to the main process, so all state (books, orders, risk) is touched by exactly one thread with no locking on the hot path.
+
+**Clock modes** (`--clock live|replay`, engine flag):
+- `live` (the default): the engine stamps every event with its own clock and ignores any client-supplied time, so a client cannot spoof it. A 50 ms timer also ticks the engine when the market is quiet, so schedules still advance.
+- `replay`: the caller's `recv_ns` on each event drives the clock; time must never go backwards and there is no timer. This is what tests and the benchmark use, so results are exact and reproducible.
 
 - **Smart order routing across venues.** Each child slice is split across Kraken and Coinbase by all-in price, meaning price plus that venue's taker fee. At the same moment the engine also prices the same quantity on each venue alone, so every run reports what routing actually saved.
 
@@ -186,10 +200,23 @@ Paper results are only useful if a real exchange would have accepted every fill:
 - **Risk on what is actually paid.** Each fill is routed first. The order's spending limit is then checked on the real cost, meaning the price walked through the book plus fees, before anything is committed.
 - **Price collar.** A fill may never use a price more than 0.5% (50 bps) from the market mid. `--max-deviation-bps` changes it.
 - **Every algorithm ends.** TWAP, VWAP, POV and Almgren-Chriss all stop at their deadline, with a reason. The table shows `filled %`, and `saved` shows `n/a` when an order or the one-shot benchmark was only partly filled, because those numbers would not be like for like. If a run fails part-way, the CLI still prints what was filled.
-- **Fast by default.** The demos run an optimised release build of the engine; CI keeps the sanitizer build. The CLI no longer asks the engine for status after every message. Measured over loopback:
-  - about 0.25–0.3 ms per engine call;
-  - about 0.86 ms per market message with the release build, versus 1.28 ms with the debug build;
-  - Phase 2 replaces the per-message calls with one stream per exchange.
+- **Fast by default.** The demos run an optimised release build of the engine; CI keeps the sanitizer build. Market data now flows over one stream per venue instead of per-message calls; see [Performance](#performance) for measured latency.
+
+## Performance
+
+`bash scripts/bench_pipeline.sh` builds the release engine and replays a deterministic synthetic stream of 50,000 events (book deltas and trades on two venues) against it in `--clock replay` mode, driving a POV order that keeps filling. It reports client-side send-to-fill latency and reads the engine's own ingest-to-processed latency from `GetStatus`. CI runs it after the Python tests and fails if p50 regresses more than 2x (3x on GitHub's shared runners) against the committed `bench/baseline.json`.
+
+| | before (Phase 1, per unary message) | after (concurrent pipeline, per event) |
+|---|---|---|
+| debug + ASan | 1.28 ms | — |
+| release | 0.86 ms → ~0.55 ms (removed the per-message status call) | see below |
+| client p50 / p99 / p99.9 | n/a (unary, not sampled this way) | 340 µs / 0.93 ms / 3.0 ms |
+| engine-side p50 / p99 (`stats`) | n/a | 33 µs / 131 µs |
+| events/s in the benchmark | n/a | ~6,400 (one event in flight at a time, so this measures latency, not capacity) |
+
+The "before" numbers are the ones already recorded in `note.md` from Phase 1 (measured over loopback with the old per-message unary calls). The "after" numbers are `bench/baseline.json`, from a local run on the development machine; a CI run of the same benchmark prints its own numbers on that run's hardware, which is why the CI gate compares against the baseline with headroom instead of asserting an absolute figure. Client-side latency is end-to-end (Python `send_nowait` to the matching `Fill` on `Subscribe`, including asyncio and gRPC overhead on both sides); the engine-side figure is the C++ engine's own ingest-to-processed time, with no Python in the loop. p99/p99.9 carry real scheduler and GC jitter from the Python side and vary more between runs than p50.
+
+Honest reading: the engine itself is well under the 150 µs design target (33 µs p50), but the end-to-end client figure (340 µs p50) is not; most of it is Python asyncio and gRPC client overhead on WSL. The next step for end-to-end latency is on the client side (a faster event loop, batching events, or reading exchange feeds in C++).
 
 ## Security
 

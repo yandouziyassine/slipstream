@@ -391,13 +391,6 @@ std::vector<OrderStatus> Engine::statuses() const {
     return out;
 }
 
-std::size_t Engine::working_orders() const {
-    std::lock_guard lock(mu_);
-    return static_cast<std::size_t>(
-        std::count_if(orders_.begin(), orders_.end(),
-                      [](const ParentOrder& order) { return order.state == OrderState::Working; }));
-}
-
 std::size_t Engine::book_depth() const { return book_depth_; }
 
 double Engine::position() const {

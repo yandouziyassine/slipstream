@@ -3,7 +3,7 @@
 Read this file before every action in this repo.
 
 ## What this project is
-Slipstream is a paper-trading smart order execution engine. A C++20 engine runs as a gRPC service: one order book per venue, execution schedules (TWAP, VWAP, POV, Almgren-Chriss), a fee-aware smart router across venues, hard risk limits, and simulated fills. A Python 3.12 orchestrator streams Kraken and Coinbase public market data into it, drives execution, and reports slippage, fees, per-venue costs, and routing gain.
+Slipstream is a paper-trading smart order execution engine. A C++20 engine runs as a gRPC service: one order book per venue, execution schedules (TWAP, VWAP, POV, Almgren-Chriss), a fee-aware smart router across venues, hard risk limits, and simulated fills, all driven by a single-writer engine loop fed by one concurrent market stream per venue (live or replay clock) with fills delivered over a separate subscription. A Python 3.12 orchestrator runs one feed process per venue, streaming Kraken and Coinbase public market data into it, drives execution, and reports slippage, fees, per-venue costs, and routing gain.
 Design: `docs/superpowers/specs/` (base design `2026-09-23-smart-execution-router-design.md`; schedules and routing specs dated 2026-09-24). Plans: `docs/superpowers/plans/`.
 
 ## Hard rules (never break)

@@ -8,7 +8,8 @@ from slipstream.coinbase import (
     CoinbaseStream,
     subscribe_messages,
 )
-from slipstream.models import BookUpdate, TradeBatch
+from slipstream.kraken import KrakenMessageError
+from slipstream.models import BookUpdate, MarketDataError, TradeBatch
 
 
 def l2(seq: int, kind: str, updates: list[dict[str, str]], product: str = "BTC-USD") -> str:
@@ -238,3 +239,8 @@ def test_rejects_unknown_symbol_and_bad_depth() -> None:
         CoinbaseStream("DOGE/XYZ", depth=10)
     with pytest.raises(CoinbaseMessageError):
         CoinbaseStream("BTC/USD", depth=0)
+
+
+def test_venue_errors_share_a_market_data_base() -> None:
+    assert issubclass(KrakenMessageError, MarketDataError)
+    assert issubclass(CoinbaseMessageError, MarketDataError)

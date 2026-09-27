@@ -7,18 +7,31 @@ import grpc
 import grpc.aio
 import pytest
 
-from slipstream.engine_client import EngineError
+from slipstream.config import ConfigError
 from slipstream.engine_stream import (
     EngineBackpressureError,
     EngineChannel,
+    EngineError,
     MarketStreamWriter,
     Subscription,
     book_event,
+    book_update_to_proto,
     heartbeat_event,
+    order_to_proto,
     tick_event,
+    trade_batch_to_proto,
     trade_event,
 )
-from slipstream.models import BookUpdate, OrderSpec, TradeBatch
+from slipstream.models import (
+    AlmgrenChrissParams,
+    BookUpdate,
+    Fill,
+    OrderSpec,
+    PovParams,
+    TradeBatch,
+    TwapParams,
+    VwapParams,
+)
 from slipstream.v1 import execution_pb2 as pb
 
 _SEC = 1_000_000_000
@@ -40,20 +53,151 @@ def test_book_event_carries_recv_ns_for_replay_mode() -> None:
 
 def test_trade_event_wraps_trade_batch() -> None:
     batch = TradeBatch("BTC/USD", False, ((100.0, 0.5),), "coinbase")
-    event = trade_event(batch)
+    event = trade_event(batch, None)
     assert event.WhichOneof("event") == "trades"
     assert event.trades.venue == "coinbase"
+    assert event.trades.recv_ns == 0
+    assert trade_event(batch, 123).trades.recv_ns == 123
 
 
-def test_heartbeat_event_is_empty() -> None:
-    assert heartbeat_event("kraken").WhichOneof("event") == "heartbeat"
-    assert heartbeat_event(None).WhichOneof("event") == "heartbeat"
+def test_heartbeat_event_names_its_venue_and_time() -> None:
+    live = heartbeat_event("kraken", None)
+    assert live.WhichOneof("event") == "heartbeat"
+    assert (live.heartbeat.venue, live.heartbeat.recv_ns) == ("kraken", 0)
+    replay = heartbeat_event("coinbase", 123)
+    assert (replay.heartbeat.venue, replay.heartbeat.recv_ns) == ("coinbase", 123)
 
 
 def test_tick_event_carries_now_ns() -> None:
     event = tick_event(42)
     assert event.WhichOneof("event") == "tick"
     assert event.tick.now_ns == 42
+
+
+def test_book_update_to_proto() -> None:
+    update = BookUpdate("BTC/USD", True, ((99.0, 1.0),), ((101.0, 2.0),), "coinbase")
+    msg = book_update_to_proto(update, recv_ns=123)
+    assert msg.symbol == "BTC/USD"
+    assert msg.is_snapshot
+    assert msg.venue == "coinbase"
+    assert msg.recv_ns == 123
+    assert [(level.price, level.qty) for level in msg.bids] == [(99.0, 1.0)]
+    assert [(level.price, level.qty) for level in msg.asks] == [(101.0, 2.0)]
+
+
+def test_order_to_proto_converts_seconds_to_nanoseconds() -> None:
+    msg = order_to_proto(OrderSpec("o-1", "sell", 0.5, 60, 6), start_ns=123)
+    assert msg.order_id == "o-1"
+    assert msg.side == pb.SIDE_SELL
+    assert msg.start_ns == 123
+    assert msg.duration_ns == 60_000_000_000
+    assert msg.num_slices == 6
+
+
+def test_order_defaults_to_twap_schedule() -> None:
+    msg = order_to_proto(OrderSpec("o-1", "buy", 1.0, 4, 4), start_ns=0)
+    assert msg.WhichOneof("schedule") == "twap"
+
+
+def test_order_carries_schedule_params() -> None:
+    spec = OrderSpec("o-1", "buy", 1.0, 4, 2)
+    vwap = order_to_proto(spec, 0, VwapParams((1.0, 3.0)))
+    assert vwap.WhichOneof("schedule") == "vwap"
+    assert list(vwap.vwap.weights) == [1.0, 3.0]
+    ac = order_to_proto(spec, 0, AlmgrenChrissParams(0.5, 2.0, 3e-5))
+    assert ac.WhichOneof("schedule") == "almgren_chriss"
+    assert (ac.almgren_chriss.sigma, ac.almgren_chriss.eta, ac.almgren_chriss.risk_aversion) == (
+        0.5,
+        2.0,
+        3e-5,
+    )
+    pov = order_to_proto(spec, 0, PovParams(0.25))
+    assert pov.WhichOneof("schedule") == "pov"
+    assert pov.pov.participation == 0.25
+    assert order_to_proto(spec, 0, TwapParams()).WhichOneof("schedule") == "twap"
+
+
+def test_trade_batch_to_proto_carries_trades_venue_and_time() -> None:
+    msg = trade_batch_to_proto(
+        TradeBatch("BTC/USD", False, ((100.5, 0.2), (100.4, 0.3)), "coinbase"), recv_ns=7
+    )
+    assert msg.symbol == "BTC/USD"
+    assert msg.venue == "coinbase"
+    assert msg.recv_ns == 7
+    assert [(t.price, t.qty) for t in msg.trades] == [(100.5, 0.2), (100.4, 0.3)]
+
+
+def test_fill_defaults_keep_single_venue_callers_working() -> None:
+    fill = Fill("o", 1, 0.5, 100.0)
+    assert (fill.venue, fill.fee) == ("kraken", 0.0)
+
+
+def test_channel_rejects_non_loopback_address() -> None:
+    with pytest.raises(ConfigError):
+        EngineChannel("10.0.0.1:50051")
+
+
+def _with_channel(body: Any, timeout_s: float = 2.0) -> Any:
+    async def scenario() -> Any:
+        channel = EngineChannel("127.0.0.1:1", timeout_s=timeout_s)
+        try:
+            return await body(channel)
+        finally:
+            await channel.close()
+
+    return asyncio.run(scenario())
+
+
+def test_wait_ready_times_out_when_engine_absent() -> None:
+    async def body(channel: EngineChannel) -> None:
+        await channel.wait_ready(timeout_s=0.5)
+
+    with pytest.raises(EngineError, match="not reachable"):
+        _with_channel(body)
+
+
+def test_unreachable_engine_raises_engine_error() -> None:
+    async def body(channel: EngineChannel) -> None:
+        await channel.status()
+
+    with pytest.raises(EngineError, match="engine call failed"):
+        _with_channel(body, timeout_s=0.5)
+
+
+def _fake_status(*venues: tuple[str, float]) -> pb.StatusReply:
+    return pb.StatusReply(
+        venues=[pb.VenueInfo(name=n, fee_bps=f) for n, f in venues], book_depth=25
+    )
+
+
+def test_venue_fees_and_book_depth_read_the_engine_status(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def body(channel: EngineChannel) -> tuple[dict[str, float], int]:
+        async def status() -> pb.StatusReply:
+            return _fake_status(("kraken", 40.0), ("coinbase", 60.0))
+
+        monkeypatch.setattr(channel, "status", status)
+        return dict(await channel.venue_fees()), await channel.book_depth()
+
+    assert _with_channel(body) == ({"kraken": 40.0, "coinbase": 60.0}, 25)
+
+
+@pytest.mark.parametrize(
+    "venues",
+    [(), (("binance", 10.0),), (("kraken", float("nan")),), (("kraken", -1.0),)],
+    ids=["none", "unknown", "nan", "negative"],
+)
+def test_venue_fees_rejects_bad_engine_venues(
+    monkeypatch: pytest.MonkeyPatch, venues: tuple[tuple[str, float], ...]
+) -> None:
+    async def body(channel: EngineChannel) -> None:
+        async def status() -> pb.StatusReply:
+            return _fake_status(*venues)
+
+        monkeypatch.setattr(channel, "status", status)
+        await channel.venue_fees()
+
+    with pytest.raises(EngineError):
+        _with_channel(body)
 
 
 class _FakeStreamUnaryCall:
@@ -304,7 +448,9 @@ def test_subscription_close_cancels_the_call() -> None:
     asyncio.run(scenario())
 
 
-def test_replay_stream_book_and_trade_round_trip_visible_in_status(engine_address: str) -> None:
+def test_replay_stream_book_trade_and_heartbeat_round_trip_visible_in_status(
+    engine_address: str,
+) -> None:
     async def scenario() -> None:
         channel = EngineChannel(engine_address)
         try:
@@ -313,9 +459,10 @@ def test_replay_stream_book_and_trade_round_trip_visible_in_status(engine_addres
             book = BookUpdate("BTC/USD", True, ((99.0, 1.0),), ((101.0, 2.0),), "kraken")
             writer.send_nowait(book_event(book, _SEC))
             trades = TradeBatch("BTC/USD", False, ((100.0, 0.5),), "kraken")
-            writer.send_nowait(trade_event(trades))
+            writer.send_nowait(trade_event(trades, 2 * _SEC))
+            writer.send_nowait(heartbeat_event("kraken", 3 * _SEC))
             events = await writer.close()
-            assert events == 2
+            assert events == 3
 
             status = await channel.status()
             assert len(status.books) == 1
@@ -493,3 +640,32 @@ def test_a_cancelled_subscribe_open_releases_the_call() -> None:
 
     asyncio.run(run())
     assert call.cancelled
+
+
+def test_drain_waits_for_the_write_in_flight() -> None:
+    # The queue is already empty while the pump is still writing; drain must wait for the write.
+    class _SlowCall:
+        def __init__(self) -> None:
+            self.release = asyncio.Event()
+            self.written: list[pb.MarketEvent] = []
+
+        async def write(self, event: pb.MarketEvent) -> None:
+            await self.release.wait()
+            self.written.append(event)
+
+        def cancel(self) -> None:
+            pass
+
+    async def run() -> None:
+        call = _SlowCall()
+        writer = MarketStreamWriter(call, asyncio.Queue(maxsize=10))
+        writer.send_nowait(tick_event(1))
+        drained = asyncio.ensure_future(writer.drain())
+        await asyncio.sleep(0.05)
+        assert not drained.done()
+        call.release.set()
+        await asyncio.wait_for(drained, timeout=1.0)
+        assert len(call.written) == 1
+        await writer._abort()
+
+    asyncio.run(run())

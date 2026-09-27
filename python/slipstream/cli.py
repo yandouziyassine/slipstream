@@ -13,16 +13,14 @@ from typing import cast
 
 from slipstream.calibration import CalibrationData, CalibrationError
 from slipstream.config import ConfigError, load_settings, validate_engine_address
-from slipstream.engine_client import EngineError
-from slipstream.engine_stream import EngineChannel
+from slipstream.engine_stream import EngineChannel, EngineError
 from slipstream.kraken_rest import fetch_ohlc, parse_ohlc
 from slipstream.live import LiveFeedError
 from slipstream.logging_setup import configure_logging
 from slipstream.models import VENUES, Fill, MarketDataError, OrderSpec, Venue
 from slipstream.recorder import RecordError, open_new_file, record_stream, write_ohlc_header
 from slipstream.replay import ReplayError, read_calibration, read_replay
-from slipstream.runner import OrderRejectedError
-from slipstream.session import LiveSession, ReplaySession, check_clock_mode
+from slipstream.session import LiveSession, OrderRejectedError, ReplaySession, check_clock_mode
 from slipstream.v1 import execution_pb2 as pb
 from slipstream.venue_rules import VenueRules, VenueRulesError, fetch_venue_rules
 

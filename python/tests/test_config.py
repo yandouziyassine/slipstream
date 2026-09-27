@@ -36,6 +36,10 @@ def test_accepts_loopback(address: str) -> None:
         "127.0.0.1:0",
         "127.0.0.1:70000",
         "127.0.0.1:50051/extra",
+        "127.0.0.1:50051\n",
+        "localhost:50051\n",
+        # Fullwidth digits, which int() accepts.
+        "127.0.0.1:" + "".join(chr(0xFF10 + digit) for digit in (5, 0, 0, 5, 1)),
     ],
 )
 def test_rejects_non_loopback(address: str) -> None:
