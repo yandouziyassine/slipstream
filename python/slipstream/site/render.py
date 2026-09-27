@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import io
 import json
+import re
 import sqlite3
 import string
 from dataclasses import dataclass
@@ -25,6 +26,10 @@ ALGO_LABELS: dict[str, str] = {
 _CHART_WINDOW_DAYS = 30
 _FEE_SPLIT_WINDOW_DAYS = 7
 _RUNS_TABLE_SIZE = 8
+# A '/' not preceded by a word character, '/', ':' or '<' starts a local path, not part of a
+# URL or a closing tag.
+_POSIX_PATH = re.compile(r"(?<![\w/:<])/[^\s'\"<>]+")
+_WINDOWS_PATH = re.compile(r"\b[A-Za-z]:\\[^\s'\"<>]*")
 
 _CSS = """
 :root {
@@ -140,8 +145,13 @@ def _row_to_run(row: sqlite3.Row) -> RunRow:
         qty=row["qty"],
         duration_s=row["duration_s"],
         fees_json=row["fees_json"],
-        error=row["error"],
+        error=_redact_paths(row["error"]) if row["error"] else None,
     )
+
+
+def _redact_paths(text: str) -> str:
+    # Run errors are published, and an OSError names local files (and so the user's name).
+    return _WINDOWS_PATH.sub("<path>", _POSIX_PATH.sub("<path>", text))
 
 
 def _query_runs(

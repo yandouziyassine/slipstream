@@ -127,6 +127,40 @@ def test_runs_csv_defuses_a_leading_equals_sign(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
+    "error",
+    [
+        "[Errno 2] No such file or directory: '/home/alice/slipstream-data/recordings/x.gz'",
+        "cannot open /mnt/c/Users/alice/slipstream/build/engine",
+        r"cannot open C:\Users\alice\slipstream\x.log",
+    ],
+)
+def test_published_errors_never_show_local_paths(tmp_path: Path, error: str) -> None:
+    instance = ResultsDB(tmp_path / "slipstream.db")
+    instance.migrate()
+    started = datetime(2026, 9, 27, 14, 0, 0, tzinfo=UTC)
+    run_id = instance.begin_run(started, "buy", 0.01, 600, FEES, RULES, None)
+    instance.finish_run(run_id, "failed", started, error=error)
+
+    history = build_history_html(instance.connection)
+    csv_text = build_runs_csv(instance.connection)
+
+    assert "alice" not in history
+    assert "alice" not in csv_text
+    assert "&lt;path&gt;" in history
+    assert "<path>" in csv_text
+
+
+def test_published_errors_keep_urls_readable(tmp_path: Path) -> None:
+    instance = ResultsDB(tmp_path / "slipstream.db")
+    instance.migrate()
+    started = datetime(2026, 9, 27, 14, 0, 0, tzinfo=UTC)
+    run_id = instance.begin_run(started, "buy", 0.01, 600, FEES, RULES, None)
+    instance.finish_run(run_id, "failed", started, error="feed closed: wss://ws.kraken.com/v2")
+
+    assert "wss://ws.kraken.com/v2" in build_runs_csv(instance.connection)
+
+
+@pytest.mark.parametrize(
     "build",
     [
         lambda conn: build_index_html(conn, FIXED_NOW),
