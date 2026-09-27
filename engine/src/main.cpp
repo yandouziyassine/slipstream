@@ -64,7 +64,9 @@ int main(int argc, char** argv) {
     }
     std::cout << ", max deviation " << config.max_deviation_bps << "bps, "
               << (config.clock == slipstream::ClockMode::Live ? "clock live" : "REPLAY CLOCK")
-              << ")" << std::endl;
+              << ")\n"
+              // Flushed now: scripts and test fixtures wait for this line to learn the port.
+              << std::flush;
 
     while (!g_stop.load()) std::this_thread::sleep_for(std::chrono::milliseconds(100));
     // Refuses new calls, lets open ones finish, and cancels any still running at the deadline.

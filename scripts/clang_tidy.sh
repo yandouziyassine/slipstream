@@ -14,6 +14,6 @@ cmake --build build/tidy --target slipstream_proto
 status=0
 for f in engine/src/*.cpp engine/tests/*.cpp; do
   echo "== clang-tidy: $f"
-  clang-tidy -p build/tidy "$f" || status=1
+  clang-tidy -p build/tidy --extra-arg=-Wno-unknown-warning-option "$f" || status=1
 done
 exit "$status"

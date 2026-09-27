@@ -17,4 +17,4 @@ Checks: >
   modernize-use-nullptr,
   modernize-use-override
 WarningsAsErrors: '*'
-HeaderFilterRegex: '^.*engine/(src|tests)/(?!.*\.pb\.h$).*\.h$'
+HeaderFilterRegex: 'engine/(src|tests)/[^/]*\.h$'
