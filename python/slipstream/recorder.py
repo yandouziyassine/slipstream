@@ -10,23 +10,19 @@ from typing import TextIO
 
 from websockets.asyncio.client import connect
 
-from slipstream.coinbase import COINBASE_WS_URL, CoinbaseStream, subscribe_messages
-from slipstream.coinbase import MAX_MESSAGE_BYTES as COINBASE_MAX_BYTES
-from slipstream.kraken import (
-    KRAKEN_WS_URL,
-    MAX_MESSAGE_BYTES,
-    parse_message,
-    subscribe_message,
-    subscribe_trades_message,
-)
 from slipstream.kraken_rest import parse_ohlc
 from slipstream.live import root_cause, wall_clock
 from slipstream.models import Venue
+from slipstream.venue_ws import (
+    IDLE_TIMEOUT_S,
+    endpoints,
+    max_message_bytes,
+    parser,
+    subscriptions,
+)
 
-IDLE_TIMEOUT_S = 30.0
 _WRITE_QUEUE_MAXSIZE = 1024
 
-_Validator = Callable[[str | bytes], object]
 _WriteItem = tuple[Venue, int, str]
 
 
@@ -98,18 +94,6 @@ def write_ohlc_header(handle: TextIO, interval_min: int, raw: bytes) -> None:
     handle.write(json.dumps(record) + "\n")
 
 
-def _subscriptions(venue: Venue, symbol: str, depth: int) -> list[str]:
-    if venue == "coinbase":
-        return subscribe_messages(symbol)
-    return [subscribe_message(symbol, depth), subscribe_trades_message(symbol)]
-
-
-def _validator(venue: Venue, symbol: str, depth: int) -> _Validator:
-    if venue == "coinbase":
-        return CoinbaseStream(symbol, depth).parse
-    return parse_message
-
-
 async def record_stream(
     handle: TextIO,
     symbol: str,
@@ -119,8 +103,7 @@ async def record_stream(
     urls: Mapping[Venue, str] | None = None,
     clock: Callable[[], int] | None = None,
 ) -> int:
-    endpoints: dict[Venue, str] = {"kraken": KRAKEN_WS_URL, "coinbase": COINBASE_WS_URL}
-    endpoints.update(urls or {})
+    urls_by_venue = endpoints(urls)
     loop = asyncio.get_running_loop()
     now = clock or wall_clock()
     writer = _Writer(handle)
@@ -139,10 +122,10 @@ async def record_stream(
 
     async def feed(venue: Venue) -> None:
         nonlocal written
-        max_size = COINBASE_MAX_BYTES if venue == "coinbase" else MAX_MESSAGE_BYTES
-        validate = _validator(venue, symbol, depth)
-        async with connect(endpoints[venue], max_size=max_size, open_timeout=10) as ws:
-            for message in _subscriptions(venue, symbol, depth):
+        max_size = max_message_bytes(venue)
+        validate = parser(venue, symbol, depth)
+        async with connect(urls_by_venue[venue], max_size=max_size, open_timeout=10) as ws:
+            for message in subscriptions(venue, symbol, depth):
                 await ws.send(message)
             while True:
                 if barrier.is_set():

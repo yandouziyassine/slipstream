@@ -396,25 +396,31 @@ def test_every_feed_command_accepts_venues(command: str) -> None:
     )
 
 
-class _FakeClient:
+class _FakeChannel:
+    """A fake async EngineChannel: only used for the pre-session checks in cli._live, which
+    return before any real gRPC call or feed process would be started."""
+
     def __init__(self, address: str) -> None:
         self.closed = False
 
-    def wait_ready(self) -> None:
+    async def wait_ready(self, timeout_s: float = 10.0) -> None:
         pass
 
-    def venue_fees(self) -> dict[str, float]:
+    async def venue_fees(self) -> dict[str, float]:
         return {"kraken": 40.0}
 
-    def book_depth(self) -> int:
+    async def book_depth(self) -> int:
         return 10
 
-    def close(self) -> None:
+    async def status(self) -> pb.StatusReply:
+        return pb.StatusReply(clock_mode=pb.CLOCK_MODE_LIVE)
+
+    async def close(self) -> None:
         self.closed = True
 
 
-class _DeepBookFakeClient(_FakeClient):
-    def book_depth(self) -> int:
+class _DeepBookFakeChannel(_FakeChannel):
+    async def book_depth(self) -> int:
         return 25
 
 
@@ -422,7 +428,7 @@ def test_live_refuses_when_engine_book_depth_exceeds_cli_depth(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     monkeypatch.delenv("SLIPSTREAM_PAPER_MODE", raising=False)
-    monkeypatch.setattr("slipstream.cli.EngineClient", _DeepBookFakeClient)
+    monkeypatch.setattr("slipstream.cli.EngineChannel", _DeepBookFakeChannel)
     code = main(["live", "--side", "buy", "--qty", "1", "--duration", "6", "--slices", "3"])
     assert code == 1
     assert "book depth" in capsys.readouterr().err
@@ -432,23 +438,24 @@ def test_compare_refuses_when_engine_book_depth_exceeds_cli_depth(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     monkeypatch.delenv("SLIPSTREAM_PAPER_MODE", raising=False)
-    monkeypatch.setattr("slipstream.cli.EngineClient", _DeepBookFakeClient)
+    monkeypatch.setattr("slipstream.cli.EngineChannel", _DeepBookFakeChannel)
     code = main(["compare", "--side", "buy", "--qty", "1", "--duration", "6", "--slices", "3"])
     assert code == 1
     assert "book depth" in capsys.readouterr().err
 
 
-def test_replay_does_not_check_book_depth(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_replay_does_not_check_book_depth(
+    tmp_path: Path,
+    engine_address: str,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.delenv("SLIPSTREAM_PAPER_MODE", raising=False)
 
-    class _AssertNoDepthCallClient(_FakeClient):
-        def book_depth(self) -> int:
-            raise AssertionError("book_depth should not be called for replay")
+    async def no_depth_call(self: object) -> int:
+        raise AssertionError("book_depth should not be called for replay")
 
-        def status(self) -> pb.StatusReply:
-            return pb.StatusReply()
-
-    monkeypatch.setattr("slipstream.cli.EngineClient", _AssertNoDepthCallClient)
+    monkeypatch.setattr("slipstream.engine_stream.EngineChannel.book_depth", no_depth_call)
     file = tmp_path / "empty.jsonl"
     file.write_text("", encoding="utf-8")
     code = main(
@@ -464,17 +471,31 @@ def test_replay_does_not_check_book_depth(tmp_path: Path, monkeypatch: pytest.Mo
             "6",
             "--slices",
             "3",
+            "--engine",
+            engine_address,
         ]
     )
-    assert code == 1  # order never submitted (empty file); proves book_depth() was never called
+    assert code == 1
+    # The run got as far as the empty file, so book_depth() was never called before it.
+    assert "never submitted" in capsys.readouterr().err
 
 
 def test_venue_mismatch_with_engine_is_refused(
+    engine_address: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.delenv("SLIPSTREAM_PAPER_MODE", raising=False)
+    args = [*BASE, "--qty", "1", "--venues", "kraken,coinbase", "--engine", engine_address]
+    assert main(args) == 1
+    assert "do not match" in capsys.readouterr().err
+
+
+def test_live_venue_mismatch_with_engine_is_refused(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     monkeypatch.delenv("SLIPSTREAM_PAPER_MODE", raising=False)
-    monkeypatch.setattr("slipstream.cli.EngineClient", _FakeClient)
-    assert main([*BASE, "--qty", "1", "--venues", "kraken,coinbase"]) == 1
+    monkeypatch.setattr("slipstream.cli.EngineChannel", _FakeChannel)
+    live = ["live", "--side", "buy", "--qty", "1", "--duration", "6", "--slices", "3"]
+    assert main([*live, "--venues", "kraken,coinbase"]) == 1
     assert "do not match" in capsys.readouterr().err
 
 
@@ -748,10 +769,10 @@ def test_best_effort_summary_just_logs_when_the_status_call_itself_fails(
     monkeypatch.delenv("SLIPSTREAM_PAPER_MODE", raising=False)
     file = _bad_replay_file(tmp_path)
 
-    def always_fails(self: object) -> list[pb.OrderStatus]:
+    async def always_fails(self: object) -> list[pb.OrderStatus]:
         raise EngineError("status rpc failed")
 
-    monkeypatch.setattr("slipstream.runner.ExecutionRunner.order_statuses", always_fails)
+    monkeypatch.setattr("slipstream.session.ReplaySession.order_statuses", always_fails)
     code = main(
         [
             "replay",
@@ -776,3 +797,68 @@ def test_best_effort_summary_just_logs_when_the_status_call_itself_fails(
     assert "non-decreasing" in out.err
     assert "status rpc failed" in out.err
     assert out.out == ""
+
+
+REPLAY_FIXTURE = Path(__file__).parent / "fixtures" / "kraken_btcusd_replay.jsonl"
+REPLAY_ORDER = ["--side", "buy", "--qty", "0.06", "--duration", "6", "--slices", "3"]
+
+
+def test_replay_prints_the_summary_from_the_session(
+    engine_address: str, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("SLIPSTREAM_PAPER_MODE", raising=False)
+    args = ["replay", "--file", str(REPLAY_FIXTURE), *REPLAY_ORDER, "--order-id", "cli-1"]
+    assert main([*args, "--engine", engine_address]) == 0
+    out = capsys.readouterr().out
+    assert "order        cli-1" in out
+    assert "state        COMPLETED" in out
+    assert "slippage     0.83 bps" in out
+
+
+def test_compare_with_file_prints_the_table_from_the_session(
+    engine_address: str, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("SLIPSTREAM_PAPER_MODE", raising=False)
+    args = ["compare", "--file", str(REPLAY_FIXTURE), "--algos", "twap,pov", *REPLAY_ORDER]
+    assert main([*args, "--engine", engine_address]) == 0
+    rows = capsys.readouterr().out.splitlines()
+    assert rows[0].split()[-2:] == ["fills", "reason"]
+    twap, pov = (row.split() for row in rows[1:])
+    assert (twap[0], twap[1], twap[-2], twap[-1]) == ("twap", "COMPLETED", "3", "-")
+    # No trades in this file: the closing tick halts POV at its deadline instead of leaving it
+    # working when the file ends.
+    assert (pov[0], pov[1], pov[-3]) == ("pov", "HALTED", "0")
+    assert " ".join(pov[-2:]) == "deadline reached"
+
+
+def test_replay_refuses_a_live_clock_engine(
+    live_engine_address: str, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("SLIPSTREAM_PAPER_MODE", raising=False)
+    args = ["replay", "--file", str(REPLAY_FIXTURE), *REPLAY_ORDER]
+    assert main([*args, "--engine", live_engine_address]) == 1
+    err = capsys.readouterr().err
+    assert "engine runs with --clock live but replay needs --clock replay" in err
+
+
+def test_compare_with_file_refuses_a_live_clock_engine(
+    live_engine_address: str, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("SLIPSTREAM_PAPER_MODE", raising=False)
+    args = ["compare", "--file", str(REPLAY_FIXTURE), "--algos", "twap,pov", *REPLAY_ORDER]
+    assert main([*args, "--engine", live_engine_address]) == 1
+    assert "--clock live but replay needs --clock replay" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("command", ["live", "compare"])
+def test_live_feed_commands_refuse_a_replay_clock_engine(
+    command: str,
+    engine_address: str,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("SLIPSTREAM_PAPER_MODE", raising=False)
+    assert main([command, *REPLAY_ORDER, "--engine", engine_address]) == 1
+    assert "engine runs with --clock replay but live needs --clock live" in (
+        capsys.readouterr().err
+    )

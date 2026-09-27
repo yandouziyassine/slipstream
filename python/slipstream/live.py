@@ -7,16 +7,9 @@ from collections.abc import Callable, Mapping, Sequence
 from websockets.asyncio.client import connect
 from websockets.exceptions import WebSocketException
 
-from slipstream.coinbase import COINBASE_WS_URL, subscribe_messages
-from slipstream.coinbase import MAX_MESSAGE_BYTES as COINBASE_MAX_BYTES
-from slipstream.kraken import (
-    KRAKEN_WS_URL,
-    MAX_MESSAGE_BYTES,
-    subscribe_message,
-    subscribe_trades_message,
-)
 from slipstream.models import Venue
 from slipstream.runner import ExecutionRunner
+from slipstream.venue_ws import IDLE_TIMEOUT_S, endpoints, max_message_bytes, subscriptions
 
 
 class LiveFeedError(RuntimeError):
@@ -47,23 +40,16 @@ def root_cause(
     return wrapped
 
 
-def _subscriptions(venue: Venue, symbol: str, depth: int) -> list[str]:
-    if venue == "coinbase":
-        return subscribe_messages(symbol)
-    return [subscribe_message(symbol, depth), subscribe_trades_message(symbol)]
-
-
 async def run_live(
     runner: ExecutionRunner,
     symbol: str,
     depth: int,
     deadline_s: float,
-    idle_timeout_s: float = 30.0,
+    idle_timeout_s: float = IDLE_TIMEOUT_S,
     venues: Sequence[Venue] = ("kraken",),
     urls: Mapping[Venue, str] | None = None,
 ) -> None:
-    endpoints: dict[Venue, str] = {"kraken": KRAKEN_WS_URL, "coinbase": COINBASE_WS_URL}
-    endpoints.update(urls or {})
+    urls_by_venue = endpoints(urls)
     loop = asyncio.get_running_loop()
     deadline = loop.time() + deadline_s
     finished = asyncio.Event()
@@ -71,9 +57,9 @@ async def run_live(
     tasks: list[asyncio.Task[None]] = []
 
     async def feed(venue: Venue) -> None:
-        max_size = COINBASE_MAX_BYTES if venue == "coinbase" else MAX_MESSAGE_BYTES
-        async with connect(endpoints[venue], max_size=max_size, open_timeout=10) as ws:
-            for message in _subscriptions(venue, symbol, depth):
+        max_size = max_message_bytes(venue)
+        async with connect(urls_by_venue[venue], max_size=max_size, open_timeout=10) as ws:
+            for message in subscriptions(venue, symbol, depth):
                 await ws.send(message)
             while not finished.is_set():
                 remaining = deadline - loop.time()

@@ -37,12 +37,14 @@ public:
     grpc::Status MarketStream(grpc::ServerContext* context,
                               grpc::ServerReader<v1::MarketEvent>* reader,
                               v1::MarketStreamSummary* summary) override;
-    // Initial metadata is sent once the subscription is active, so a client that waits for it
-    // receives every event from then on.
+    // Initial metadata carrying kSubscribedMetadataKey = "1" is sent once the subscription is
+    // active, so a client that waits for it receives every event from then on. A rejected call
+    // never carries the key.
     grpc::Status Subscribe(grpc::ServerContext* context, const v1::SubscribeRequest*,
                            grpc::ServerWriter<v1::EngineEvent>* writer) override;
 
     static constexpr const char* kVenueMetadataKey = "slipstream-venue";
+    static constexpr const char* kSubscribedMetadataKey = "slipstream-subscribed";
     static constexpr std::chrono::milliseconds kSubscribePoll{50};
 
 private:

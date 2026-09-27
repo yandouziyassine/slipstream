@@ -327,6 +327,8 @@ grpc::Status ExecutionService::Subscribe(grpc::ServerContext* context,
         return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "another subscriber is active");
     }
     const ScopeExit unsubscribe([&] { loop_.unsubscribe(subscriber); });
+    // A rejected call still delivers (empty) initial metadata, so clients need a positive marker.
+    context->AddInitialMetadata(kSubscribedMetadataKey, "1");
     writer->SendInitialMetadata();
     for (;;) {
         if (context->IsCancelled()) return grpc::Status::OK;

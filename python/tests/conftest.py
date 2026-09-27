@@ -1,13 +1,27 @@
 from __future__ import annotations
 
+import asyncio
+import logging
 import re
 import subprocess
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
 
 import pytest
 
-from slipstream.models import BookUpdate, Fill, OrderSpec, ScheduleParams, StepResult, TradeBatch
+from slipstream.calibration import CalibrationData
+from slipstream.engine_stream import EngineChannel
+from slipstream.models import (
+    BookUpdate,
+    Fill,
+    OrderSpec,
+    ScheduleParams,
+    StepResult,
+    TradeBatch,
+    Venue,
+)
+from slipstream.replay import read_replay
+from slipstream.session import SessionResult, check_clock_mode, run_replay_session
 from slipstream.v1 import execution_pb2 as pb
 
 ENGINE_BIN = Path(__file__).resolve().parents[2] / "build" / "engine" / "slipstream_engine"
@@ -119,5 +133,52 @@ def two_venue_engine_address() -> Iterator[str]:
 
 
 @pytest.fixture
+def live_engine_address() -> Iterator[str]:
+    yield from _run_engine("--clock", "live")
+
+
+@pytest.fixture
+def two_venue_live_engine_address() -> Iterator[str]:
+    yield from _run_engine(
+        "--venue", "kraken:fee_bps=0", "--venue", "coinbase:fee_bps=1", "--clock", "live"
+    )
+
+
+@pytest.fixture
 def kraken_min_qty_engine_address() -> Iterator[str]:
     yield from _run_engine("--venue", "kraken:fee_bps=0,min_qty=0.00005")
+
+
+def run_session_on_file(
+    address: str,
+    specs: Sequence[OrderSpec],
+    file: Path,
+    venues: Sequence[Venue] = ("kraken",),
+    calibration: CalibrationData | None = None,
+) -> SessionResult:
+    """One replay session against a real engine, the way `slipstream replay` runs it."""
+
+    async def scenario() -> SessionResult:
+        channel = EngineChannel(address)
+        try:
+            await channel.wait_ready(5.0)
+            await check_clock_mode(channel, pb.CLOCK_MODE_REPLAY)
+            return await run_replay_session(
+                channel,
+                specs,
+                "BTC/USD",
+                logging.getLogger("test"),
+                records=read_replay(file),
+                calibration=calibration,
+                venues=venues,
+                fee_bps=await channel.venue_fees(),
+            )
+        finally:
+            await channel.close()
+
+    return asyncio.run(scenario())
+
+
+@pytest.fixture
+def replay_session() -> Callable[..., SessionResult]:
+    return run_session_on_file
