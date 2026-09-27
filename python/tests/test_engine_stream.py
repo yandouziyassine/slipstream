@@ -533,21 +533,24 @@ def test_duplicate_live_venue_stream_is_rejected(live_engine_address: str) -> No
     async def scenario() -> None:
         channel = EngineChannel(live_engine_address)
         try:
-            # The engine binds whichever stream it services first, so either of the two
-            # concurrently opened writers may be the one that wins the venue; exactly one
-            # of them must fail with FAILED_PRECONDITION.
+            # The first stream must provably hold the venue (its book is visible) before the
+            # second opens; otherwise an idle first stream can finish and free the venue first.
             first = await MarketStreamWriter.open(channel, "kraken")
-            second = await MarketStreamWriter.open(channel, "kraken")
-            errors: list[EngineError | None] = []
-            for writer in (first, second):
-                try:
-                    await writer.close()
-                    errors.append(None)
-                except EngineError as exc:
-                    errors.append(exc)
-            rejected = [exc for exc in errors if exc is not None]
-            assert len(rejected) == 1
-            assert "FAILED_PRECONDITION" in str(rejected[0])
+            try:
+                first.send_nowait(
+                    book_event(
+                        BookUpdate("BTC/USD", True, ((99.0, 1.0),), ((101.0, 2.0),), "kraken"), None
+                    )
+                )
+                deadline = asyncio.get_event_loop().time() + 10.0
+                while not (await channel.status()).books:
+                    assert asyncio.get_event_loop().time() < deadline, "first stream never bound"
+                    await asyncio.sleep(0.02)
+                second = await MarketStreamWriter.open(channel, "kraken")
+                with pytest.raises(EngineError, match="FAILED_PRECONDITION"):
+                    await second.close()
+            finally:
+                assert await first.close() == 1
         finally:
             await channel.close()
 

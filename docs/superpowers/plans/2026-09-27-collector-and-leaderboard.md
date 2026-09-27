@@ -112,7 +112,7 @@ Each table has `BEFORE UPDATE` and `BEFORE DELETE` triggers that `RAISE(ABORT, '
 2. Resolve `DATA="${SLIPSTREAM_DATA_DIR:-$HOME/slipstream-data}"`.
 3. `bash scripts/build_release.sh >/dev/null`.
 4. Get the venue arguments through `mapfile` from `python -m slipstream.cli venue-flags --venues kraken,coinbase --fees kraken=40,coinbase=60`.
-5. Start the engine on `127.0.0.1:0`, reading its port from stdout the way conftest does, with `--clock live --max-order-notional 50000 --max-position 1 "${VENUE_ARGS[@]}"`.
+5. Start the engine on `127.0.0.1:0`, reading its port from stdout the way conftest does, with `--clock live --max-order-notional 50000 --max-position 2 "${VENUE_ARGS[@]}"`.
 6. `trap` kills the engine on exit.
 7. Run `python -m slipstream.collect run --engine 127.0.0.1:$PORT`.
 8. Append all output to `$DATA/logs/`.

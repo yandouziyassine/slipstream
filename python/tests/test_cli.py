@@ -40,6 +40,14 @@ def test_parses_valid_arguments() -> None:
     assert args.symbol == "BTC/USD"
 
 
+def test_collect_command_forwards_its_arguments(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[list[str]] = []
+    monkeypatch.setattr("slipstream.cli.collect_main", lambda argv: (seen.append(list(argv)), 0)[1])
+    status = main(["collect", "run", "--engine", "127.0.0.1:1"])
+    assert status == 0
+    assert seen == [["run", "--engine", "127.0.0.1:1"]]
+
+
 def test_format_summary() -> None:
     status = pb.OrderStatus(
         order_id="o-1",
