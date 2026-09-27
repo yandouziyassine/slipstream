@@ -1,0 +1,42 @@
+  <section class="intro">
+    <div>
+      <p>Buying or selling crypto in one big order pushes the price against you, and every exchange also takes a fee.</p>
+      <p>Every hour, Slipstream paper-trades a small order on the live Kraken and Coinbase order books, with four splitting strategies, and records what each one really cost, fees included.</p>
+      <p>No real money moves; the prices are real, only the fills are simulated.</p>
+      <div class="gh">Code, tests and methodology: <a href="${github_url}">${github_label}</a></div>
+    </div>
+    <div class="status">
+      <div><b>Last run</b> ${last_run}</div>
+      <div><b>Next run</b> ${next_run}</div>
+      <div><b>Feeds</b> ${feeds}</div>
+      <div><b>Fees used</b> ${fees_used}</div>
+      <div class="unit-note">1 bps = 0.01%. On a $$1,000 order, 40 bps is $$4.</div>
+    </div>
+  </section>
+
+  <div class="kpis">
+    <div class="kpi"><div class="l">Cheapest last hour</div><div class="v">${kpi_cheapest_algo}</div><div class="n">${kpi_cheapest_detail}</div></div>
+    <div class="kpi"><div class="l">Runs recorded</div><div class="v">${kpi_runs_count}</div><div class="n">since ${kpi_runs_since}</div></div>
+    <div class="kpi"><div class="l">Avg routing gain</div><div class="v">${kpi_routing_gain}</div><div class="n">vs best single exchange</div></div>
+    <div class="kpi"><div class="l">Engine latency p50</div><div class="v">${kpi_latency_p50}</div><div class="n">p99 ${kpi_latency_p99} per message</div></div>
+  </div>
+
+  ${charts}
+
+  <h2>Last ${runs_table_count} runs</h2>
+  <p class="sub">Each run executes the same order with all four strategies at the same time, on the same books.</p>
+  ${runs_table}
+
+  <h2 id="use">Use it yourself</h2>
+  <p class="sub">The same engine that runs these hourly tests will be open to use directly. Paper trading only; nothing can place a real order.</p>
+  <div class="kpis two-col">
+    <div class="kpi">
+      <div class="l">Public API <span class="tag">coming soon</span></div>
+      <p class="body">Ask for the cheapest way to buy or sell right now and get the route, the all-in cost and the estimated saving back in milliseconds.</p>
+    </div>
+    <div class="kpi">
+      <div class="l">MCP server for AI assistants <span class="tag">coming soon</span></div>
+      <p class="body">Add one URL to Claude or another MCP-capable assistant, and it can answer "what's the cheapest way to buy 0.5 BTC right now?" with live, measured numbers instead of a guess.</p>
+    </div>
+  </div>
+  <p class="sub follow">Want early access or to follow progress? Watch the <a href="${github_url}">GitHub repository</a>.</p>

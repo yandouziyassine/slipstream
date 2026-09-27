@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>${title}</title>
+<style>${css}</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="brand">Slipstream <span class="muted">/ live execution costs</span></div>
+    <nav>
+      <a href="index.html">Live</a>
+      <a href="history.html">History</a>
+      <a href="methodology.html">Methodology</a>
+      <a href="data/runs.csv">Data (CSV)</a>
+      <a href="index.html#use">API &amp; MCP</a>
+      <a href="${github_url}">GitHub</a>
+    </nav>
+  </header>
+  ${content}
+  <div class="note">
+    <div><b>How to read this.</b> "All-in" is what a trade paid above the market price at the moment the order started, in basis points, fees included. A routing gain of 0.00 is an honest result: one exchange was simply cheaper for the whole order.</div>
+    <div><b>Not financial advice.</b> Research and education only. These are paper trades on real public prices; the simulated fills do not consume order-book liquidity, so results can look slightly better than a real fill would. See the methodology page for the full list of limits.</div>
+  </div>
+</div>
+</body>
+</html>

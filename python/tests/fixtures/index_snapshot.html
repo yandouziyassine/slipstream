@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Slipstream — live execution costs</title>
+<style>
+:root {
+  --paper:#f6f4ee; --ink:#1b1b1a; --muted:#6b6a64; --rule:#d9d5c9;
+  --good:#1f6b47; --bad:#a3401f; --accent:#1f4e79;
+}
+* { box-sizing:border-box; }
+body {
+  margin:0; background:var(--paper); color:var(--ink);
+  font:15px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+.wrap { max-width:1040px; margin:0 auto; padding:28px 28px 60px; }
+header {
+  display:flex; justify-content:space-between; align-items:baseline;
+  border-bottom:2px solid var(--ink); padding-bottom:10px;
+}
+.brand { font:600 20px Georgia, Charter, serif; letter-spacing:-.01em; }
+.muted { color:var(--muted); font-weight:400; }
+nav a { color:var(--ink); text-decoration:none; margin-left:18px; font-size:14px; }
+nav a:hover { text-decoration:underline; }
+.intro { display:grid; grid-template-columns:1.5fr 1fr; gap:36px; margin:22px 0 26px; }
+.intro p { margin:0 0 6px; font:18px/1.5 Georgia, Charter, serif; }
+.gh { font-size:14px; margin-top:10px; }
+.gh a, .follow a, .note a { color:var(--accent); }
+.status {
+  border-left:1px solid var(--rule); padding-left:20px;
+  font-size:13px; color:var(--muted);
+}
+.status b { color:var(--ink); font-weight:500; }
+.unit-note { margin-top:8px; }
+.mono, td.num, .kpi .v {
+  font-family:ui-monospace, Consolas, "SF Mono", monospace;
+  font-variant-numeric:tabular-nums;
+}
+.kpis {
+  display:grid; grid-template-columns:repeat(4,1fr);
+  border-top:1px solid var(--rule); border-bottom:1px solid var(--rule);
+}
+.kpis.two-col { grid-template-columns:1fr 1fr; border-top:0; }
+.kpi { padding:14px 16px; border-right:1px solid var(--rule); }
+.kpi:last-child { border-right:0; }
+.kpi .l {
+  font-size:12px; color:var(--muted); text-transform:uppercase; letter-spacing:.06em;
+}
+.kpi .v { font-size:24px; margin-top:4px; font-family:ui-monospace, Consolas, monospace; }
+.kpi .n { font-size:12px; color:var(--muted); }
+.kpi .body { margin:6px 0 0; font-size:14px; }
+h2 { font:600 17px Georgia, Charter, serif; margin:30px 0 4px; }
+.sub { color:var(--muted); font-size:13px; margin:0 0 12px; }
+.grid2 { display:grid; grid-template-columns:1.4fr 1fr; gap:32px; }
+svg text { font:11px ui-monospace, Consolas, monospace; fill:var(--muted); }
+table { width:100%; border-collapse:collapse; font-size:13.5px; }
+th {
+  text-align:left; font-weight:500; color:var(--muted);
+  border-bottom:1px solid var(--ink); padding:6px 8px; font-size:12px;
+}
+td { padding:6px 8px; border-bottom:1px solid var(--rule); }
+td.num, th.num {
+  text-align:right; font-family:ui-monospace, Consolas, "SF Mono", monospace;
+}
+.win { color:var(--good); font-weight:500; }
+.tag { font-size:11px; border:1px solid var(--rule); padding:1px 6px; color:var(--muted); }
+.note {
+  font-size:13px; color:var(--muted); border-top:1px solid var(--rule);
+  margin-top:34px; padding-top:12px;
+  display:grid; grid-template-columns:1fr 1fr; gap:24px;
+}
+.note b { color:var(--ink); font-weight:500; }
+.follow { margin-top:10px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="brand">Slipstream <span class="muted">/ live execution costs</span></div>
+    <nav>
+      <a href="index.html">Live</a>
+      <a href="history.html">History</a>
+      <a href="methodology.html">Methodology</a>
+      <a href="data/runs.csv">Data (CSV)</a>
+      <a href="index.html#use">API &amp; MCP</a>
+      <a href="https://github.com/yandouziyassine/slipstream">GitHub</a>
+    </nav>
+  </header>
+    <section class="intro">
+    <div>
+      <p>Buying or selling crypto in one big order pushes the price against you, and every exchange also takes a fee.</p>
+      <p>Every hour, Slipstream paper-trades a small order on the live Kraken and Coinbase order books, with four splitting strategies, and records what each one really cost, fees included.</p>
+      <p>No real money moves; the prices are real, only the fills are simulated.</p>
+      <div class="gh">Code, tests and methodology: <a href="https://github.com/yandouziyassine/slipstream">github.com/yandouziyassine/slipstream</a></div>
+    </div>
+    <div class="status">
+      <div><b>Last run</b> 14:00 UTC · buy 0.01 BTC over 10 min</div>
+      <div><b>Next run</b> 15:00 UTC</div>
+      <div><b>Feeds</b> both recorded this run</div>
+      <div><b>Fees used</b> Coinbase 60 bps · Kraken 40 bps (entry tier)</div>
+      <div class="unit-note">1 bps = 0.01%. On a $1,000 order, 40 bps is $4.</div>
+    </div>
+  </section>
+
+  <div class="kpis">
+    <div class="kpi"><div class="l">Cheapest last hour</div><div class="v">POV</div><div class="n">40.20 bps all-in</div></div>
+    <div class="kpi"><div class="l">Runs recorded</div><div class="v">1</div><div class="n">since 2026-09-27</div></div>
+    <div class="kpi"><div class="l">Avg routing gain</div><div class="v">0.10 bps</div><div class="n">vs best single exchange</div></div>
+    <div class="kpi"><div class="l">Engine latency p50</div><div class="v">38 µs</div><div class="n">p99 210 µs per message</div></div>
+  </div>
+
+  <div class="grid2"><div><h2>All-in cost by strategy, 0.01 BTC, last 30 days</h2><p class="sub">Daily median, basis points. Lower is cheaper. Shaded band is the 95% range for the day's cheapest strategy.</p><svg viewBox="0 0 560 220" width="100%" role="img" aria-label="Cost by strategy over time"><circle cx="40.0" cy="10.0" r="2.5" fill="#1f6b47"/><text x="36.0" y="4.0" style="fill:#1f6b47">TWAP</text><circle cx="40.0" cy="10.0" r="2.5" fill="#1b1b1a"/><text x="36.0" y="4.0" style="fill:#1b1b1a">VWAP</text><circle cx="40.0" cy="192.0" r="2.5" fill="#6b6a64"/><text x="36.0" y="186.0" style="fill:#6b6a64">POV</text><circle cx="40.0" cy="34.3" r="2.5" fill="#1f4e79"/><text x="36.0" y="28.3" style="fill:#1f4e79">A-C</text><text x="40" y="206">2026-09-27</text><text x="490" y="206">2026-09-27</text></svg></div><div><h2>Where the cost comes from</h2><p class="sub">Average fee vs. slippage, last 7 days. Black = exchange fees · rust = slippage.</p><svg viewBox="0 0 360 130" width="100%" role="img" aria-label="Fees versus slippage"><text x="0" y="22">TWAP</text><rect x="60" y="10" width="2.8" height="16" fill="#1b1b1a"/><rect x="62.8" y="10" width="277.2" height="16" fill="#a3401f"/><text x="0" y="52">VWAP</text><rect x="60" y="40" width="2.8" height="16" fill="#1b1b1a"/><rect x="62.8" y="40" width="277.2" height="16" fill="#a3401f"/><text x="0" y="82">POV</text><rect x="60" y="70" width="2.8" height="16" fill="#1b1b1a"/><rect x="62.8" y="70" width="277.2" height="16" fill="#a3401f"/><text x="0" y="112">A-C</text><rect x="60" y="100" width="2.8" height="16" fill="#1b1b1a"/><rect x="62.8" y="100" width="277.2" height="16" fill="#a3401f"/></svg></div></div>
+
+  <h2>Last 8 runs</h2>
+  <p class="sub">Each run executes the same order with all four strategies at the same time, on the same books.</p>
+  <table><thead><tr><th>Time (UTC)</th><th>Cheapest</th><th class="num">TWAP</th><th class="num">VWAP</th><th class="num">POV</th><th class="num">A-C</th><th class="num">Kraken / Coinbase</th><th class="num">Routing gain</th></tr></thead><tbody><tr><td class="mono">14:00</td><td class="win">POV</td><td class="num">40.35</td><td class="num">40.35</td><td class="num win">40.20</td><td class="num">40.33</td><td class="num">100 / 0</td><td class="num">0.10</td></tr></tbody></table>
+
+  <h2 id="use">Use it yourself</h2>
+  <p class="sub">The same engine that runs these hourly tests will be open to use directly. Paper trading only; nothing can place a real order.</p>
+  <div class="kpis two-col">
+    <div class="kpi">
+      <div class="l">Public API <span class="tag">coming soon</span></div>
+      <p class="body">Ask for the cheapest way to buy or sell right now and get the route, the all-in cost and the estimated saving back in milliseconds.</p>
+    </div>
+    <div class="kpi">
+      <div class="l">MCP server for AI assistants <span class="tag">coming soon</span></div>
+      <p class="body">Add one URL to Claude or another MCP-capable assistant, and it can answer "what's the cheapest way to buy 0.5 BTC right now?" with live, measured numbers instead of a guess.</p>
+    </div>
+  </div>
+  <p class="sub follow">Want early access or to follow progress? Watch the <a href="https://github.com/yandouziyassine/slipstream">GitHub repository</a>.</p>
+
+  <div class="note">
+    <div><b>How to read this.</b> "All-in" is what a trade paid above the market price at the moment the order started, in basis points, fees included. A routing gain of 0.00 is an honest result: one exchange was simply cheaper for the whole order.</div>
+    <div><b>Not financial advice.</b> Research and education only. These are paper trades on real public prices; the simulated fills do not consume order-book liquidity, so results can look slightly better than a real fill would. See the methodology page for the full list of limits.</div>
+  </div>
+</div>
+</body>
+</html>

@@ -228,6 +228,14 @@ An hourly collector (`scripts/collect_hourly.sh`, driven by `slipstream collect 
 - A run that fails (a dropped feed, a rejected order) is recorded with `status = failed` and its error; the next size still runs. A crash leaves a run `started`, which the next hour's run marks `abandoned`. Nothing is hidden.
 - Install the scheduled task yourself with `powershell -File scripts/install_task.ps1 -Install` (hourly at :05, as your own Windows user, only while you are logged on, no stored password, standard privileges). Remove it with `-Uninstall`. The script only registers or removes the task; it never runs the collector itself.
 
+## Research page
+
+`python/slipstream/site/` builds a static research page from `slipstream.db`: the same 3-line explainer as this README, a status column, KPIs, a 30-day all-in-cost chart per order size with a bootstrap 95% band, a fees-versus-slippage split, the last 8 runs, a `history.html` with all runs (filterable client-side, no library), a `methodology.html` with the known limits, and a `data/runs.csv` export. Every chart is server-rendered SVG from plain numbers; fonts are system stacks only; the only external link on any page is to this GitHub repository.
+
+- Build it: `python -m slipstream.site build` (writes `$SLIPSTREAM_DATA_DIR/site/`).
+- Publish it: `python -m slipstream.site publish` syncs `site/` into a clone of the public `slipstream-live` repo and pushes over SSH with a deploy key scoped to that one repo. It is a no-op until `$SLIPSTREAM_DATA_DIR/publish.enabled` exists, so nothing is ever pushed automatically before you switch it on (see `input.md`). A push happens only when something changed; a publish failure is logged and never fails the hourly collector.
+- `scripts/collect_hourly.sh` runs both after every collection, failure-tolerant: the hour's evidence is already safely in the database either way.
+
 ## Security
 
 - **Paper trading is enforced.** `SLIPSTREAM_PAPER_MODE` must be `true`, and v0.1 contains no live order path.

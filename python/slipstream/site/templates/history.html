@@ -1,0 +1,29 @@
+  <h2>Every recorded run</h2>
+  <p class="sub">Filter client-side; nothing is sent anywhere. ${rows_count} runs total.</p>
+  <p class="sub">
+    <label>Side <select id="filter-side"><option value="">any</option><option value="buy">buy</option><option value="sell">sell</option></select></label>
+    <label>Status <select id="filter-status"><option value="">any</option><option value="completed">completed</option><option value="failed">failed</option><option value="abandoned">abandoned</option></select></label>
+  </p>
+  <table id="history-table">
+    <thead><tr><th>Started (UTC)</th><th>Status</th><th>Side</th><th class="num">Qty</th><th class="num">Duration (s)</th><th>Error</th></tr></thead>
+    <tbody>
+${rows}
+    </tbody>
+  </table>
+  <script>
+    (function () {
+      var rows = Array.prototype.slice.call(document.querySelectorAll("#history-table tbody tr"));
+      var sideSel = document.getElementById("filter-side");
+      var statusSel = document.getElementById("filter-status");
+      function apply() {
+        var side = sideSel.value;
+        var status = statusSel.value;
+        rows.forEach(function (row) {
+          var show = (!side || row.dataset.side === side) && (!status || row.dataset.status === status);
+          row.style.display = show ? "" : "none";
+        });
+      }
+      sideSel.addEventListener("change", apply);
+      statusSel.addEventListener("change", apply);
+    })();
+  </script>

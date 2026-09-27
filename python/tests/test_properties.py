@@ -6,7 +6,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from hypothesis import given, settings
+from hypothesis import example, given, settings
 from hypothesis import strategies as st
 
 from slipstream.book import LocalBook
@@ -331,6 +331,9 @@ _LB_DELTAS = st.lists(
     snap_asks=_LB_LEVELS,
     deltas=_LB_DELTAS,
 )
+# A level deleted from a full book must not come back from beyond the depth: the engine
+# truncates after every update, so levels past the depth are gone for good.
+@example(depth=2, snap_bids=[(1, 1), (2, 1), (3, 1)], snap_asks=[], deltas=[("bid", 2, 0)])
 @pt_settings
 def test_local_book_matches_reference_model(
     depth: int,
@@ -342,9 +345,16 @@ def test_local_book_matches_reference_model(
     ref_bids: dict[float, float] = {float(p): float(q) for p, q in snap_bids}
     ref_asks: dict[float, float] = {float(p): float(q) for p, q in snap_asks}
 
+    def truncate_reference() -> None:
+        for side, descending in ((ref_bids, True), (ref_asks, False)):
+            kept = dict(sorted(side.items(), reverse=descending)[:depth])
+            side.clear()
+            side.update(kept)
+
     def assert_matches() -> None:
-        exp_bids = tuple(sorted(ref_bids.items(), key=lambda kv: -kv[0])[:depth])
-        exp_asks = tuple(sorted(ref_asks.items())[:depth])
+        truncate_reference()
+        exp_bids = tuple(sorted(ref_bids.items(), key=lambda kv: -kv[0]))
+        exp_asks = tuple(sorted(ref_asks.items()))
         assert book.bids() == exp_bids
         assert book.asks() == exp_asks
         _assert_sorted_unique_positive(book.bids(), descending=True, depth=depth)

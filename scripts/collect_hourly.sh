@@ -57,3 +57,8 @@ fi
 echo "engine listening on 127.0.0.1:$PORT"
 
 python -m slipstream.collect run --engine "127.0.0.1:$PORT"
+
+# Building and publishing the research page is best-effort: a failure here must never mark the
+# hourly collection itself as failed, since the evidence is already safely in the database.
+python -m slipstream.site build || echo "site build failed" >&2
+python -m slipstream.site publish || echo "site publish failed" >&2
