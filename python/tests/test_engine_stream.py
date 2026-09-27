@@ -640,3 +640,32 @@ def test_a_cancelled_subscribe_open_releases_the_call() -> None:
 
     asyncio.run(run())
     assert call.cancelled
+
+
+def test_drain_waits_for_the_write_in_flight() -> None:
+    # The queue is already empty while the pump is still writing; drain must wait for the write.
+    class _SlowCall:
+        def __init__(self) -> None:
+            self.release = asyncio.Event()
+            self.written: list[pb.MarketEvent] = []
+
+        async def write(self, event: pb.MarketEvent) -> None:
+            await self.release.wait()
+            self.written.append(event)
+
+        def cancel(self) -> None:
+            pass
+
+    async def run() -> None:
+        call = _SlowCall()
+        writer = MarketStreamWriter(call, asyncio.Queue(maxsize=10))
+        writer.send_nowait(tick_event(1))
+        drained = asyncio.ensure_future(writer.drain())
+        await asyncio.sleep(0.05)
+        assert not drained.done()
+        call.release.set()
+        await asyncio.wait_for(drained, timeout=1.0)
+        assert len(call.written) == 1
+        await writer._abort()
+
+    asyncio.run(run())

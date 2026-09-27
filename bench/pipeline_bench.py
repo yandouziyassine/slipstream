@@ -129,13 +129,14 @@ def _stream_events(rng: random.Random, start_recv_ns: int) -> list[tuple[int, pb
     return events
 
 
-async def _send(writer: MarketStreamWriter, event: pb.MarketEvent) -> int:
-    """Enqueues `event`, then waits for the writer's own queue to drain it.
+async def _send(
+    writer: MarketStreamWriter, event: pb.MarketEvent, recv_ns: int, send_times: dict[int, int]
+) -> None:
+    """Sends `event` and waits until it has actually been written to the engine.
 
-    `MarketStreamWriter` buffers up to 1,000 events client-side before applying backpressure.
-    Sending faster than its background pump can flush would make the measured "send" instant
-    reflect queuing in that local buffer rather than the pipeline itself, so this paces sends to
-    keep the buffer empty.
+    `MarketStreamWriter` buffers up to 1,000 events client-side. Sending faster than they are
+    written would make the measured latency include time spent queued in that local buffer rather
+    than in the pipeline, so each send waits for the previous one's write to complete.
     """
     loop = asyncio.get_running_loop()
     deadline = loop.time() + SEND_TIMEOUT_S
@@ -147,13 +148,9 @@ async def _send(writer: MarketStreamWriter, event: pb.MarketEvent) -> int:
             if loop.time() >= deadline:
                 raise
             await asyncio.sleep(0.001)
-    send_ns = time.perf_counter_ns()
-    # Private, but read-only: pace to the pump's own progress rather than just enqueue depth.
-    while writer._queue.qsize() > 0:
-        if loop.time() >= deadline:
-            break
-        await asyncio.sleep(0)
-    return send_ns
+    # Recorded before waiting: the engine can answer with a fill before the write call returns.
+    send_times[recv_ns] = time.perf_counter_ns()
+    await asyncio.wait_for(writer.drain(), timeout=max(0.0, deadline - loop.time()))
 
 
 async def _consume(
@@ -270,7 +267,7 @@ async def _run_against(address: str) -> BenchResult:
         rng = random.Random(SEED)  # noqa: S311 -- deterministic synthetic data, not crypto
         snapshot_events = _snapshot_events(rng)
         for recv_ns, event in snapshot_events:
-            send_times[recv_ns] = await _send(writer, event)
+            await _send(writer, event, recv_ns, send_times)
         await _wait_processed(channel, len(snapshot_events))
 
         accepted, reason = await channel.submit(
@@ -284,7 +281,7 @@ async def _run_against(address: str) -> BenchResult:
         stream_events = _stream_events(rng, start_recv_ns=snapshot_events[-1][0])
         start_wall = time.perf_counter()
         for recv_ns, event in stream_events:
-            send_times[recv_ns] = await _send(writer, event)
+            await _send(writer, event, recv_ns, send_times)
         elapsed_s = time.perf_counter() - start_wall
         await writer.close()
         writer = None

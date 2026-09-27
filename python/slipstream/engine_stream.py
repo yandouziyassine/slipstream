@@ -210,6 +210,18 @@ class MarketStreamWriter:
         except asyncio.QueueFull as exc:
             raise EngineBackpressureError("market stream queue is full") from exc
 
+    async def drain(self) -> None:
+        """Waits until every queued event has been written to the engine, not just dequeued."""
+        joined = asyncio.ensure_future(self._queue.join())
+        try:
+            await asyncio.wait({joined, self._task}, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            joined.cancel()
+        if self._error is not None:
+            raise self._error
+        if self._task.done() and not joined.done():
+            raise EngineError("market stream stopped before its queue drained")
+
     async def close(self) -> int:
         if self._closed:
             raise EngineError("market stream is closed")
@@ -243,16 +255,21 @@ class MarketStreamWriter:
     async def _drain_until_closed_or_error(self) -> EngineError | None:
         while True:
             event = await self._queue.get()
-            if event is None:
-                return None
             try:
-                await self._call.write(event)
-            except grpc.aio.AioRpcError as exc:
-                return _rpc_error("market stream", exc)
+                if event is None:
+                    return None
+                try:
+                    await self._call.write(event)
+                except grpc.aio.AioRpcError as exc:
+                    return _rpc_error("market stream", exc)
+            finally:
+                # Marked done only after the write, so drain() means "written", not "dequeued".
+                self._queue.task_done()
 
     async def _discard_until_closed(self) -> None:
         while True:
             event = await self._queue.get()
+            self._queue.task_done()
             if event is None:
                 return
 
