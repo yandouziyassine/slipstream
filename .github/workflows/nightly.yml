@@ -28,7 +28,10 @@ jobs:
           python3 -m venv .venv
           .venv/bin/pip install --require-hashes -r python/requirements-dev.txt
       - name: Run nightly flake hunt
+        # Without an explicit shell a run step is `bash -e`, with no pipefail: tee's exit status
+        # would hide a failing nightly.sh.
         run: |
+          set -o pipefail
           PATH="$PWD/.venv/bin:$PATH" bash scripts/nightly.sh 2>&1 | tee nightly-output.log
       - name: Upload nightly output
         if: failure()
