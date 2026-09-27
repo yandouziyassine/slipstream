@@ -29,8 +29,6 @@ message BookUpdate {
   int64 recv_ns = 6;
 }
 
-message BookAck {}
-
 message TwapParams {}
 
 message VwapParams {
@@ -68,10 +66,6 @@ message SubmitReply {
   string reason = 2;
 }
 
-message StepRequest {
-  int64 now_ns = 1;
-}
-
 message Fill {
   string order_id = 1;
   int64 ts_ns = 2;
@@ -79,12 +73,6 @@ message Fill {
   double price = 4;
   string venue = 5;
   double fee = 6;
-}
-
-message StepReply {
-  repeated Fill fills = 1;
-  // Orders still working after this step.
-  int32 working_orders = 2;
 }
 
 message StatusRequest {}
@@ -170,8 +158,6 @@ message TradeBatch {
   string venue = 3;
 }
 
-message TradeAck {}
-
 message Heartbeat {}
 
 // Replay mode only: advances time.
@@ -211,11 +197,8 @@ message EngineEvent {
 }
 
 service ExecutionEngine {
-  rpc ApplyBookUpdate(BookUpdate) returns (BookAck);
   rpc SubmitParentOrder(ParentOrder) returns (SubmitReply);
-  rpc Step(StepRequest) returns (StepReply);
   rpc GetStatus(StatusRequest) returns (StatusReply);
-  rpc ApplyTrades(TradeBatch) returns (TradeAck);
   // Live mode: one stream per venue, named by the "slipstream-venue" request metadata.
   // Replay mode: exactly one stream, and every book or trade event names its own venue.
   rpc MarketStream(stream MarketEvent) returns (MarketStreamSummary);

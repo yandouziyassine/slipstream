@@ -335,20 +335,27 @@ TEST_F(EngineLoopTest, SubmitAndStepFillsTheFirstSliceForASubscriber) {
     EXPECT_EQ(loop.inspect([](Engine&, const LoopView& view) { return view.now_ns; }), 2 * kSec);
 }
 
-TEST_F(EngineLoopTest, WithoutASubscriberTheLoopNeverSteps) {
+TEST_F(EngineLoopTest, OrdersStepWithoutASubscriber) {
     EngineLoop loop(engine, ClockMode::Replay);
     ASSERT_TRUE(loop.push(deep_book(kSec)));
     wait_for_events(loop, 1);
+    const auto filled = [&] {
+        return loop.run([](Engine& e) { return e.statuses().at(0).filled_qty; });
+    };
 
     ASSERT_TRUE(loop.submit_and_step({"o", Side::Buy, 1.0, kSec, kSec, 2}, TwapSpec{}).accepted);
+    EXPECT_DOUBLE_EQ(filled(), 0.5);
+
     ASSERT_TRUE(loop.push(tick(2 * kSec)));
     wait_for_events(loop, 2);
-    const auto filled = loop.run([](Engine& e) { return e.statuses().at(0).filled_qty; });
-    EXPECT_DOUBLE_EQ(filled, 0.0);
+    EXPECT_DOUBLE_EQ(filled(), 1.0);
 
-    // A legacy client steps the order itself and reads the fills from the step output.
-    const auto output = loop.run([](Engine& e) { return e.step(kSec); });
-    ASSERT_EQ(output.fills.size(), 1u);
+    // A subscriber that arrives later sees only later events, numbered from one.
+    auto subscriber = loop.subscribe();
+    ASSERT_TRUE(loop.submit_and_step({"p", Side::Buy, 1.0, 2 * kSec, kSec, 1}, TwapSpec{}).accepted);
+    const auto events = drain(*subscriber);
+    ASSERT_FALSE(events.empty());
+    EXPECT_EQ(events[0].seq, 1u);
 }
 
 TEST_F(EngineLoopTest, LiveSubmitUsesTheEngineClock) {

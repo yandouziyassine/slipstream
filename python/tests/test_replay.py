@@ -1,28 +1,11 @@
 import json
-import logging
 from pathlib import Path
 
 import pytest
-from conftest import FakeEngine
 from test_kraken_rest import ohlc_body
-from test_live import coinbase_snapshot
 
 from slipstream.kraken import parse_message
-from slipstream.models import OrderSpec
-from slipstream.replay import ReplayError, read_calibration, read_replay, run_replay
-from slipstream.runner import ExecutionRunner
-
-SNAPSHOT = {
-    "channel": "book",
-    "type": "snapshot",
-    "data": [
-        {
-            "symbol": "BTC/USD",
-            "bids": [{"price": 99.0, "qty": 1.0}],
-            "asks": [{"price": 101.0, "qty": 1.0}],
-        }
-    ],
-}
+from slipstream.replay import ReplayError, read_calibration, read_replay
 
 FIXTURE = Path(__file__).parent / "fixtures" / "kraken_btcusd_replay.jsonl"
 
@@ -101,47 +84,6 @@ def test_rejects_invalid_utf8(tmp_path: Path) -> None:
         list(read_replay(file))
 
 
-def test_rejects_decreasing_timestamps(fake_engine: FakeEngine) -> None:
-    runner = ExecutionRunner(
-        fake_engine, OrderSpec("o-1", "buy", 1.0, 4, 4), "BTC/USD", logging.getLogger("t")
-    )
-    records = [
-        (10, json.dumps({"channel": "heartbeat"}), "kraken"),
-        (5, json.dumps({"channel": "heartbeat"}), "kraken"),
-    ]
-    with pytest.raises(ReplayError, match="non-decreasing"):
-        run_replay(runner, iter(records))
-
-
-def test_stops_when_order_done(fake_engine: FakeEngine) -> None:
-    fake_engine.done_after_steps = 1
-    runner = ExecutionRunner(
-        fake_engine, OrderSpec("o-1", "buy", 1.0, 4, 4), "BTC/USD", logging.getLogger("t")
-    )
-    records = [
-        (1, json.dumps(SNAPSHOT), "kraken"),
-        (2, json.dumps({"channel": "heartbeat"}), "kraken"),
-    ]
-    run_replay(runner, iter(records))
-    assert fake_engine.steps == [1]
-
-
-def test_run_replay_passes_venue_through(fake_engine: FakeEngine) -> None:
-    runner = ExecutionRunner(
-        fake_engine,
-        OrderSpec("o-1", "buy", 1.0, 4, 4),
-        "BTC/USD",
-        logging.getLogger("t"),
-        venues=("kraken", "coinbase"),
-    )
-    records = [
-        (1, coinbase_snapshot(0), "coinbase"),
-        (2, json.dumps(SNAPSHOT), "kraken"),
-    ]
-    run_replay(runner, iter(records))
-    assert [book.venue for book in fake_engine.books] == ["coinbase", "kraken"]
-
-
 def test_fixture_replays_valid_kraken_messages() -> None:
     records = list(read_replay(FIXTURE))
     assert len(records) == 7
@@ -174,21 +116,3 @@ def test_replay_skips_ohlc_header_and_calibration_reads_it(tmp_path: Path) -> No
 def test_bad_calibration_lines_raise(tmp_path: Path, line: str) -> None:
     with pytest.raises(ReplayError, match="line 1"):
         read_calibration(write_lines(tmp_path / "bad.jsonl", [line]))
-
-
-def test_replay_skips_venues_the_runner_does_not_trade(fake_engine: FakeEngine) -> None:
-    runner = ExecutionRunner(
-        fake_engine, OrderSpec("o-1", "buy", 1.0, 4, 4), "BTC/USD", logging.getLogger("t")
-    )
-    records = [(1, coinbase_snapshot(0), "coinbase"), (2, json.dumps(SNAPSHOT), "kraken")]
-    run_replay(runner, iter(records))
-    assert [book.venue for book in fake_engine.books] == ["kraken"]
-
-
-def test_skipped_records_still_count_for_timestamp_order(fake_engine: FakeEngine) -> None:
-    runner = ExecutionRunner(
-        fake_engine, OrderSpec("o-1", "buy", 1.0, 4, 4), "BTC/USD", logging.getLogger("t")
-    )
-    records = [(5, coinbase_snapshot(0), "coinbase"), (2, json.dumps(SNAPSHOT), "kraken")]
-    with pytest.raises(ReplayError, match="non-decreasing"):
-        run_replay(runner, iter(records))

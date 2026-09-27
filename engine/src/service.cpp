@@ -195,28 +195,6 @@ ExecutionService::ExecutionService(EngineLoop& loop, std::string symbol)
       validator_(std::move(symbol), venue_names(loop),
                  loop.run([](Engine& engine) { return engine.book_depth(); })) {}
 
-std::int64_t ExecutionService::now_or(std::int64_t client_ns) const {
-    return loop_.mode() == ClockMode::Live ? loop_.live_now_ns() : client_ns;
-}
-
-grpc::Status ExecutionService::ApplyBookUpdate(grpc::ServerContext*, const v1::BookUpdate* request,
-                                               v1::BookAck*) {
-    const auto venue = validator_.resolve_venue(request->venue());
-    if (!venue) return invalid("unknown venue");
-    auto admitted = validator_.book(*request, *venue);
-    if (const auto* status = std::get_if<grpc::Status>(&admitted)) return *status;
-    const auto& book = std::get<BookData>(std::get<MarketItem>(admitted).data);
-    return on_loop([&] {
-        const bool ok = loop_.run([&](Engine& engine) {
-            const auto recv_ns = now_or(book.recv_ns);
-            return book.is_snapshot
-                       ? engine.apply_book_snapshot(*venue, book.bids, book.asks, recv_ns)
-                       : engine.apply_book_update(*venue, book.bids, book.asks, recv_ns);
-        });
-        return ok ? grpc::Status::OK : invalid("invalid price level");
-    });
-}
-
 grpc::Status ExecutionService::SubmitParentOrder(grpc::ServerContext*,
                                                  const v1::ParentOrder* request,
                                                  v1::SubmitReply* reply) {
@@ -235,19 +213,6 @@ grpc::Status ExecutionService::SubmitParentOrder(grpc::ServerContext*,
     });
 }
 
-grpc::Status ExecutionService::Step(grpc::ServerContext*, const v1::StepRequest* request,
-                                    v1::StepReply* reply) {
-    return on_loop([&] {
-        loop_.run([&](Engine& engine) {
-            for (const auto& fill : engine.step(now_or(request->now_ns())).fills) {
-                to_proto(fill, *reply->add_fills());
-            }
-            reply->set_working_orders(static_cast<std::int32_t>(engine.working_orders()));
-        });
-        return grpc::Status::OK;
-    });
-}
-
 grpc::Status ExecutionService::GetStatus(grpc::ServerContext*, const v1::StatusRequest*,
                                          v1::StatusReply* reply) {
     return on_loop([&] {
@@ -255,19 +220,6 @@ grpc::Status ExecutionService::GetStatus(grpc::ServerContext*, const v1::StatusR
             fill_status(engine, view, loop_.mode(), *reply);
         });
         return grpc::Status::OK;
-    });
-}
-
-grpc::Status ExecutionService::ApplyTrades(grpc::ServerContext*, const v1::TradeBatch* request,
-                                           v1::TradeAck*) {
-    const auto venue = validator_.resolve_venue(request->venue());
-    if (!venue) return invalid("unknown venue");
-    auto admitted = validator_.trades(*request, *venue);
-    if (const auto* status = std::get_if<grpc::Status>(&admitted)) return *status;
-    const auto& trades = std::get<TradeData>(std::get<MarketItem>(admitted).data).trades;
-    return on_loop([&] {
-        const bool ok = loop_.run([&](Engine& engine) { return engine.apply_trades(trades); });
-        return ok ? grpc::Status::OK : invalid("invalid trade");
     });
 }
 

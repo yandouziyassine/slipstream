@@ -130,9 +130,8 @@ public:
     template <class F>
     std::invoke_result_t<F&, Engine&, const LoopView&> inspect(F&& fn);
 
-    // Submits on the engine thread. Live mode replaces start_ns with the engine clock. While a
-    // subscriber is active, the order is stepped at once so its first slice executes at
-    // submission and the subscriber receives those events.
+    // Submits on the engine thread, then steps every order at once so the first slice executes at
+    // submission. Live mode replaces start_ns with the engine clock.
     SubmitResult submit_and_step(ParentOrderRequest request, ScheduleSpec spec);
 
     ClockMode mode() const { return mode_; }
@@ -168,7 +167,8 @@ private:
     void process(const Pending& pending);
     std::int64_t item_time(const MarketItem& item) const;
     void apply(const MarketItem& item);
-    void step_if_subscribed();
+    // Steps every order at the event time; the active subscriber, if any, receives the events.
+    void step_and_publish();
     void publish(Subscriber& subscriber, StepOutput output);
     LoopView view() const;
 

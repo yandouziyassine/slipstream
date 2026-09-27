@@ -9,10 +9,10 @@ from dataclasses import dataclass
 from slipstream.book import LocalBook, consolidated_book
 from slipstream.calibration import CalibrationData, schedule_params
 from slipstream.coinbase import CoinbaseStream
-from slipstream.engine_client import EngineError
 from slipstream.engine_stream import (
     EngineBackpressureError,
     EngineChannel,
+    EngineError,
     MarketStreamWriter,
     Subscription,
     book_event,
@@ -32,11 +32,12 @@ from slipstream.models import (
     Venue,
 )
 from slipstream.replay import ReplayError
-from slipstream.runner import MAX_QUIET_BOOK_NS, OrderRejectedError
 from slipstream.v1 import execution_pb2 as pb
 from slipstream.venue_ws import IDLE_TIMEOUT_S
 
 _NS_PER_S = 1_000_000_000
+# Heartbeats may keep a venue fresh only this long after its last real book change.
+MAX_QUIET_BOOK_NS = 30_000_000_000
 # The engine rejects a replay clock that jumps more than one day in a single event.
 _MAX_TICK_JUMP_NS = 86_400 * _NS_PER_S
 _POLL_S = 0.005
@@ -55,6 +56,10 @@ _BOOK_TIMEOUT_S = 45.0
 DEADLINE_GRACE_S = 60
 
 _Parser = Callable[[str | bytes], BookUpdate | TradeBatch | None]
+
+
+class OrderRejectedError(RuntimeError):
+    pass
 
 
 def clock_mode_mismatch(actual: int, expected: int) -> str | None:
@@ -195,7 +200,7 @@ class ReplaySession:
         """The engine events for one record, and whether the orders are due after them.
 
         Once orders are working, every record yields exactly one engine step at its recv_ns,
-        as the unary runner did, except a trade record that also moves time forward (two).
+        except a trade record that also moves time forward (two).
         """
         update = self._parsers[venue](raw)
         if isinstance(update, BookUpdate):
@@ -444,8 +449,8 @@ class LiveSession:
         deadline_grace_s: float = DEADLINE_GRACE_S,
     ) -> SessionResult:
         await check_clock_mode(self._channel, pb.CLOCK_MODE_LIVE)
-        # Open the subscription before any feed starts: the engine only steps orders while
-        # subscribed, so a submit before this would never see a fill or a terminal update.
+        # Open the subscription before any submit: the engine delivers fills and order updates
+        # only to an active subscriber, so events from before it opens are never seen.
         subscription = await asyncio.wait_for(
             Subscription.open(self._channel), timeout=_SUBSCRIBE_TIMEOUT_S
         )

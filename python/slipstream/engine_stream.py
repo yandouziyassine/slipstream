@@ -10,25 +10,78 @@ import grpc
 import grpc.aio
 
 from slipstream.config import validate_engine_address
-from slipstream.engine_client import (
-    EngineError,
-    book_update_to_proto,
-    order_to_proto,
-    trade_batch_to_proto,
+from slipstream.models import (
+    VENUES,
+    AlmgrenChrissParams,
+    BookUpdate,
+    OrderSpec,
+    PovParams,
+    ScheduleParams,
+    TradeBatch,
+    Venue,
+    VwapParams,
 )
-from slipstream.models import VENUES, BookUpdate, OrderSpec, ScheduleParams, TradeBatch, Venue
 from slipstream.v1 import execution_pb2 as pb
 from slipstream.v1 import execution_pb2_grpc as pb_grpc
 
 _log = logging.getLogger(__name__)
 
+_NS_PER_S = 1_000_000_000
+_SIDES = {"buy": pb.SIDE_BUY, "sell": pb.SIDE_SELL}
 _MARKET_QUEUE_CAPACITY = 1000
 _VENUE_METADATA_KEY = "slipstream-venue"
 _SUBSCRIBED_METADATA_KEY = "slipstream-subscribed"
 
 
+class EngineError(RuntimeError):
+    pass
+
+
 class EngineBackpressureError(EngineError):
     pass
+
+
+def book_update_to_proto(update: BookUpdate, recv_ns: int) -> pb.BookUpdate:
+    return pb.BookUpdate(
+        symbol=update.symbol,
+        is_snapshot=update.is_snapshot,
+        bids=[pb.PriceLevel(price=price, qty=qty) for price, qty in update.bids],
+        asks=[pb.PriceLevel(price=price, qty=qty) for price, qty in update.asks],
+        venue=update.venue,
+        recv_ns=recv_ns,
+    )
+
+
+def order_to_proto(
+    spec: OrderSpec, start_ns: int, params: ScheduleParams | None = None
+) -> pb.ParentOrder:
+    order = pb.ParentOrder(
+        order_id=spec.order_id,
+        side=_SIDES[spec.side],
+        qty=spec.qty,
+        start_ns=start_ns,
+        duration_ns=spec.duration_s * _NS_PER_S,
+        num_slices=spec.num_slices,
+    )
+    if isinstance(params, VwapParams):
+        order.vwap.weights.extend(params.weights)
+    elif isinstance(params, AlmgrenChrissParams):
+        order.almgren_chriss.sigma = params.sigma
+        order.almgren_chriss.eta = params.eta
+        order.almgren_chriss.risk_aversion = params.risk_aversion
+    elif isinstance(params, PovParams):
+        order.pov.participation = params.participation
+    else:
+        order.twap.SetInParent()
+    return order
+
+
+def trade_batch_to_proto(batch: TradeBatch) -> pb.TradeBatch:
+    return pb.TradeBatch(
+        symbol=batch.symbol,
+        trades=[pb.Trade(price=price, qty=qty) for price, qty in batch.trades],
+        venue=batch.venue,
+    )
 
 
 def _rpc_error(action: str, exc: grpc.aio.AioRpcError) -> EngineError:

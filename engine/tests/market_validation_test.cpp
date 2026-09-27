@@ -116,7 +116,7 @@ TEST_F(MarketValidationTest, RejectsBadBooks) {
     EXPECT_EQ(code(validator.book(book_update("", -1), 0)), grpc::StatusCode::INVALID_ARGUMENT);
 
     auto too_many = book_update("", 0);
-    for (int i = 0; i < MarketValidator::kMaxLevelsPerUpdate; ++i) {
+    for (int i = 0; i < MarketValidator::kMaxLevels; ++i) {
         auto* ask = too_many.add_asks();
         ask->set_price(200.0 + i);
         ask->set_qty(1.0);
@@ -248,7 +248,7 @@ TEST_F(MarketValidationTest, ReplayRejectsAnInvalidBookBeforeRecordingItsTime) {
     EXPECT_EQ(code(stream.admit(book_event("kraken", kSec))), grpc::StatusCode::OK);
 }
 
-TEST_F(MarketValidationTest, StreamsCapLevelsPerSideAtBookDepthOrOneHundred) {
+TEST_F(MarketValidationTest, CapsLevelsPerSideAtBookDepthOrOneHundred) {
     auto live = StreamAdmission::live(validator, 0);
     EXPECT_EQ(code(live.admit(wide_book_event("", 0, 100))), grpc::StatusCode::OK);
     EXPECT_EQ(code(live.admit(wide_book_event("", 0, 101))), grpc::StatusCode::INVALID_ARGUMENT);
@@ -265,15 +265,18 @@ TEST_F(MarketValidationTest, StreamsCapLevelsPerSideAtBookDepthOrOneHundred) {
     EXPECT_EQ(code(replay.admit(wide_book_event("kraken", kSec, 101))),
               grpc::StatusCode::INVALID_ARGUMENT);
 
-    // The unary path keeps its own, wider cap.
-    EXPECT_EQ(code(validator.book(wide_book_event("", 0, 101).book(), 0)), grpc::StatusCode::OK);
+    EXPECT_EQ(validator.max_levels(), 100);
+    EXPECT_EQ(code(validator.book(wide_book_event("", 0, 101).book(), 0)),
+              grpc::StatusCode::INVALID_ARGUMENT);
 }
 
-TEST_F(MarketValidationTest, StreamLevelCapFollowsADeeperBook) {
+TEST_F(MarketValidationTest, LevelCapFollowsADeeperBookUpToTheMaximum) {
     MarketValidator deep{"BTC/USD", {"kraken"}, 250};
     auto stream = StreamAdmission::live(deep, 0);
     EXPECT_EQ(code(stream.admit(wide_book_event("", 0, 250))), grpc::StatusCode::OK);
     EXPECT_EQ(code(stream.admit(wide_book_event("", 0, 251))), grpc::StatusCode::INVALID_ARGUMENT);
+    MarketValidator deepest{"BTC/USD", {"kraken"}, 5000};
+    EXPECT_EQ(deepest.max_levels(), MarketValidator::kMaxLevels);
 }
 
 TEST_F(MarketValidationTest, CapsTradePriceAndQuantity) {

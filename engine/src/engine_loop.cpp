@@ -96,7 +96,7 @@ SubmitResult EngineLoop::submit_and_step(ParentOrderRequest request, ScheduleSpe
         auto result = engine.submit(timed, spec);
         if (result.accepted) {
             event_time_ = std::max(event_time_, timed.start_ns);
-            step_if_subscribed();
+            step_and_publish();
         }
         return result;
     });
@@ -166,7 +166,7 @@ void EngineLoop::drain_commands() {
 void EngineLoop::process(const Pending& pending) {
     event_time_ = std::max(event_time_, item_time(pending.item));
     apply(pending.item);
-    step_if_subscribed();
+    step_and_publish();
     ++events_;
     latency_.record(steady_now_ns() - pending.ingest_steady_ns);
 }
@@ -193,15 +193,14 @@ void EngineLoop::apply(const MarketItem& item) {
     }
 }
 
-// Until PR 3 removes the unary Step RPC, a client without a subscription steps orders itself
-// and reads the fills from StepReply, so the loop must not step (and consume) them first.
-void EngineLoop::step_if_subscribed() {
+void EngineLoop::step_and_publish() {
+    auto output = engine_.step(event_time_);
     std::shared_ptr<Subscriber> subscriber;
     {
         std::lock_guard lock(subscriber_mutex_);
         subscriber = subscriber_;
     }
-    if (subscriber) publish(*subscriber, engine_.step(event_time_));
+    if (subscriber) publish(*subscriber, std::move(output));
 }
 
 void EngineLoop::publish(Subscriber& subscriber, StepOutput output) {

@@ -38,8 +38,7 @@ MarketValidator::MarketValidator(std::string symbol, std::vector<std::string> ve
                                  std::size_t book_depth)
     : symbol_(std::move(symbol)),
       venues_(std::move(venues)),
-      stream_max_levels_(static_cast<int>(
-          std::clamp<std::size_t>(book_depth, kMinStreamLevels, kMaxLevelsPerUpdate))) {}
+      max_levels_(static_cast<int>(std::clamp<std::size_t>(book_depth, kMinLevels, kMaxLevels))) {}
 
 std::optional<std::size_t> MarketValidator::resolve_venue(std::string_view name) const {
     if (name.empty()) {
@@ -52,7 +51,7 @@ std::optional<std::size_t> MarketValidator::resolve_venue(std::string_view name)
 
 Admission MarketValidator::book(const v1::BookUpdate& update, std::size_t venue) const {
     if (update.symbol() != symbol_) return invalid("unexpected symbol");
-    if (update.bids_size() > kMaxLevelsPerUpdate || update.asks_size() > kMaxLevelsPerUpdate) {
+    if (update.bids_size() > max_levels_ || update.asks_size() > max_levels_) {
         return invalid("too many levels");
     }
     if (update.recv_ns() < 0) return invalid("invalid recv_ns");
@@ -103,7 +102,7 @@ Admission StreamAdmission::admit_live(const v1::MarketEvent& event) const {
             const auto venue = live_venue(event.book().venue());
             if (!venue) return invalid("event venue differs from the stream venue");
             if (event.book().recv_ns() != 0) return invalid("live mode does not accept recv_ns");
-            return book(event.book(), *venue);
+            return validator_.book(event.book(), *venue);
         }
         case v1::MarketEvent::kTrades: {
             const auto venue = live_venue(event.trades().venue());
@@ -126,7 +125,7 @@ Admission StreamAdmission::admit_replay(const v1::MarketEvent& event) {
             const auto venue = replay_venue(event.book().venue());
             if (!venue) return invalid("replay events must name a registered venue");
             if (event.book().recv_ns() <= 0) return invalid("replay books need recv_ns");
-            auto admitted = book(event.book(), *venue);
+            auto admitted = validator_.book(event.book(), *venue);
             if (std::holds_alternative<MarketItem>(admitted) && !advance(event.book().recv_ns())) {
                 return invalid("replay time went backwards or jumped more than a day");
             }
@@ -154,14 +153,6 @@ Admission StreamAdmission::admit_replay(const v1::MarketEvent& event) {
             break;
     }
     return invalid("empty market event");
-}
-
-Admission StreamAdmission::book(const v1::BookUpdate& update, std::size_t venue) const {
-    const int max_levels = validator_.stream_max_levels();
-    if (update.bids_size() > max_levels || update.asks_size() > max_levels) {
-        return invalid("too many levels");
-    }
-    return validator_.book(update, venue);
 }
 
 std::optional<std::size_t> StreamAdmission::live_venue(std::string_view name) const {

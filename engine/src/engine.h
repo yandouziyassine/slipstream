@@ -129,7 +129,6 @@ public:
     StepOutput step(std::int64_t now_ns);
 
     std::vector<OrderStatus> statuses() const;
-    std::size_t working_orders() const;
     std::size_t book_depth() const;
     double position() const;
     std::optional<double> mid() const;

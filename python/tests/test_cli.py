@@ -11,7 +11,7 @@ from slipstream.cli import (
     routing_gain_bps,
     saved_bps,
 )
-from slipstream.engine_client import EngineError
+from slipstream.engine_stream import EngineError
 from slipstream.models import Fill
 from slipstream.v1 import execution_pb2 as pb
 from slipstream.venue_rules import VenueRules, VenueRulesError

@@ -1,14 +1,13 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
 from slipstream.kraken import KrakenMessageError
 from slipstream.kraken_rest import SUPPORTED_INTERVALS, Bar, parse_ohlc
 from slipstream.models import VENUES, Venue
-from slipstream.runner import ExecutionRunner
 
 _VALID_VENUES: frozenset[Venue] = frozenset(VENUES)
 
@@ -72,16 +71,3 @@ def read_calibration(path: Path) -> dict[int, tuple[Bar, ...]]:
         except KrakenMessageError as exc:
             raise ReplayError(f"line {lineno}: invalid OHLC data: {exc}") from exc
     return bars
-
-
-def run_replay(runner: ExecutionRunner, records: Iterable[tuple[int, str, Venue]]) -> None:
-    last_ns = 0
-    for recv_ns, raw, venue in records:
-        if recv_ns < last_ns:
-            raise ReplayError("replay timestamps must be non-decreasing")
-        last_ns = recv_ns
-        if venue not in runner.venues:
-            continue
-        runner.on_message(raw, recv_ns, venue)
-        if runner.is_done():
-            return
