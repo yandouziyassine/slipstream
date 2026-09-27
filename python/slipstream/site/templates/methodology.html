@@ -1,0 +1,20 @@
+  <h2>How a run works</h2>
+  <p>Every hour, on the even UTC hour Slipstream buys and on the odd UTC hour it sells, running two order sizes (0.01 and 0.25 BTC) one after another. Each size is executed at the same time with all four strategies (TWAP, VWAP, POV, Almgren-Chriss) against the live public Kraken and Coinbase order books, over 10 minutes. The router splits each strategy's slices across both venues by all-in price (price plus that venue's taker fee), and also prices the same slice on each venue alone, so every run can report what routing actually saved.</p>
+
+  <h2>What "all-in cost" means</h2>
+  <p>All-in cost is the slippage against the arrival mid-price, plus the exchange's taker fee, in basis points (1 bps = 0.01%). Fees are entry-tier examples (40 bps on Kraken, 60 bps on Coinbase in the current configuration), not the lowest tier either exchange offers at volume.</p>
+
+  <h2>Known limits</h2>
+  <ul>
+    <li><b>Paper trading only.</b> No order placed by this project has ever touched a real exchange account; there is no code path that can.</li>
+    <li><b>Fills do not consume order-book liquidity.</b> A simulated fill removes nothing from the book that later slices trade against, so a large order can look slightly cheaper here than a real one would be. This is the top item for Phase 2.</li>
+    <li><b>Only two venues, one symbol.</b> Kraken and Coinbase, BTC/USD.</li>
+    <li><b>Fee tier is fixed.</b> Real fees vary by 30-day volume and by account.</li>
+    <li><b>A crash mid-run is recorded, not hidden.</b> A run still "started" when the process ends is marked <code>abandoned</code> on the next hourly run; a run that raises an error is marked <code>failed</code> with that error kept.</li>
+  </ul>
+
+  <h2>Statistics</h2>
+  <p>Every "cheaper" claim on the live page is a bootstrap 95% interval (1,000 resamples, a fixed seed for reproducibility) on the difference of medians. A strategy is only named cheaper when that interval excludes zero; otherwise the page says the comparison is not yet distinguishable, together with the sample size.</p>
+
+  <h2>Source</h2>
+  <p>Every line of the engine, the collector and this page is public: <a href="${github_url}">${github_label}</a>.</p>
