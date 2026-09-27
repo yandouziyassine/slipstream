@@ -34,9 +34,28 @@ Hourly job ─► paper order through the core ─► results ─► static lead
 
 Each step adds only one new attack surface, and each surface is reviewed before the next step starts.
 
+0. **Historical results database: the proof (added 2026-09-27, user request). Start collecting as early as possible, because evidence only builds up over time.**
+   - **What is stored:**
+     - Every scheduled paper run: time; order spec; the fees used; per-algorithm fills, all-in cost, fees, slippage and routing gain; the venue split; engine latency stats.
+     - Optionally, the raw recorded market data for each run, so any run can be replayed and audited later.
+   - **Where it lives:** SQLite on the VM, in WAL mode, append-only. That means one file with no server, which is free, fast and simple.
+     - A schema version table guards migrations.
+     - Nightly backups go to Oracle Object Storage (Always Free) or a GitHub release asset.
+   - **Integrity:**
+     - Each row carries the git commit of the code that produced it, so results stay attributable.
+     - Rows are never updated; a correction is a new row.
+     - Raw recordings get a checksum.
+   - **Who uses it:**
+     - The leaderboard: charts, confidence bands, the history page.
+     - The CSV download.
+     - Later, the API's `GET /v1/history` endpoint, and the smarter router, which learns venue reliability and freshness by hour.
+   - **Before the VM exists:** the collector can already run on the local machine to start the dataset. It is imported into the VM database once the VM is up.
 1. **E: live leaderboard.**
-   - An hourly scheduled paper order runs on the Oracle VM. Results are published as a static page.
+   - An hourly scheduled paper order runs on the Oracle VM. Results are published as a static page generated from the database (item 0).
    - **No inbound surface:** there is no public endpoint, only published files.
+   - **The page includes a "Use it yourself" section.**
+     - The public API (C) and the MCP server (B) are shown as *coming soon*, with a short description of each.
+     - Each section links to its docs once it ships.
 2. **C, part 1: instant cost-estimate API.**
    - `POST /v1/estimate` answers in milliseconds with the best fee-adjusted route, the all-in cost and the savings. The engine already computes the "fill everything now" route.
    - Open to anyone, rate-limited per IP, served over HTTPS.
@@ -47,7 +66,16 @@ Each step adds only one new attack surface, and each surface is reviewed before 
 
 **Prerequisite:** pipeline PR 3 (remove the legacy unary path, add the CI latency benchmark) lands first, so the hosted core runs on the concurrent pipeline.
 
-## 5. Security baseline (applies to every sub-project)
+## 5. Router data expansion (roadmap, separate specs)
+
+These are ordered by value against effort:
+1. **Bitstamp and Gemini.** Both are USD pairs with public WebSocket books, so there is no currency conversion, and each costs about the same effort as the Coinbase venue did.
+2. **A stablecoin rate feed (USDT/USD, USDC/USD).** This is needed before routing to USDT books.
+3. **OKX / Bybit BTC-USDT.** These are among the deepest books, but route through a conversion step and have regional availability limits. That matters only for real trading, never for paper.
+4. **Learned venue reliability.** From the historical database (item 0): freshness, spread and depth by hour, used as a routing tie-breaker.
+5. **The user's real fee tier.** Optional; it needs an account on each venue, so it is never required.
+
+## 6. Security baseline (applies to every sub-project)
 
 - HTTPS only, with automatic certificates, for example Caddy with Let's Encrypt. A free DNS name if no domain is owned.
 - The VM firewall opens only 443, plus 22 for SSH, which is key-only (no passwords) and restricted to the user's IP where practical.
