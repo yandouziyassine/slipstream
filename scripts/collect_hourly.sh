@@ -20,8 +20,11 @@ echo "=== collect_hourly $STAMP UTC ==="
 
 bash scripts/build_release.sh
 
-mapfile -t VENUE_ARGS < <(python -m slipstream.cli venue-flags --venues kraken,coinbase \
-  --fees "${SLIPSTREAM_VENUE_FEES:-kraken=40,coinbase=60}")
+# Captured via `$(...)`, not `< <(...)`: a process substitution's exit status is invisible to
+# `set -e`, so a failing venue-flags call (e.g. a network error) would otherwise go unnoticed.
+VENUE_OUTPUT="$(python -m slipstream.cli venue-flags --venues kraken,coinbase \
+  --fees "${SLIPSTREAM_VENUE_FEES:-kraken=40,coinbase=60}")"
+mapfile -t VENUE_ARGS <<<"$VENUE_OUTPUT"
 if [[ ${#VENUE_ARGS[@]} -eq 0 ]]; then
   echo "venue-flags produced no engine arguments; aborting" >&2
   exit 1
