@@ -348,6 +348,19 @@ TEST(StreamTest, SecondSubscriberIsRejectedUntilTheFirstLeaves) {
     (void)third.cancel();
 }
 
+TEST(StreamTest, OnlyAnActiveSubscriptionCarriesTheSubscribedMarker) {
+    Harness harness(ClockMode::Replay);
+    Subscription first(harness.stub());
+    EXPECT_TRUE(first.subscribed());
+    {
+        Subscription second(harness.stub());
+        EXPECT_FALSE(second.subscribed());
+        EXPECT_FALSE(second.next());
+        EXPECT_EQ(second.finish().error_code(), grpc::StatusCode::FAILED_PRECONDITION);
+    }
+    (void)first.cancel();
+}
+
 TEST(StreamTest, SlowSubscriberIsDisconnectedWithResourceExhausted) {
     Harness harness(ClockMode::Replay, 10'000, 1);
     {

@@ -20,6 +20,7 @@ from slipstream.v1 import execution_pb2_grpc as pb_grpc
 
 _MARKET_QUEUE_CAPACITY = 1000
 _VENUE_METADATA_KEY = "slipstream-venue"
+_SUBSCRIBED_METADATA_KEY = "slipstream-subscribed"
 
 
 class EngineBackpressureError(EngineError):
@@ -159,6 +160,12 @@ class MarketStreamWriter:
                 return
 
 
+def _is_subscribed(metadata: Any) -> bool:
+    if metadata is None:
+        return False
+    return any(key == _SUBSCRIBED_METADATA_KEY and value == "1" for key, value in metadata)
+
+
 class Subscription:
     def __init__(self, call: Any) -> None:
         self._call = call
@@ -166,12 +173,21 @@ class Subscription:
 
     @classmethod
     async def open(cls, channel: EngineChannel) -> Subscription:
-        call = channel.stub.Subscribe(pb.SubscribeRequest())
+        return await cls.from_call(channel.stub.Subscribe(pb.SubscribeRequest()))
+
+    @classmethod
+    async def from_call(cls, call: Any) -> Subscription:
         try:
-            await call.initial_metadata()
+            metadata = await call.initial_metadata()
+            if _is_subscribed(metadata):
+                return cls(call)
+            # A rejected call still resolves its (empty) initial metadata: report its status.
+            code = await call.code()
+            details = await call.details()
         except grpc.aio.AioRpcError as exc:
             raise _rpc_error("subscribe", exc) from exc
-        return cls(call)
+        call.cancel()
+        raise EngineError(f"subscribe failed: {code.name}: {details}")
 
     def __aiter__(self) -> Subscription:
         return self

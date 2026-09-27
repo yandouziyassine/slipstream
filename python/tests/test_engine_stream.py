@@ -125,6 +125,42 @@ class _FakeUnaryStreamCall:
         return True
 
 
+class _FakeSubscribeCall(_FakeUnaryStreamCall):
+    def __init__(self, metadata: tuple[tuple[str, str], ...], code: grpc.StatusCode) -> None:
+        super().__init__([])
+        self._metadata = metadata
+        self._code = code
+
+    async def initial_metadata(self) -> tuple[tuple[str, str], ...]:  # type: ignore[override]
+        return self._metadata
+
+    async def code(self) -> grpc.StatusCode:
+        return self._code
+
+    async def details(self) -> str:
+        return "detail"
+
+
+def test_subscription_opens_only_with_the_subscribed_marker() -> None:
+    async def scenario() -> None:
+        call = _FakeSubscribeCall((("slipstream-subscribed", "1"),), grpc.StatusCode.OK)
+        subscription = await Subscription.from_call(call)
+        assert not call.cancelled
+        await subscription.close()
+
+    asyncio.run(scenario())
+
+
+def test_subscription_without_the_marker_raises_even_if_the_call_ended_ok() -> None:
+    async def scenario() -> None:
+        call = _FakeSubscribeCall((), grpc.StatusCode.OK)
+        with pytest.raises(EngineError, match="OK"):
+            await Subscription.from_call(call)
+        assert call.cancelled
+
+    asyncio.run(scenario())
+
+
 def test_subscription_raises_when_seq_does_not_increase() -> None:
     async def scenario() -> None:
         call = _FakeUnaryStreamCall(
@@ -322,11 +358,8 @@ def test_second_subscription_is_rejected_while_the_first_is_open(engine_address:
         try:
             first = await Subscription.open(channel)
             try:
-                # open() only waits for initial metadata; the engine sends that unconditionally,
-                # so the rejection surfaces once we try to read from the second subscription.
-                second = await Subscription.open(channel)
                 with pytest.raises(EngineError, match="FAILED_PRECONDITION"):
-                    await anext(second)
+                    await Subscription.open(channel)
             finally:
                 await first.close()
         finally:

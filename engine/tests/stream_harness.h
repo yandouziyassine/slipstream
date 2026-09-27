@@ -124,6 +124,14 @@ public:
     // The server sends initial metadata once the subscription is active.
     void wait_active() { reader_->WaitForInitialMetadata(); }
 
+    // True only when the server's initial metadata carries the subscribed marker.
+    bool subscribed() {
+        reader_->WaitForInitialMetadata();
+        const auto& metadata = context_.GetServerInitialMetadata();
+        const auto found = metadata.find("slipstream-subscribed");
+        return found != metadata.end() && found->second == "1";
+    }
+
     std::optional<v1::EngineEvent> next() {
         v1::EngineEvent event;
         if (!reader_->Read(&event)) return std::nullopt;
