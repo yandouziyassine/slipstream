@@ -5,6 +5,7 @@ import json
 import logging
 from collections.abc import Iterable, Sequence
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -243,3 +244,28 @@ def test_session_rejects_bad_venue_lists() -> None:
             await channel.close()
 
     asyncio.run(scenario())
+
+
+class _FailingCloseWriter:
+    async def close(self) -> int:
+        raise EngineError("market stream failed: UNAVAILABLE: engine gone")
+
+
+def _bare_replay_session() -> Any:
+    from slipstream.session import ReplaySession
+
+    session = ReplaySession.__new__(ReplaySession)
+    session._log = logging.getLogger("test")
+    return session
+
+
+def test_a_data_error_stays_the_root_cause_when_closing_also_fails() -> None:
+    cause = MarketDataError("unexpected symbol 'ETH/USD'")
+    asyncio.run(_bare_replay_session()._abandon(_FailingCloseWriter(), cause))
+    assert any("market stream" in note for note in cause.__notes__)
+
+
+def test_an_engine_side_failure_is_replaced_by_the_stream_rejection() -> None:
+    cause = EngineError("timed out waiting for the engine to catch up")
+    with pytest.raises(EngineError, match="market stream failed"):
+        asyncio.run(_bare_replay_session()._abandon(_FailingCloseWriter(), cause))

@@ -38,6 +38,7 @@ _POLL_INTERVAL_S = 0.05
 # A feed writes its error to the queue before it exits; give the pipe a moment to deliver it.
 _UNREPORTED_EXIT_GRACE_S = 0.5
 _STOP_TIMEOUT_S = 5.0
+_KILL_JOIN_TIMEOUT_S = 2.0
 # Disconnects explain less than data or engine errors, as in live.root_cause.
 _NETWORK_ERROR_TYPES = frozenset(
     {
@@ -293,7 +294,8 @@ class FeedSupervisor:
             for process in processes:
                 if process.is_alive():
                     process.kill()
-                process.join()
+                # Bounded: this runs on the event loop, and a killed child is reaped in ms.
+                process.join(timeout=_KILL_JOIN_TIMEOUT_S)
 
     def exit_codes(self) -> dict[Venue, int | None]:
         return {venue: process.exitcode for venue, process in self._processes.items()}

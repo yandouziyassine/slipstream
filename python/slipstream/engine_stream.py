@@ -231,6 +231,10 @@ class Subscription:
             details = await call.details()
         except grpc.aio.AioRpcError as exc:
             raise _rpc_error("subscribe", exc) from exc
+        except BaseException:
+            # A cancelled or timed-out open must not keep the engine's only subscriber slot.
+            call.cancel()
+            raise
         call.cancel()
         raise EngineError(f"subscribe failed: {code.name}: {details}")
 

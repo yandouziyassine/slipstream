@@ -472,3 +472,24 @@ def test_second_subscription_is_rejected_while_the_first_is_open(engine_address:
             await channel.close()
 
     asyncio.run(scenario())
+
+
+def test_a_cancelled_subscribe_open_releases_the_call() -> None:
+    # A timed-out open must not keep the engine's only subscriber slot on this channel.
+    class _HangingCall:
+        cancelled = False
+
+        async def initial_metadata(self) -> Any:
+            await asyncio.sleep(10)
+
+        def cancel(self) -> None:
+            self.cancelled = True
+
+    call = _HangingCall()
+
+    async def run() -> None:
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(Subscription.from_call(call), timeout=0.05)
+
+    asyncio.run(run())
+    assert call.cancelled

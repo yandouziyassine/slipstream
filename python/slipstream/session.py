@@ -331,14 +331,17 @@ class ReplaySession:
         consumer.result()
 
     async def _abandon(self, writer: MarketStreamWriter, cause: BaseException) -> None:
-        # When the engine itself rejected the stream, that rejection is the root cause of
-        # whatever failed here (for example a catch-up wait that could never finish).
+        # When the engine itself rejected the stream, that rejection is the root cause of an
+        # engine-side failure here (for example a catch-up wait that could never finish). Data
+        # and order errors stay the root cause; the close failure is attached as a note.
         try:
             await _bounded(writer.close(), _CLOSE_TIMEOUT_S, "closing the market stream")
         except EngineError as exc:
-            if isinstance(cause, Exception):
+            if isinstance(cause, EngineError):
                 raise exc from cause
             self._log.error(f"market stream error during shutdown: {exc}")
+            if isinstance(cause, Exception):
+                cause.add_note(f"market stream also failed: {exc}")
 
 
 def _raise_if_failed(consumer: asyncio.Future[None]) -> None:
