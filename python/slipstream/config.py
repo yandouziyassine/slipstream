@@ -5,7 +5,7 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 
-_LOOPBACK = re.compile(r"^(127\.0\.0\.1|localhost|\[::1\]):(\d{1,5})$")
+_LOOPBACK = re.compile(r"(127\.0\.0\.1|localhost|\[::1\]):([0-9]{1,5})")
 
 
 class ConfigError(ValueError):
@@ -27,6 +27,6 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
 
 
 def validate_engine_address(address: str) -> None:
-    match = _LOOPBACK.match(address)
+    match = _LOOPBACK.fullmatch(address)
     if match is None or not 0 < int(match.group(2)) <= 65535:
         raise ConfigError("engine address must be a loopback host:port")

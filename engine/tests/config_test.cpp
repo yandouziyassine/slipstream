@@ -47,7 +47,7 @@ TEST(Config, RejectsMissingValue) {
 
 TEST(Config, RejectsNonLoopbackListen) {
     for (const char* addr : {"0.0.0.0:50051", "10.0.0.1:50051", "127.0.0.1", "127.0.0.1:99999",
-                             "127.0.0.1:abc"}) {
+                             "127.0.0.1:abc", "127.0.0.1:50051\n", "localhost:50051 "}) {
         EXPECT_FALSE(parse_args({"--listen", addr}).config) << addr;
     }
 }
