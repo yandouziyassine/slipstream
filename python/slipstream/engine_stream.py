@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import math
+from types import TracebackType
 from typing import Any, cast
 
 import grpc
@@ -17,6 +19,8 @@ from slipstream.engine_client import (
 from slipstream.models import VENUES, BookUpdate, OrderSpec, ScheduleParams, TradeBatch, Venue
 from slipstream.v1 import execution_pb2 as pb
 from slipstream.v1 import execution_pb2_grpc as pb_grpc
+
+_log = logging.getLogger(__name__)
 
 _MARKET_QUEUE_CAPACITY = 1000
 _VENUE_METADATA_KEY = "slipstream-venue"
@@ -108,6 +112,7 @@ class MarketStreamWriter:
         self._call = call
         self._queue = queue
         self._error: EngineError | None = None
+        self._closed = False
         self._task = asyncio.ensure_future(self._pump())
 
     @classmethod
@@ -117,7 +122,35 @@ class MarketStreamWriter:
         queue: asyncio.Queue[pb.MarketEvent | None] = asyncio.Queue(maxsize=_MARKET_QUEUE_CAPACITY)
         return cls(call, queue)
 
+    async def __aenter__(self) -> MarketStreamWriter:
+        return self
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> None:
+        if self._closed:
+            return
+        if exc is None:
+            await self.close()
+        elif not isinstance(exc, Exception):
+            # Cancellation or interpreter exit: stop now rather than wait to flush the queue.
+            self._closed = True
+            await self._abort()
+        else:
+            try:
+                await self.close()
+            except Exception as close_error:
+                _log.warning(
+                    "closing the market stream after an error also failed: %s", close_error
+                )
+                exc.add_note(f"closing the market stream also failed: {close_error}")
+
     def send_nowait(self, event: pb.MarketEvent) -> None:
+        if self._closed:
+            raise EngineError("market stream is closed")
         if self._error is not None:
             raise self._error
         try:
@@ -126,16 +159,28 @@ class MarketStreamWriter:
             raise EngineBackpressureError("market stream queue is full") from exc
 
     async def close(self) -> int:
-        await self._queue.put(None)
-        await self._task
-        if self._error is not None:
-            raise self._error
+        if self._closed:
+            raise EngineError("market stream is closed")
+        self._closed = True
         try:
-            await self._call.done_writing()
-            summary = await self._call
-        except grpc.aio.AioRpcError as exc:
-            raise _rpc_error("market stream", exc) from exc
+            await self._queue.put(None)
+            await self._task
+            if self._error is not None:
+                raise self._error
+            try:
+                await self._call.done_writing()
+                summary = await self._call
+            except grpc.aio.AioRpcError as exc:
+                raise _rpc_error("market stream", exc) from exc
+        except BaseException:
+            await self._abort()
+            raise
         return cast(int, summary.events)
+
+    async def _abort(self) -> None:
+        self._task.cancel()
+        self._call.cancel()
+        await asyncio.gather(self._task, return_exceptions=True)
 
     async def _pump(self) -> None:
         error = await self._drain_until_closed_or_error()

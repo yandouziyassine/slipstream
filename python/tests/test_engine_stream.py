@@ -57,19 +57,28 @@ def test_tick_event_carries_now_ns() -> None:
 
 
 class _FakeStreamUnaryCall:
-    def __init__(self, error: Exception | None = None) -> None:
+    def __init__(self, error: Exception | None = None, block_writes: bool = False) -> None:
         self.written: list[pb.MarketEvent] = []
         self._error = error
+        self._block_writes = block_writes
         self._summary = pb.MarketStreamSummary(events=0)
+        self.done_writing_called = False
+        self.cancelled = False
 
     async def write(self, event: pb.MarketEvent) -> None:
+        if self._block_writes:
+            await asyncio.Event().wait()
         if self._error is not None:
             raise self._error
         self.written.append(event)
         self._summary = pb.MarketStreamSummary(events=len(self.written))
 
     async def done_writing(self) -> None:
-        return None
+        self.done_writing_called = True
+
+    def cancel(self) -> bool:
+        self.cancelled = True
+        return True
 
     def __await__(self) -> Any:
         async def _result() -> pb.MarketStreamSummary:
@@ -103,6 +112,103 @@ def test_send_nowait_raises_stored_error_after_the_stream_dies() -> None:
         await asyncio.sleep(0)  # let the background pump observe the write failure
         with pytest.raises(EngineError, match="INVALID_ARGUMENT"):
             writer.send_nowait(pb.MarketEvent(heartbeat=pb.Heartbeat()))
+
+    asyncio.run(scenario())
+
+
+def _heartbeat() -> pb.MarketEvent:
+    return pb.MarketEvent(heartbeat=pb.Heartbeat())
+
+
+def _invalid_argument() -> grpc.aio.AioRpcError:
+    return grpc.aio.AioRpcError(
+        grpc.StatusCode.INVALID_ARGUMENT, grpc.aio.Metadata(), grpc.aio.Metadata()
+    )
+
+
+def _other_tasks() -> set[asyncio.Task[Any]]:
+    return asyncio.all_tasks() - {asyncio.current_task()}
+
+
+def test_writer_context_manager_closes_the_stream_on_normal_exit() -> None:
+    async def scenario() -> None:
+        call = _FakeStreamUnaryCall()
+        async with MarketStreamWriter(call, asyncio.Queue(maxsize=4)) as writer:
+            writer.send_nowait(_heartbeat())
+            writer.send_nowait(_heartbeat())
+        assert len(call.written) == 2
+        assert call.done_writing_called
+        assert not _other_tasks()
+
+    asyncio.run(scenario())
+
+
+def test_writer_context_manager_closes_and_reraises_on_exception_exit() -> None:
+    async def scenario() -> None:
+        call = _FakeStreamUnaryCall()
+        with pytest.raises(ValueError, match="boom"):
+            async with MarketStreamWriter(call, asyncio.Queue(maxsize=4)) as writer:
+                writer.send_nowait(_heartbeat())
+                raise ValueError("boom")
+        assert len(call.written) == 1
+        assert call.done_writing_called
+        assert not _other_tasks()
+
+    asyncio.run(scenario())
+
+
+def test_writer_context_manager_keeps_the_original_error_when_close_also_fails() -> None:
+    async def scenario() -> None:
+        call = _FakeStreamUnaryCall(error=_invalid_argument())
+        with pytest.raises(ValueError, match="boom") as caught:
+            async with MarketStreamWriter(call, asyncio.Queue(maxsize=4)) as writer:
+                writer.send_nowait(_heartbeat())
+                raise ValueError("boom")
+        assert any("INVALID_ARGUMENT" in note for note in caught.value.__notes__)
+        assert not _other_tasks()
+
+    asyncio.run(scenario())
+
+
+def test_writer_context_manager_raises_the_close_error_on_normal_exit() -> None:
+    async def scenario() -> None:
+        call = _FakeStreamUnaryCall(error=_invalid_argument())
+        with pytest.raises(EngineError, match="INVALID_ARGUMENT"):
+            async with MarketStreamWriter(call, asyncio.Queue(maxsize=4)) as writer:
+                writer.send_nowait(_heartbeat())
+        assert call.cancelled
+        assert not _other_tasks()
+
+    asyncio.run(scenario())
+
+
+def test_cancelling_a_blocked_close_cancels_the_pump_and_the_call() -> None:
+    async def scenario() -> None:
+        call = _FakeStreamUnaryCall(block_writes=True)
+        writer = MarketStreamWriter(call, asyncio.Queue(maxsize=4))
+
+        async def use_writer() -> None:
+            async with writer:
+                writer.send_nowait(_heartbeat())
+
+        task = asyncio.ensure_future(use_writer())
+        await asyncio.sleep(0.05)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert call.cancelled
+        assert not _other_tasks()
+
+    asyncio.run(scenario())
+
+
+def test_exiting_after_an_explicit_close_does_not_close_twice() -> None:
+    async def scenario() -> None:
+        call = _FakeStreamUnaryCall()
+        async with MarketStreamWriter(call, asyncio.Queue(maxsize=4)) as writer:
+            writer.send_nowait(_heartbeat())
+            assert await writer.close() == 1
+        assert not _other_tasks()
 
     asyncio.run(scenario())
 
