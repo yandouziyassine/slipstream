@@ -13,22 +13,21 @@ from typing import cast
 
 from slipstream.calibration import CalibrationData, CalibrationError
 from slipstream.config import ConfigError, load_settings, validate_engine_address
-from slipstream.engine_client import EngineClient, EngineError
+from slipstream.engine_client import EngineError
 from slipstream.engine_stream import EngineChannel
 from slipstream.kraken_rest import fetch_ohlc, parse_ohlc
-from slipstream.live import LiveFeedError, run_live
+from slipstream.live import LiveFeedError
 from slipstream.logging_setup import configure_logging
 from slipstream.models import VENUES, Fill, MarketDataError, OrderSpec, Venue
 from slipstream.recorder import RecordError, open_new_file, record_stream, write_ohlc_header
 from slipstream.replay import ReplayError, read_calibration, read_replay
-from slipstream.runner import ExecutionRunner, OrderRejectedError
-from slipstream.session import ReplaySession, check_clock_mode, clock_mode_mismatch
+from slipstream.runner import OrderRejectedError
+from slipstream.session import LiveSession, ReplaySession, check_clock_mode
 from slipstream.v1 import execution_pb2 as pb
 from slipstream.venue_rules import VenueRules, VenueRulesError, fetch_venue_rules
 
 _SYMBOL = re.compile(r"^[A-Z0-9]{2,10}/[A-Z0-9]{2,10}$")
 _ORDER_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
-_DEADLINE_GRACE_S = 60
 ALGOS = ("twap", "vwap", "pov", "almgren_chriss")
 _CALIBRATED = ("vwap", "almgren_chriss")
 _DEPTH_CHECKED_COMMANDS = ("live", "compare")
@@ -460,28 +459,41 @@ async def _replay(
         await channel.close()
 
 
-def _live(
+def _log_stats(log: logging.Logger, stats: pb.EngineStats) -> None:
+    log.info(
+        "stats",
+        extra={
+            "fields": {
+                "event": "stats",
+                "events": stats.events,
+                "latency_p50_us": stats.latency_p50_ns / 1000.0,
+                "latency_p99_us": stats.latency_p99_ns / 1000.0,
+            }
+        },
+    )
+
+
+async def _live(
     args: argparse.Namespace,
     address: str,
     specs: Sequence[OrderSpec],
     calibration: CalibrationData | None,
     log: logging.Logger,
 ) -> int:
-    client = EngineClient(address)
-    runner: ExecutionRunner | None = None
+    channel = EngineChannel(address)
+    session: LiveSession | None = None
     try:
-        client.wait_ready()
-        problem = clock_mode_mismatch(client.status().clock_mode, pb.CLOCK_MODE_LIVE)
+        await channel.wait_ready()
+        await check_clock_mode(channel, pb.CLOCK_MODE_LIVE)
+        fees = await channel.venue_fees()
+        problem = _venues_mismatch(fees, args)
+        if problem is None:
+            problem = _depth_mismatch(await channel.book_depth(), args)
         if problem is not None:
             log.error(problem)
             return 1
-        fees = client.venue_fees()
-        problem = _venues_mismatch(fees, args) or _depth_mismatch(client.book_depth(), args)
-        if problem is not None:
-            log.error(problem)
-            return 1
-        runner = ExecutionRunner(
-            client,
+        session = LiveSession(
+            channel,
             specs,
             args.symbol,
             log,
@@ -490,23 +502,21 @@ def _live(
             book_depth=args.depth,
             fee_bps=fees,
         )
-        deadline_s = args.duration + _DEADLINE_GRACE_S
-        asyncio.run(
-            run_live(runner, args.symbol, args.depth, deadline_s=deadline_s, venues=args.venues)
-        )
-        return _finish(args, runner.order_statuses(), runner.fills, log)
+        result = await session.run(address)
+        _log_stats(log, result.stats)
+        return _finish(args, result.statuses, result.fills, log)
     except _RUN_ERRORS as exc:
         log.error(str(exc))
-        if runner is not None:
+        if session is not None:
             try:
-                statuses = runner.order_statuses()
+                statuses = await session.order_statuses()
             except EngineError as status_exc:
                 _log_status_error(log, status_exc)
             else:
-                _print_best_effort(args, statuses, runner.fills)
+                _print_best_effort(args, statuses, session.fills)
         return 1
     finally:
-        client.close()
+        await channel.close()
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -527,7 +537,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
     if getattr(args, "file", None) is not None:
         return asyncio.run(_replay(args, address, specs, calibration, log))
-    return _live(args, address, specs, calibration, log)
+    return asyncio.run(_live(args, address, specs, calibration, log))
 
 
 if __name__ == "__main__":

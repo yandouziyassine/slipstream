@@ -396,28 +396,31 @@ def test_every_feed_command_accepts_venues(command: str) -> None:
     )
 
 
-class _FakeClient:
+class _FakeChannel:
+    """A fake async EngineChannel: only used for the pre-session checks in cli._live, which
+    return before any real gRPC call or feed process would be started."""
+
     def __init__(self, address: str) -> None:
         self.closed = False
 
-    def wait_ready(self) -> None:
+    async def wait_ready(self, timeout_s: float = 10.0) -> None:
         pass
 
-    def venue_fees(self) -> dict[str, float]:
+    async def venue_fees(self) -> dict[str, float]:
         return {"kraken": 40.0}
 
-    def book_depth(self) -> int:
+    async def book_depth(self) -> int:
         return 10
 
-    def status(self) -> pb.StatusReply:
+    async def status(self) -> pb.StatusReply:
         return pb.StatusReply(clock_mode=pb.CLOCK_MODE_LIVE)
 
-    def close(self) -> None:
+    async def close(self) -> None:
         self.closed = True
 
 
-class _DeepBookFakeClient(_FakeClient):
-    def book_depth(self) -> int:
+class _DeepBookFakeChannel(_FakeChannel):
+    async def book_depth(self) -> int:
         return 25
 
 
@@ -425,7 +428,7 @@ def test_live_refuses_when_engine_book_depth_exceeds_cli_depth(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     monkeypatch.delenv("SLIPSTREAM_PAPER_MODE", raising=False)
-    monkeypatch.setattr("slipstream.cli.EngineClient", _DeepBookFakeClient)
+    monkeypatch.setattr("slipstream.cli.EngineChannel", _DeepBookFakeChannel)
     code = main(["live", "--side", "buy", "--qty", "1", "--duration", "6", "--slices", "3"])
     assert code == 1
     assert "book depth" in capsys.readouterr().err
@@ -435,7 +438,7 @@ def test_compare_refuses_when_engine_book_depth_exceeds_cli_depth(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     monkeypatch.delenv("SLIPSTREAM_PAPER_MODE", raising=False)
-    monkeypatch.setattr("slipstream.cli.EngineClient", _DeepBookFakeClient)
+    monkeypatch.setattr("slipstream.cli.EngineChannel", _DeepBookFakeChannel)
     code = main(["compare", "--side", "buy", "--qty", "1", "--duration", "6", "--slices", "3"])
     assert code == 1
     assert "book depth" in capsys.readouterr().err
@@ -490,7 +493,7 @@ def test_live_venue_mismatch_with_engine_is_refused(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     monkeypatch.delenv("SLIPSTREAM_PAPER_MODE", raising=False)
-    monkeypatch.setattr("slipstream.cli.EngineClient", _FakeClient)
+    monkeypatch.setattr("slipstream.cli.EngineChannel", _FakeChannel)
     live = ["live", "--side", "buy", "--qty", "1", "--duration", "6", "--slices", "3"]
     assert main([*live, "--venues", "kraken,coinbase"]) == 1
     assert "do not match" in capsys.readouterr().err
