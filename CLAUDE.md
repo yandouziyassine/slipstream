@@ -41,15 +41,22 @@ Design: `docs/superpowers/specs/` (base design `2026-09-23-smart-execution-route
 - Hard risk limits live in the C++ engine and apply before any fill.
 - Python deps are hash-pinned in `python/requirements-dev.txt`. Regenerate with pip-compile; never hand-edit.
 
-## Commands (run inside the dev container; Docker Desktop must be running)
+## Commands (run inside WSL2 Ubuntu 24.04, with the venv on PATH)
+One-time setup on a fresh machine: `bash scripts/setup_wsl.sh` (installs the apt toolchain and creates `~/.venvs/slipstream`). Then, with the venv on `PATH` (`export PATH="$HOME/.venvs/slipstream/bin:$PATH"`):
 ```bash
-docker compose build dev
-docker compose run --rm dev bash scripts/gen_proto.sh
-docker compose run --rm dev bash scripts/build_engine.sh
-docker compose run --rm dev ctest --test-dir build/engine --output-on-failure
-docker compose run --rm dev bash -c "cd python && pytest -q"
-docker compose run --rm dev bash scripts/ci.sh
+bash scripts/gen_proto.sh
+bash scripts/build_engine.sh
+ctest --test-dir build/engine --output-on-failure
+(cd python && pytest -q)
+bash scripts/ci.sh
 ```
+Runtime data (the results database, recordings, the published site) lives under `SLIPSTREAM_DATA_DIR` (default `~/slipstream-data`), on the WSL ext4 disk, never under `/mnt/c` — cross-filesystem I/O there is slow and SQLite's WAL mode is unreliable on it.
+
+**Running these from a Windows tool (not a WSL shell).** Write the commands to a script file, then invoke it as:
+```
+MSYS_NO_PATHCONV=1 wsl.exe bash /mnt/c/path/to/script.sh
+```
+Never run `wsl.exe bash -c "<command>"` with the Windows `PATH` expanded into it — the Windows `PATH` contains spaces and parentheses that break shell parsing inside WSL. Set `PATH` explicitly inside the script instead (e.g. `export PATH="$HOME/.venvs/slipstream/bin:/usr/local/bin:/usr/bin:/bin"`).
 
 ## Git workflow
 - No direct commits to `main`. Use feature branches (`feat/`, `fix/`, `chore/`, `docs/`) and PRs.
