@@ -194,8 +194,14 @@ def test_rejected_order_raises_with_the_engine_reason(engine_address: str, tmp_p
         _run(engine_address, [OrderSpec("big-1", "buy", 0.5, 6, 3)], read_replay(file))
 
 
-def test_a_rejected_subscription_is_fatal(engine_address: str, tmp_path: Path) -> None:
-    file = _write(tmp_path / "s.jsonl", [(_T0, _snapshot(), "kraken")])
+@pytest.mark.parametrize("with_snapshot", [True, False])
+def test_a_rejected_subscription_is_fatal(
+    engine_address: str, tmp_path: Path, with_snapshot: bool
+) -> None:
+    heartbeat: dict[str, object] = {"channel": "heartbeat"}
+    file = _write(
+        tmp_path / "s.jsonl", [(_T0, _snapshot() if with_snapshot else heartbeat, "kraken")]
+    )
 
     async def scenario() -> None:
         channel = EngineChannel(engine_address)

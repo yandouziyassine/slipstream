@@ -134,6 +134,7 @@ class ReplaySession:
                 await self._abandon(writer, exc)
                 raise
             await _bounded(writer.close(), _CLOSE_TIMEOUT_S, "closing the market stream")
+            _raise_if_failed(consumer)
             if self._submitted:
                 await self._await_terminal(consumer)
             status = await self._channel.status()
