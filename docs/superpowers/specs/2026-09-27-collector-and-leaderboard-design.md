@@ -31,7 +31,7 @@ Windows Task Scheduler (hourly, runs as the user, not admin)
         1. acquire $DATA/collect.lock (non-blocking); if held → log "skipped: previous run active", exit 0
         2. build (incremental) and start the release engine:
              --clock live, venue flags from `slipstream venue-flags`
-             paper limits: --max-order-notional 50000 --max-position 1
+             paper limits: --max-order-notional 50000 --max-position 2
         3. python -m slipstream.collect run
              for size in (0.01, 0.25): LiveSession with all four algorithms, side from the UTC hour,
              duration 600 s, 10 slices (one per minute) for TWAP/VWAP/AC, POV participation 0.1

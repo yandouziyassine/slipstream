@@ -32,7 +32,7 @@ fi
 
 ENGINE_LOG="$DATA/logs/engine-$STAMP.log"
 build/release/slipstream_engine --listen 127.0.0.1:0 --clock live \
-  --max-order-notional 50000 --max-position 1 \
+  --max-order-notional 50000 --max-position 2 \
   "${VENUE_ARGS[@]}" >"$ENGINE_LOG" 2>&1 &
 ENGINE_PID=$!
 trap 'kill "$ENGINE_PID" 2>/dev/null || true; wait "$ENGINE_PID" 2>/dev/null || true' EXIT

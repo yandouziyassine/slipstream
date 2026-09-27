@@ -5,6 +5,7 @@ import gzip
 import itertools
 import json
 import logging
+import re
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -14,7 +15,7 @@ from websockets.asyncio.server import ServerConnection, serve
 from websockets.exceptions import ConnectionClosed
 
 from slipstream.calibration import CalibrationData
-from slipstream.collect import CollectConfig, acquire_lock, run_hour, side_for
+from slipstream.collect import ALGOS, CollectConfig, acquire_lock, run_hour, side_for
 from slipstream.db import ResultsDB
 from slipstream.kraken_rest import Bar
 from slipstream.models import Venue
@@ -312,3 +313,13 @@ def test_feed_error_fails_one_size_and_the_next_still_runs(
         db.close()
 
     asyncio.run(scenario())
+
+
+def test_hourly_engine_position_limit_fits_every_order_of_the_hour() -> None:
+    # Both sizes run on one engine per hour, and working orders count towards its position limit,
+    # so the limit must cover every algorithm at every size or the last orders are rejected.
+    script = Path(__file__).resolve().parents[2] / "scripts" / "collect_hourly.sh"
+    match = re.search(r"--max-position (\S+)", script.read_text(encoding="utf-8"))
+    assert match is not None
+    exposure = len(ALGOS) * sum(CollectConfig().sizes)
+    assert float(match.group(1)) >= exposure
