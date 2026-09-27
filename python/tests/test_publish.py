@@ -141,3 +141,23 @@ def test_publish_failure_returns_nonzero_and_never_raises(
     result = publish(site_dir, data, log)
 
     assert result == 1
+
+
+def test_publish_failure_log_names_the_failing_step(
+    site_dir: Path,
+    tmp_path: Path,
+    log: logging.Logger,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    data = tmp_path / "data"
+    data.mkdir()
+    (data / "publish.enabled").touch()
+    monkeypatch.setenv("SLIPSTREAM_PUBLISH_REMOTE", str(tmp_path / "no-such-remote.git"))
+
+    with caplog.at_level(logging.ERROR, logger="test-publish"):
+        publish(site_dir, data, log)
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert any("git clone" in message for message in messages)
+    assert not any(".ssh" in message for message in messages)

@@ -81,6 +81,15 @@ def _has_staged_changes(clone_dir: Path, env: dict[str, str]) -> bool:
     return result.returncode != 0
 
 
+def _failure_summary(exc: Exception) -> str:
+    # Never the exception text or git's stderr: ssh can name the deploy key's path there.
+    if isinstance(exc, subprocess.CalledProcessError):
+        return f"git {exc.cmd[1]} exited with {exc.returncode}"
+    if isinstance(exc, subprocess.TimeoutExpired):
+        return f"git {exc.cmd[1]} timed out"
+    return type(exc).__name__
+
+
 def publish(site_dir: Path, data_dir: Path, log: logging.Logger) -> int:
     """Publishes site_dir to the slipstream-live repo. Never raises: any failure is logged and
     returns nonzero. The SSH key path is used but its path or contents are never logged."""
@@ -101,8 +110,11 @@ def publish(site_dir: Path, data_dir: Path, log: logging.Logger) -> int:
             return 0
         _run_git(["commit", "-m", "publish: update research site"], cwd=clone_dir, env=env)
         _run_git(["push", "origin", f"HEAD:refs/heads/{_BRANCH}"], cwd=clone_dir, env=env)
-    except Exception:  # publish must never raise into the hourly collector
-        log.error("publish failed", extra={"fields": {"event": "publish_failed"}})
+    except Exception as exc:  # publish must never raise into the hourly collector
+        log.error(
+            f"publish failed: {_failure_summary(exc)}",
+            extra={"fields": {"event": "publish_failed"}},
+        )
         return 1
     log.info("publish: pushed a new commit", extra={"fields": {"event": "publish_pushed"}})
     return 0
