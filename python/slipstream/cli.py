@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import cast
 
 from slipstream.calibration import CalibrationData, CalibrationError
+from slipstream.collect import main as collect_main
 from slipstream.config import ConfigError, load_settings, validate_engine_address
 from slipstream.engine_stream import EngineChannel, EngineError
 from slipstream.kraken_rest import fetch_ohlc, parse_ohlc
@@ -167,6 +168,10 @@ def build_parser() -> argparse.ArgumentParser:
     venue_flags.add_argument("--venues", type=_venues, default=("kraken",))
     venue_flags.add_argument("--fees", type=_fees, required=True, help="kraken=40,coinbase=60")
     venue_flags.add_argument("--symbol", type=_symbol, default="BTC/USD")
+    collect = commands.add_parser(
+        "collect", help="hourly paper-trading evidence collector (see slipstream.collect)"
+    )
+    collect.add_argument("collect_args", nargs=argparse.REMAINDER)
     return parser
 
 
@@ -519,6 +524,8 @@ async def _live(
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.command == "collect":
+        return collect_main(args.collect_args)
     log = configure_logging()
     if args.command == "record":
         return _record(args, log)
