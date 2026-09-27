@@ -210,11 +210,13 @@ Paper results are only useful if a real exchange would have accepted every fill:
 |---|---|---|
 | debug + ASan | 1.28 ms | — |
 | release | 0.86 ms → ~0.55 ms (removed the per-message status call) | see below |
-| client p50 / p99 / p99.9 | n/a (unary, not sampled this way) | 410 µs / 6.6 ms / 35.1 ms |
+| client p50 / p99 / p99.9 | n/a (unary, not sampled this way) | 340 µs / 0.93 ms / 3.0 ms |
 | engine-side p50 / p99 (`stats`) | n/a | 33 µs / 131 µs |
-| throughput | n/a | ~12,000 events/s |
+| events/s in the benchmark | n/a | ~6,400 (one event in flight at a time, so this measures latency, not capacity) |
 
 The "before" numbers are the ones already recorded in `note.md` from Phase 1 (measured over loopback with the old per-message unary calls). The "after" numbers are `bench/baseline.json`, from a local run on the development machine; a CI run of the same benchmark prints its own numbers on that run's hardware, which is why the CI gate compares against the baseline with headroom instead of asserting an absolute figure. Client-side latency is end-to-end (Python `send_nowait` to the matching `Fill` on `Subscribe`, including asyncio and gRPC overhead on both sides); the engine-side figure is the C++ engine's own ingest-to-processed time, with no Python in the loop. p99/p99.9 carry real scheduler and GC jitter from the Python side and vary more between runs than p50.
+
+Honest reading: the engine itself is well under the 150 µs design target (33 µs p50), but the end-to-end client figure (340 µs p50) is not; most of it is Python asyncio and gRPC client overhead on WSL. The next step for end-to-end latency is on the client side (a faster event loop, batching events, or reading exchange feeds in C++).
 
 ## Security
 
