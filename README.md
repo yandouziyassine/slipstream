@@ -218,6 +218,16 @@ The "before" numbers are the ones already recorded in `note.md` from Phase 1 (me
 
 Honest reading: the engine itself is well under the 150 µs design target (33 µs p50), but the end-to-end client figure (340 µs p50) is not; most of it is Python asyncio and gRPC client overhead on WSL. The next step for end-to-end latency is on the client side (a faster event loop, batching events, or reading exchange feeds in C++).
 
+## Hourly evidence
+
+An hourly collector (`scripts/collect_hourly.sh`, driven by `slipstream collect run`) builds proof of what execution strategy and venue choice cost, over time rather than from one demo run:
+
+- Every hour it starts a fresh release engine on a loopback port, runs two paper orders (0.01 and 0.25 BTC) through all four algorithms, and stops the engine. Side alternates with the hour: buy on even UTC hours, sell on odd.
+- Every result — fills, slippage, fees, routing gain, and the engine's own latency stats — is written to an append-only SQLite database at `$SLIPSTREAM_DATA_DIR/slipstream.db` (default `~/slipstream-data`, on the WSL Linux filesystem so SQLite's WAL mode works reliably). `UPDATE` and `DELETE` are blocked by triggers on every table except one allowed transition when a run finishes.
+- The raw market data behind each run is kept too, gzip-compressed under `$SLIPSTREAM_DATA_DIR/recordings/`, with its SHA-256 recorded alongside. Recordings older than 30 days are thinned to one per day; a database backup is taken after every run and the last 14 are kept.
+- A run that fails (a dropped feed, a rejected order) is recorded with `status = failed` and its error; the next size still runs. A crash leaves a run `started`, which the next hour's run marks `abandoned`. Nothing is hidden.
+- Install the scheduled task yourself with `powershell -File scripts/install_task.ps1 -Install` (hourly at :05, as your own Windows user, only while you are logged on, no stored password, standard privileges). Remove it with `-Uninstall`. The script only registers or removes the task; it never runs the collector itself.
+
 ## Security
 
 - **Paper trading is enforced.** `SLIPSTREAM_PAPER_MODE` must be `true`, and v0.1 contains no live order path.
