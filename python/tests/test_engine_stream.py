@@ -53,14 +53,19 @@ def test_book_event_carries_recv_ns_for_replay_mode() -> None:
 
 def test_trade_event_wraps_trade_batch() -> None:
     batch = TradeBatch("BTC/USD", False, ((100.0, 0.5),), "coinbase")
-    event = trade_event(batch)
+    event = trade_event(batch, None)
     assert event.WhichOneof("event") == "trades"
     assert event.trades.venue == "coinbase"
+    assert event.trades.recv_ns == 0
+    assert trade_event(batch, 123).trades.recv_ns == 123
 
 
-def test_heartbeat_event_is_empty() -> None:
-    assert heartbeat_event("kraken").WhichOneof("event") == "heartbeat"
-    assert heartbeat_event(None).WhichOneof("event") == "heartbeat"
+def test_heartbeat_event_names_its_venue_and_time() -> None:
+    live = heartbeat_event("kraken", None)
+    assert live.WhichOneof("event") == "heartbeat"
+    assert (live.heartbeat.venue, live.heartbeat.recv_ns) == ("kraken", 0)
+    replay = heartbeat_event("coinbase", 123)
+    assert (replay.heartbeat.venue, replay.heartbeat.recv_ns) == ("coinbase", 123)
 
 
 def test_tick_event_carries_now_ns() -> None:
@@ -112,12 +117,13 @@ def test_order_carries_schedule_params() -> None:
     assert order_to_proto(spec, 0, TwapParams()).WhichOneof("schedule") == "twap"
 
 
-def test_trade_batch_to_proto_carries_trades_and_venue() -> None:
+def test_trade_batch_to_proto_carries_trades_venue_and_time() -> None:
     msg = trade_batch_to_proto(
-        TradeBatch("BTC/USD", False, ((100.5, 0.2), (100.4, 0.3)), "coinbase")
+        TradeBatch("BTC/USD", False, ((100.5, 0.2), (100.4, 0.3)), "coinbase"), recv_ns=7
     )
     assert msg.symbol == "BTC/USD"
     assert msg.venue == "coinbase"
+    assert msg.recv_ns == 7
     assert [(t.price, t.qty) for t in msg.trades] == [(100.5, 0.2), (100.4, 0.3)]
 
 
@@ -442,7 +448,9 @@ def test_subscription_close_cancels_the_call() -> None:
     asyncio.run(scenario())
 
 
-def test_replay_stream_book_and_trade_round_trip_visible_in_status(engine_address: str) -> None:
+def test_replay_stream_book_trade_and_heartbeat_round_trip_visible_in_status(
+    engine_address: str,
+) -> None:
     async def scenario() -> None:
         channel = EngineChannel(engine_address)
         try:
@@ -451,9 +459,10 @@ def test_replay_stream_book_and_trade_round_trip_visible_in_status(engine_addres
             book = BookUpdate("BTC/USD", True, ((99.0, 1.0),), ((101.0, 2.0),), "kraken")
             writer.send_nowait(book_event(book, _SEC))
             trades = TradeBatch("BTC/USD", False, ((100.0, 0.5),), "kraken")
-            writer.send_nowait(trade_event(trades))
+            writer.send_nowait(trade_event(trades, 2 * _SEC))
+            writer.send_nowait(heartbeat_event("kraken", 3 * _SEC))
             events = await writer.close()
-            assert events == 2
+            assert events == 3
 
             status = await channel.status()
             assert len(status.books) == 1

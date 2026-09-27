@@ -76,11 +76,12 @@ def order_to_proto(
     return order
 
 
-def trade_batch_to_proto(batch: TradeBatch) -> pb.TradeBatch:
+def trade_batch_to_proto(batch: TradeBatch, recv_ns: int) -> pb.TradeBatch:
     return pb.TradeBatch(
         symbol=batch.symbol,
         trades=[pb.Trade(price=price, qty=qty) for price, qty in batch.trades],
         venue=batch.venue,
+        recv_ns=recv_ns,
     )
 
 
@@ -92,16 +93,14 @@ def book_event(update: BookUpdate, recv_ns: int | None) -> pb.MarketEvent:
     return pb.MarketEvent(book=book_update_to_proto(update, 0 if recv_ns is None else recv_ns))
 
 
-def trade_event(batch: TradeBatch) -> pb.MarketEvent:
-    return pb.MarketEvent(trades=trade_batch_to_proto(batch))
+def trade_event(batch: TradeBatch, recv_ns: int | None) -> pb.MarketEvent:
+    return pb.MarketEvent(trades=trade_batch_to_proto(batch, 0 if recv_ns is None else recv_ns))
 
 
-def heartbeat_event(venue: Venue | None) -> pb.MarketEvent:
-    # Heartbeat carries no fields: live mode binds it to the stream's own venue, and replay
-    # mode accepts it only for a single-venue engine. venue is accepted for API symmetry with
-    # the other converters and to make the caller's intent explicit at the call site.
-    _ = venue
-    return pb.MarketEvent(heartbeat=pb.Heartbeat())
+def heartbeat_event(venue: Venue, recv_ns: int | None) -> pb.MarketEvent:
+    return pb.MarketEvent(
+        heartbeat=pb.Heartbeat(venue=venue, recv_ns=0 if recv_ns is None else recv_ns)
+    )
 
 
 def tick_event(now_ns: int) -> pb.MarketEvent:

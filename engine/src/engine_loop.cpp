@@ -171,11 +171,13 @@ void EngineLoop::process(const Pending& pending) {
     latency_.record(steady_now_ns() - pending.ingest_steady_ns);
 }
 
+// A replay trade or heartbeat without a time (0) leaves the clock where it is.
 std::int64_t EngineLoop::item_time(const MarketItem& item) const {
     if (mode_ == ClockMode::Live) return item.ingest_ns;
     if (const auto* book = std::get_if<BookData>(&item.data)) return book->recv_ns;
-    if (const auto* tick = std::get_if<TickData>(&item.data)) return tick->now_ns;
-    return event_time_;  // replay heartbeats and trades carry no time
+    if (const auto* trades = std::get_if<TradeData>(&item.data)) return trades->recv_ns;
+    if (const auto* heartbeat = std::get_if<HeartbeatData>(&item.data)) return heartbeat->recv_ns;
+    return std::get<TickData>(item.data).now_ns;
 }
 
 void EngineLoop::apply(const MarketItem& item) {

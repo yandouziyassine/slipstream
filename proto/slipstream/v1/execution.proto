@@ -156,9 +156,16 @@ message TradeBatch {
   string symbol = 1;
   repeated Trade trades = 2;
   string venue = 3;
+  // Replay mode: receive time, which advances the clock when set. Live mode: must be 0.
+  int64 recv_ns = 4;
 }
 
-message Heartbeat {}
+message Heartbeat {
+  // Live mode: empty or the stream's own venue. Replay mode: empty only with a single venue.
+  string venue = 1;
+  // Replay mode: receive time, which advances the clock when set. Live mode: must be 0.
+  int64 recv_ns = 2;
+}
 
 // Replay mode only: advances time.
 message Tick {

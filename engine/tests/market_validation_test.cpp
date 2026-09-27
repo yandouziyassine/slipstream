@@ -36,11 +36,12 @@ v1::MarketEvent book_event(const std::string& venue, std::int64_t recv_ns) {
     return event;
 }
 
-v1::MarketEvent trade_event(const std::string& venue) {
+v1::MarketEvent trade_event(const std::string& venue, std::int64_t recv_ns = 0) {
     v1::MarketEvent event;
     auto* batch = event.mutable_trades();
     batch->set_symbol("BTC/USD");
     batch->set_venue(venue);
+    batch->set_recv_ns(recv_ns);
     auto* trade = batch->add_trades();
     trade->set_price(100.0);
     trade->set_qty(0.5);
@@ -53,9 +54,10 @@ v1::MarketEvent tick_event(std::int64_t now_ns) {
     return event;
 }
 
-v1::MarketEvent heartbeat_event() {
+v1::MarketEvent heartbeat_event(const std::string& venue = "", std::int64_t recv_ns = 0) {
     v1::MarketEvent event;
-    event.mutable_heartbeat();
+    event.mutable_heartbeat()->set_venue(venue);
+    event.mutable_heartbeat()->set_recv_ns(recv_ns);
     return event;
 }
 
@@ -174,6 +176,12 @@ TEST_F(MarketValidationTest, ChecksTrades) {
         *too_many.mutable_trades()->add_trades() = good.trades().trades(0);
     }
     EXPECT_EQ(code(validator.trades(too_many.trades(), 0)), grpc::StatusCode::INVALID_ARGUMENT);
+
+    EXPECT_EQ(code(validator.trades(trade_event("", -1).trades(), 0)),
+              grpc::StatusCode::INVALID_ARGUMENT);
+    const auto timed = validator.trades(trade_event("", 7).trades(), 0);
+    ASSERT_EQ(code(timed), grpc::StatusCode::OK);
+    EXPECT_EQ(std::get<TradeData>(item(timed).data).recv_ns, 7);
 }
 
 TEST_F(MarketValidationTest, LiveStreamBindsEveryEventToItsVenue) {
@@ -189,11 +197,15 @@ TEST_F(MarketValidationTest, LiveStreamBindsEveryEventToItsVenue) {
     ASSERT_EQ(code(heartbeat), grpc::StatusCode::OK);
     EXPECT_EQ(item(heartbeat).venue, 1u);
     EXPECT_TRUE(std::holds_alternative<HeartbeatData>(item(heartbeat).data));
+    EXPECT_EQ(code(stream.admit(heartbeat_event("coinbase"))), grpc::StatusCode::OK);
+    EXPECT_EQ(code(stream.admit(heartbeat_event("kraken"))), grpc::StatusCode::INVALID_ARGUMENT);
 }
 
 TEST_F(MarketValidationTest, LiveStreamRejectsClientTime) {
     auto stream = StreamAdmission::live(validator, 0);
     EXPECT_EQ(code(stream.admit(book_event("", 5))), grpc::StatusCode::INVALID_ARGUMENT);
+    EXPECT_EQ(code(stream.admit(trade_event("", 5))), grpc::StatusCode::INVALID_ARGUMENT);
+    EXPECT_EQ(code(stream.admit(heartbeat_event("", 5))), grpc::StatusCode::INVALID_ARGUMENT);
     EXPECT_EQ(code(stream.admit(tick_event(5))), grpc::StatusCode::INVALID_ARGUMENT);
     EXPECT_EQ(code(stream.admit(v1::MarketEvent{})), grpc::StatusCode::INVALID_ARGUMENT);
 }
@@ -204,8 +216,14 @@ TEST_F(MarketValidationTest, ReplayStreamNeedsVenuesAndTimes) {
     EXPECT_EQ(code(stream.admit(book_event("kraken", 0))), grpc::StatusCode::INVALID_ARGUMENT);
     EXPECT_EQ(code(stream.admit(trade_event(""))), grpc::StatusCode::INVALID_ARGUMENT);
     EXPECT_EQ(code(stream.admit(tick_event(0))), grpc::StatusCode::INVALID_ARGUMENT);
-    // A heartbeat has no venue field, so only a single-venue engine can place it.
+    // An unnamed heartbeat belongs to the only venue, so a two-venue engine cannot place it.
     EXPECT_EQ(code(stream.admit(heartbeat_event())), grpc::StatusCode::INVALID_ARGUMENT);
+    EXPECT_EQ(code(stream.admit(heartbeat_event("binance"))), grpc::StatusCode::INVALID_ARGUMENT);
+    EXPECT_EQ(code(stream.admit(heartbeat_event("coinbase", -1))),
+              grpc::StatusCode::INVALID_ARGUMENT);
+    const auto named = stream.admit(heartbeat_event("coinbase"));
+    ASSERT_EQ(code(named), grpc::StatusCode::OK);
+    EXPECT_EQ(item(named).venue, 1u);
 
     const auto booked = stream.admit(book_event("coinbase", kSec));
     ASSERT_EQ(code(booked), grpc::StatusCode::OK);
@@ -230,6 +248,39 @@ TEST_F(MarketValidationTest, ReplayTimeNeverGoesBackwards) {
     ASSERT_EQ(code(stream.admit(book_event("kraken", 5 * kSec))), grpc::StatusCode::OK);
     EXPECT_EQ(code(stream.admit(book_event("kraken", 5 * kSec))), grpc::StatusCode::OK);
     EXPECT_EQ(code(stream.admit(tick_event(4 * kSec))), grpc::StatusCode::INVALID_ARGUMENT);
+}
+
+TEST_F(MarketValidationTest, ReplayTradesAndHeartbeatsWithATimeFollowTheClockRules) {
+    auto stream = StreamAdmission::replay(validator);
+    ASSERT_EQ(code(stream.admit(book_event("kraken", 5 * kSec))), grpc::StatusCode::OK);
+    EXPECT_EQ(code(stream.admit(trade_event("kraken", 4 * kSec))),
+              grpc::StatusCode::INVALID_ARGUMENT);
+    EXPECT_EQ(code(stream.admit(heartbeat_event("kraken", 4 * kSec))),
+              grpc::StatusCode::INVALID_ARGUMENT);
+    EXPECT_EQ(code(stream.admit(trade_event("kraken", 5 * kSec + kDay + 1))),
+              grpc::StatusCode::INVALID_ARGUMENT);
+
+    const auto traded = stream.admit(trade_event("kraken", 6 * kSec));
+    ASSERT_EQ(code(traded), grpc::StatusCode::OK);
+    EXPECT_EQ(std::get<TradeData>(item(traded).data).recv_ns, 6 * kSec);
+    const auto beat = stream.admit(heartbeat_event("coinbase", 7 * kSec));
+    ASSERT_EQ(code(beat), grpc::StatusCode::OK);
+    EXPECT_EQ(std::get<HeartbeatData>(item(beat).data).recv_ns, 7 * kSec);
+    EXPECT_EQ(code(stream.admit(book_event("kraken", 6 * kSec))),
+              grpc::StatusCode::INVALID_ARGUMENT);
+
+    // Without a time they neither move the clock nor break its order.
+    EXPECT_EQ(code(stream.admit(trade_event("kraken"))), grpc::StatusCode::OK);
+    EXPECT_EQ(code(stream.admit(heartbeat_event("kraken"))), grpc::StatusCode::OK);
+    EXPECT_EQ(code(stream.admit(tick_event(7 * kSec))), grpc::StatusCode::OK);
+}
+
+TEST_F(MarketValidationTest, ReplayRejectsAnInvalidTradeBeforeRecordingItsTime) {
+    auto stream = StreamAdmission::replay(validator);
+    auto bad = trade_event("kraken", 9 * kSec);
+    bad.mutable_trades()->mutable_trades(0)->set_qty(0.0);
+    EXPECT_EQ(code(stream.admit(bad)), grpc::StatusCode::INVALID_ARGUMENT);
+    EXPECT_EQ(code(stream.admit(trade_event("kraken", kSec))), grpc::StatusCode::OK);
 }
 
 TEST_F(MarketValidationTest, ReplayTimeJumpsAtMostOneDay) {

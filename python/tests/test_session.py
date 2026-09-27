@@ -400,6 +400,7 @@ def test_orders_wait_for_a_snapshot_from_every_venue_while_trades_flow() -> None
     assert not due
     events, due = session._events(_kraken_trade(), 150, "kraken")
     assert _kinds(events) == ["trades"]
+    assert (events[0].trades.venue, events[0].trades.recv_ns) == ("kraken", 150)
     assert not due
     events, due = session._events(_coinbase_snapshot(), 300, "coinbase")
     assert [event.book.venue for event in events] == ["coinbase"]
@@ -559,23 +560,25 @@ def test_local_books_stop_updating_after_submission(monkeypatch: pytest.MonkeyPa
     assert not due
 
 
-def test_heartbeat_before_submit_sends_nothing() -> None:
-    events, due = _session(_RecordingChannel())._events(_HEARTBEAT, 50, "kraken")
-    assert events == []
-    assert not due
+def test_heartbeats_go_to_the_engine_with_their_venue_and_time() -> None:
+    # The engine itself bounds how long heartbeats keep a quiet venue fresh.
+    session = _session(_RecordingChannel(), venues=("kraken", "coinbase"))
+    for now_ns in (50, 100 + 31 * _SEC):
+        events, due = session._events(_HEARTBEAT, now_ns, "kraken")
+        assert _kinds(events) == ["heartbeat"]
+        assert (events[0].heartbeat.venue, events[0].heartbeat.recv_ns) == ("kraken", now_ns)
+        assert not due
 
 
-def test_heartbeat_after_submit_keeps_the_venue_fresh_for_thirty_seconds() -> None:
-    # A heartbeat means the book is unchanged, not stale: an empty delta refreshes the venue.
+def test_a_trade_after_submit_is_one_event_at_its_own_time() -> None:
     session = _submitted(_session(_RecordingChannel()))
-    (event,) = session._events(_HEARTBEAT, 100 + 29 * _SEC, "kraken")[0]
-    assert event.WhichOneof("event") == "book"
-    assert (len(event.book.bids), len(event.book.asks)) == (0, 0)
-    assert event.book.recv_ns == 100 + 29 * _SEC
-    # After 30 s without a book change the keep-alive stops; the heartbeat only moves time.
-    (event,) = session._events(_HEARTBEAT, 100 + 31 * _SEC, "kraken")[0]
-    assert event.WhichOneof("event") == "tick"
-    assert event.tick.now_ns == 100 + 31 * _SEC
+    events, _ = session._events(_kraken_trade(), 200, "kraken")
+    assert _kinds(events) == ["trades"]
+    assert events[0].trades.recv_ns == 200
+    # Historical prints only move time forward once orders are working.
+    events, _ = session._events(_kraken_trade("snapshot"), 300, "kraken")
+    assert _kinds(events) == ["tick"]
+    assert events[0].tick.now_ns == 300
 
 
 def test_fill_log_carries_venue_and_fee(caplog: pytest.LogCaptureFixture) -> None:

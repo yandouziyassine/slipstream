@@ -34,18 +34,22 @@ struct BookData {
     std::int64_t recv_ns;
 };
 
+// recv_ns 0 means the item carries no time of its own (always so in live mode).
 struct TradeData {
     std::vector<Trade> trades;
+    std::int64_t recv_ns;
 };
 
-struct HeartbeatData {};
+struct HeartbeatData {
+    std::int64_t recv_ns;
+};
 
 struct TickData {
     std::int64_t now_ns;
 };
 
 // venue is ignored for trades and ticks. In live mode push() overwrites ingest_ns with the
-// engine clock, so the caller's value only matters in replay mode, where it is not used.
+// engine clock and it is the item's time; replay mode ignores it and uses the item's own time.
 struct MarketItem {
     std::size_t venue;
     std::variant<BookData, TradeData, HeartbeatData, TickData> data;

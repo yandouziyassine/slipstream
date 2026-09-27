@@ -215,22 +215,44 @@ TEST_F(EngineLoopTest, ReplayModeHasNoTimer) {
     EXPECT_EQ(fills_of(drain(*subscriber)).size(), 1u);
 }
 
-TEST_F(EngineLoopTest, ReplayHeartbeatAndTradesDoNotAdvanceTime) {
+TEST_F(EngineLoopTest, ReplayHeartbeatAndTradesWithoutATimeDoNotAdvanceIt) {
     EngineLoop loop(engine, ClockMode::Replay);
     auto subscriber = loop.subscribe();
     ASSERT_TRUE(loop.push(deep_book(kSec)));
     wait_for_events(loop, 1);
     ASSERT_TRUE(submit(loop, {"o", Side::Buy, 1.0, 2 * kSec, kSec, 1}));
 
-    // A replay heartbeat or trade has no time of its own; its ingest stamp must be ignored.
-    ASSERT_TRUE(loop.push({0, HeartbeatData{}, 50 * kSec}));
-    ASSERT_TRUE(loop.push({0, TradeData{{{100.0, 1.0}}}, 50 * kSec}));
+    // Without recv_ns a replay heartbeat or trade has no time; its ingest stamp is ignored.
+    ASSERT_TRUE(loop.push({0, HeartbeatData{0}, 50 * kSec}));
+    ASSERT_TRUE(loop.push({0, TradeData{{{100.0, 1.0}}, 0}, 50 * kSec}));
     ASSERT_TRUE(loop.push(tick(2 * kSec)));
     wait_for_events(loop, 4);
 
     const auto fills = fills_of(drain(*subscriber));
     ASSERT_FALSE(fills.empty());
     for (const auto& fill : fills) EXPECT_EQ(fill.ts_ns, 2 * kSec);
+}
+
+TEST_F(EngineLoopTest, ReplayTradesAndHeartbeatsAdvanceTimeToTheirRecvNs) {
+    EngineLoop loop(engine, ClockMode::Replay);
+    auto subscriber = loop.subscribe();
+    ASSERT_TRUE(loop.push(deep_book(kSec)));
+    wait_for_events(loop, 1);
+    ASSERT_TRUE(submit(loop, {"o", Side::Buy, 1.0, 2 * kSec, 2 * kSec, 2}));
+
+    // The trade moves time to 2 s before the orders step, so the first slice fills then.
+    ASSERT_TRUE(loop.push({0, TradeData{{{100.0, 1.0}}, 2 * kSec}, 0}));
+    wait_for_events(loop, 2);
+    auto fills = fills_of(drain(*subscriber));
+    ASSERT_EQ(fills.size(), 1u);
+    EXPECT_EQ(fills[0].ts_ns, 2 * kSec);
+
+    ASSERT_TRUE(loop.push({0, HeartbeatData{3 * kSec}, 0}));  // also keeps kraken fresh
+    wait_for_events(loop, 3);
+    fills = fills_of(drain(*subscriber));
+    ASSERT_EQ(fills.size(), 1u);
+    EXPECT_EQ(fills[0].ts_ns, 3 * kSec);
+    EXPECT_EQ(loop.inspect([](Engine&, const LoopView& view) { return view.now_ns; }), 3 * kSec);
 }
 
 TEST_F(EngineLoopTest, SeqIsStrictlyIncreasingFromOne) {

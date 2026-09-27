@@ -164,8 +164,10 @@ def test_market_event_maps_book_trades_and_heartbeats() -> None:
     trades = TradeBatch("BTC/USD", False, ((100.0, 0.1),), "kraken")
     event = market_event(trades, "kraken", "BTC/USD")
     assert event is not None and event.WhichOneof("event") == "trades"
+    assert event.trades.recv_ns == 0
     event = market_event(None, "kraken", "BTC/USD")
     assert event is not None and event.WhichOneof("event") == "heartbeat"
+    assert (event.heartbeat.venue, event.heartbeat.recv_ns) == ("kraken", 0)
 
 
 def test_market_event_skips_historical_trade_snapshots() -> None:

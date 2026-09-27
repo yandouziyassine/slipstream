@@ -71,13 +71,14 @@ Admission MarketValidator::book(const v1::BookUpdate& update, std::size_t venue)
 Admission MarketValidator::trades(const v1::TradeBatch& batch, std::size_t venue) const {
     if (batch.symbol() != symbol_) return invalid("unexpected symbol");
     if (batch.trades_size() > kMaxTradesPerBatch) return invalid("too many trades");
+    if (batch.recv_ns() < 0) return invalid("invalid recv_ns");
     std::vector<Trade> trades;
     trades.reserve(static_cast<std::size_t>(batch.trades_size()));
     for (const auto& trade : batch.trades()) {
         if (!valid_trade(trade)) return invalid("invalid trade");
         trades.push_back({trade.price(), trade.qty()});
     }
-    return MarketItem{venue, TradeData{std::move(trades)}, 0};
+    return MarketItem{venue, TradeData{std::move(trades), batch.recv_ns()}, 0};
 }
 
 StreamAdmission StreamAdmission::live(const MarketValidator& validator, std::size_t venue) {
@@ -107,10 +108,17 @@ Admission StreamAdmission::admit_live(const v1::MarketEvent& event) const {
         case v1::MarketEvent::kTrades: {
             const auto venue = live_venue(event.trades().venue());
             if (!venue) return invalid("event venue differs from the stream venue");
+            if (event.trades().recv_ns() != 0) return invalid("live mode does not accept recv_ns");
             return validator_.trades(event.trades(), *venue);
         }
-        case v1::MarketEvent::kHeartbeat:
-            return MarketItem{venue_, HeartbeatData{}, 0};
+        case v1::MarketEvent::kHeartbeat: {
+            const auto venue = live_venue(event.heartbeat().venue());
+            if (!venue) return invalid("event venue differs from the stream venue");
+            if (event.heartbeat().recv_ns() != 0) {
+                return invalid("live mode does not accept recv_ns");
+            }
+            return MarketItem{*venue, HeartbeatData{0}, 0};
+        }
         case v1::MarketEvent::kTick:
             return invalid("live mode does not accept ticks");
         case v1::MarketEvent::EVENT_NOT_SET:
@@ -125,21 +133,21 @@ Admission StreamAdmission::admit_replay(const v1::MarketEvent& event) {
             const auto venue = replay_venue(event.book().venue());
             if (!venue) return invalid("replay events must name a registered venue");
             if (event.book().recv_ns() <= 0) return invalid("replay books need recv_ns");
-            auto admitted = validator_.book(event.book(), *venue);
-            if (std::holds_alternative<MarketItem>(admitted) && !advance(event.book().recv_ns())) {
-                return invalid("replay time went backwards or jumped more than a day");
-            }
-            return admitted;
+            return timed(validator_.book(event.book(), *venue), event.book().recv_ns());
         }
         case v1::MarketEvent::kTrades: {
             const auto venue = replay_venue(event.trades().venue());
             if (!venue) return invalid("replay events must name a registered venue");
-            return validator_.trades(event.trades(), *venue);
+            return timed(validator_.trades(event.trades(), *venue), event.trades().recv_ns());
         }
         case v1::MarketEvent::kHeartbeat: {
-            const auto venue = validator_.resolve_venue("");
-            if (!venue) return invalid("a replay heartbeat needs a single-venue engine");
-            return MarketItem{*venue, HeartbeatData{}, 0};
+            const auto& heartbeat = event.heartbeat();
+            const auto venue = heartbeat.venue().empty() ? validator_.resolve_venue("")
+                                                         : replay_venue(heartbeat.venue());
+            if (!venue) return invalid("a replay heartbeat must name a registered venue");
+            if (heartbeat.recv_ns() < 0) return invalid("invalid recv_ns");
+            return timed(MarketItem{*venue, HeartbeatData{heartbeat.recv_ns()}, 0},
+                         heartbeat.recv_ns());
         }
         case v1::MarketEvent::kTick: {
             const auto now_ns = event.tick().now_ns();
@@ -169,6 +177,13 @@ bool StreamAdmission::advance(std::int64_t time_ns) {
     if (last_ns_ && (time_ns < *last_ns_ || time_ns - *last_ns_ > kMaxReplayJumpNs)) return false;
     last_ns_ = time_ns;
     return true;
+}
+
+Admission StreamAdmission::timed(Admission admitted, std::int64_t recv_ns) {
+    if (std::holds_alternative<MarketItem>(admitted) && recv_ns > 0 && !advance(recv_ns)) {
+        return invalid("replay time went backwards or jumped more than a day");
+    }
+    return admitted;
 }
 
 }  // namespace slipstream

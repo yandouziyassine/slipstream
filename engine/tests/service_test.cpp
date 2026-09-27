@@ -155,7 +155,7 @@ TEST_F(ServiceTest, PovOrderFillsFromReportedTrades) {
     v1::SubmitReply reply;
     ASSERT_TRUE(service.SubmitParentOrder(nullptr, &request, &reply).ok());
     ASSERT_TRUE(reply.accepted()) << reply.reason();
-    ASSERT_TRUE(loop.push({0, TradeData{{{100.0, 1.0}}}, 0}));
+    ASSERT_TRUE(loop.push({0, TradeData{{{100.0, 1.0}}, 0}, 0}));
     wait_for_events(loop, 2);
     v1::StatusRequest status_request;
     v1::StatusReply status;

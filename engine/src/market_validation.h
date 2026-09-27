@@ -51,8 +51,9 @@ private:
 
 // The per-stream rules of one MarketStream on top of MarketValidator.
 // Live: every event belongs to the bound venue and carries no client time.
-// Replay: book and trade events name their venue, and time never goes backwards or jumps more
-// than kMaxReplayJumpNs past the previous timed event.
+// Replay: book and trade events name their venue, a heartbeat names one unless only one is
+// registered, and time never goes backwards or jumps more than kMaxReplayJumpNs past the
+// previous timed event. Books and ticks always carry a time; trades and heartbeats may.
 class StreamAdmission {
 public:
     static constexpr std::int64_t kMaxReplayJumpNs = 86'400'000'000'000;
@@ -71,6 +72,8 @@ private:
     std::optional<std::size_t> replay_venue(std::string_view name) const;
     // Checks and records the time of a timed replay event.
     bool advance(std::int64_t time_ns);
+    // Records a valid item's time when it has one (recv_ns > 0); otherwise leaves it unchanged.
+    Admission timed(Admission admitted, std::int64_t recv_ns);
 
     const MarketValidator& validator_;
     ClockMode mode_;
