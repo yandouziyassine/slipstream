@@ -1,0 +1,11 @@
+---
+# Tests only. unchecked-optional-access: every access follows a gtest ASSERT_TRUE/ASSERT_NE on the
+# optional, which returns from the test when it fails, but the checker does not model ASSERT_*.
+# cert-err58-cpp: static test constants; an exception while building one fails the test binary
+# at startup, which is the right outcome. performance-inefficient-vector-operation: test setup
+# loops, where speed is irrelevant.
+InheritParentConfig: true
+Checks: >
+  -bugprone-unchecked-optional-access,
+  -cert-err58-cpp,
+  -performance-inefficient-vector-operation

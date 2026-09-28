@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import re
 import subprocess
 from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
 
 import pytest
+from hypothesis import settings
 
 from slipstream.calibration import CalibrationData
 from slipstream.engine_stream import EngineChannel
@@ -15,6 +17,15 @@ from slipstream.models import OrderSpec, Venue
 from slipstream.replay import read_replay
 from slipstream.session import SessionResult, check_clock_mode, run_replay_session
 from slipstream.v1 import execution_pb2 as pb
+
+# "ci" reproduces the same 200 examples on every run so PRs stay deterministic and fast.
+# "nightly" trades speed for coverage: a random seed explores cases "ci" never will, and
+# print_blob makes any failure reproducible with an @example / --hypothesis-seed pin.
+settings.register_profile("ci", derandomize=True, max_examples=200, deadline=None, database=None)
+settings.register_profile(
+    "nightly", derandomize=False, max_examples=2000, deadline=None, print_blob=True
+)
+settings.load_profile(os.environ.get("SLIPSTREAM_HYPOTHESIS_PROFILE", "ci"))
 
 ENGINE_BIN = Path(__file__).resolve().parents[2] / "build" / "engine" / "slipstream_engine"
 

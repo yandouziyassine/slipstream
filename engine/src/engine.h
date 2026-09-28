@@ -18,7 +18,7 @@
 
 namespace slipstream {
 
-enum class OrderState { Working, Completed, Halted };
+enum class OrderState : std::uint8_t { Working, Completed, Halted };
 
 struct ParentOrderRequest {
     std::string order_id;

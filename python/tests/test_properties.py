@@ -21,7 +21,7 @@ from slipstream.venue_rules import (
     parse_kraken_rules,
 )
 
-pt_settings = settings(max_examples=200, deadline=None, derandomize=True)
+pt_settings = settings()  # profile ("ci" or "nightly") is loaded once in conftest.py
 
 
 def _json_scalars() -> st.SearchStrategy[Any]:

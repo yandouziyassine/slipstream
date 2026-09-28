@@ -248,14 +248,42 @@ class ResultsDB:
             for run_id, path, recorded_at in rows
             if _parse_iso(recorded_at).hour != keep_hour_utc
         ]
-        if to_delete:
-            deleted_at = _iso(now)
-            with self._conn:
-                self._conn.executemany(
-                    "INSERT INTO recording_deletions (run_id, deleted_at) VALUES (?, ?)",
-                    [(run_id, deleted_at) for run_id, _ in to_delete],
-                )
+        self.delete_recordings([run_id for run_id, _ in to_delete], now)
         return [Path(path) for _, path in to_delete]
+
+    def expired_recordings(self, now: datetime, older_than_days: int) -> list[tuple[int, Path]]:
+        """Every recording older than the cutoff that has not yet been marked deleted, oldest
+        first, regardless of hour (unlike `thin_recordings`, nothing is kept)."""
+        cutoff = _iso(now - timedelta(days=older_than_days))
+        rows = self._conn.execute(
+            "SELECT run_id, path FROM recordings "
+            "WHERE recorded_at < ? AND run_id NOT IN (SELECT run_id FROM recording_deletions) "
+            "ORDER BY recorded_at ASC",
+            (cutoff,),
+        ).fetchall()
+        return [(run_id, Path(path)) for run_id, path in rows]
+
+    def active_recordings(self) -> list[tuple[int, Path]]:
+        """Every recording not yet marked deleted, oldest first."""
+        rows = self._conn.execute(
+            "SELECT run_id, path FROM recordings "
+            "WHERE run_id NOT IN (SELECT run_id FROM recording_deletions) "
+            "ORDER BY recorded_at ASC"
+        ).fetchall()
+        return [(run_id, Path(path)) for run_id, path in rows]
+
+    def delete_recordings(self, run_ids: Sequence[int], now: datetime) -> None:
+        """Record that the recordings for `run_ids` were deleted. The caller removes the files;
+        this only appends the audit trail (see `recording_deletions` in the initial migration).
+        """
+        if not run_ids:
+            return
+        deleted_at = _iso(now)
+        with self._conn:
+            self._conn.executemany(
+                "INSERT INTO recording_deletions (run_id, deleted_at) VALUES (?, ?)",
+                [(run_id, deleted_at) for run_id in run_ids],
+            )
 
     def backup(self, dest: Path) -> None:
         dest.parent.mkdir(parents=True, exist_ok=True)

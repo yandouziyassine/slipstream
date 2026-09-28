@@ -24,7 +24,7 @@ constexpr std::array<std::string_view, 2> kKnownVenues{"kraken", "coinbase"};
 
 // Live: the engine stamps events with its own clock and ignores client-supplied time.
 // Replay: recorded times drive the clock; there is no timer.
-enum class ClockMode { Live, Replay };
+enum class ClockMode : std::uint8_t { Live, Replay };
 
 struct EngineConfig {
     std::string listen_address = "127.0.0.1:50051";
