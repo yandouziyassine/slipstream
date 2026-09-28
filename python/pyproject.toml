@@ -35,3 +35,12 @@ follow_imports = "skip"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+
+[tool.coverage.run]
+source = ["slipstream"]
+branch = true
+omit = ["slipstream/v1/*_pb2*.py"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
