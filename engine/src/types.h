@@ -1,8 +1,10 @@
 #pragma once
 
+#include <cstdint>
+
 namespace slipstream {
 
-enum class Side { Buy, Sell };
+enum class Side : std::uint8_t { Buy, Sell };
 
 struct Level {
     double price;
