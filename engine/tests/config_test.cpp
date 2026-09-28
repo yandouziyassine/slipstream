@@ -173,6 +173,18 @@ TEST(Config, RejectsBadMaxDeviation) {
     }
 }
 
+TEST(Config, RejectsMaxDeviationDigitStringTooLargeForADouble) {
+    // All-digit, no dot/exponent, so it passes the plain-decimal shape check; std::stod then
+    // throws std::out_of_range on a 400-digit literal, which parse_plain_decimal must catch.
+    const std::string huge(400, '9');
+    EXPECT_FALSE(parse_args({"--max-deviation-bps", huge}).config);
+}
+
+TEST(Config, RejectsVenueRuleDigitStringTooLargeForADouble) {
+    const std::string huge(400, '9');
+    EXPECT_FALSE(parse_args({"--venue", "kraken:fee_bps=" + huge}).config);
+}
+
 TEST(Config, RejectsBadStaleness) {
     for (const char* value : {"0", "-1", "abc", "600001", "1.5"}) {
         EXPECT_FALSE(parse_args({"--stale-ms", value}).config) << value;
