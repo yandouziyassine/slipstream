@@ -221,7 +221,7 @@ An hourly collector (`scripts/collect_hourly.sh`, driven by `slipstream collect 
 
 - Every hour it starts a fresh release engine on a loopback port, runs two paper orders (0.01 and 0.25 BTC) through all four algorithms, and stops the engine. Side alternates with the hour: buy on even UTC hours, sell on odd.
 - Every result — fills, slippage, fees, routing gain, and the engine's own latency stats — is written to an append-only SQLite database at `$SLIPSTREAM_DATA_DIR/slipstream.db` (default `~/slipstream-data`, on the WSL Linux filesystem so SQLite's WAL mode works reliably). `UPDATE` and `DELETE` are blocked by triggers on every table except one allowed transition when a run finishes.
-- The raw market data behind each run is kept too, gzip-compressed under `$SLIPSTREAM_DATA_DIR/recordings/`, with its SHA-256 recorded alongside. Recordings older than 30 days are thinned to one per day; a database backup is taken after every run and the last 14 are kept.
+- The raw market data behind each run is kept too, gzip-compressed under `$SLIPSTREAM_DATA_DIR/recordings/`, with its SHA-256 recorded alongside. A recording under 7 days old is kept in full; from day 7 to day 90 only the 12:00 UTC hour's recording survives each day; past day 90 it is deleted. A hard cap (`SLIPSTREAM_RECORDINGS_MAX_MB`, default 1024) evicts the oldest recordings first, down to 90% of the cap, if the time-based rules alone aren't enough. The database is backed up once a day (gzip-compressed, 7 kept), and logs older than 14 days are pruned. Every hour's log includes a `disk_usage` line with the current size of recordings, database, backups, and logs.
 - A run that fails (a dropped feed, a rejected order) is recorded with `status = failed` and its error; the next size still runs. A crash leaves a run `started`, which the next hour's run marks `abandoned`. Nothing is hidden.
 - Install the scheduled task yourself with `powershell -File scripts/install_task.ps1 -Install` (hourly at :05, as your own Windows user, only while you are logged on, no stored password, standard privileges). Remove it with `-Uninstall`. The script only registers or removes the task; it never runs the collector itself.
 
@@ -242,6 +242,16 @@ An hourly collector (`scripts/collect_hourly.sh`, driven by `slipstream collect 
 - **Risk limits hold on real costs.** The per-order spending limit is checked on the routed cost including fees, before a fill is committed. A 50 bps price collar blocks fills far from the market. Exchange rules come only from fixed public HTTPS endpoints, with no redirects, size caps, and strict number parsing.
 - **Hardened C++.** It builds with `-Wall -Wextra -Wpedantic -Wshadow -Werror` and is tested under AddressSanitizer and UndefinedBehaviorSanitizer.
 - **Supply chain.** Python dependencies are pinned with sha256 hashes and audited with `pip-audit`.
+
+## Development checks
+
+Beyond `scripts/ci.sh` (build, tests, lint, benchmark) on every push and PR, three more checks run in CI:
+
+- **CodeQL** (`.github/workflows/codeql.yml`): security-extended queries over `python`, `c-cpp` and `actions` on push to `main`, every PR, and a weekly Monday cron. Results go to GitHub code scanning; there is no local equivalent.
+- **clang-tidy** (`.github/workflows/static-analysis.yml`, config in `.clang-tidy` and `engine/tests/.clang-tidy`): runs on every engine source and test file on push to `main` and every PR. Run it locally in WSL2 Ubuntu 24.04 with `sudo apt-get install -y clang-tidy`, then `bash scripts/clang_tidy.sh`.
+- **Nightly flake hunt** (`.github/workflows/nightly.yml`, `scripts/nightly.sh`): runs daily at 06:17 UTC (and on demand via `workflow_dispatch`). It builds the ASan+UBSan engine, runs the Hypothesis property tests with `SLIPSTREAM_HYPOTHESIS_PROFILE=nightly` (random seed, 2000 examples, vs. CI's derandomized 200-example `ci` profile in `python/tests/conftest.py`), then repeats the timing-sensitive tests (CLI, collector, engine stream, feed process, session, recorder, and the replay/routing/schedules integration tests) 20 times (`SLIPSTREAM_NIGHTLY_REPEATS`) to give real concurrency and wall-clock races a chance to surface. A failure uploads `nightly-output.log` as a workflow artifact. Runs locally the same way: `bash scripts/nightly.sh`.
+
+**Dependabot** (`.github/dependabot.yml`) opens weekly PRs (capped at 5 open at a time) that group minor/patch updates for GitHub Actions and for the `python/` pip dependencies into single PRs.
 
 ## Roadmap
 
