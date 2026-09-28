@@ -20,6 +20,8 @@ from slipstream.v1 import execution_pb2 as pb
 _Handler = Callable[[ServerConnection], Awaitable[None]]
 
 KRAKEN_ACK = json.dumps({"method": "subscribe", "success": True, "result": {}})
+# CRC32 of "1010" "10" (ask 101.0 x 1.0) then "990" "10" (bid 99.0 x 1.0), per Kraken's v2 rules.
+KRAKEN_SNAPSHOT_CHECKSUM = 3112449789
 KRAKEN_SNAPSHOT = json.dumps(
     {
         "channel": "book",
@@ -29,6 +31,7 @@ KRAKEN_SNAPSHOT = json.dumps(
                 "symbol": "BTC/USD",
                 "bids": [{"price": 99.0, "qty": 1.0}],
                 "asks": [{"price": 101.0, "qty": 1.0}],
+                "checksum": KRAKEN_SNAPSHOT_CHECKSUM,
             }
         ],
     }
@@ -103,6 +106,14 @@ async def kraken_bad_json(ws: ServerConnection) -> None:
         await ws.recv()
     await ws.send(KRAKEN_ACK)
     await ws.send("not json")
+    await ws.wait_closed()
+
+
+async def kraken_bad_checksum(ws: ServerConnection) -> None:
+    for _ in range(2):
+        await ws.recv()
+    await ws.send(KRAKEN_ACK)
+    await ws.send(KRAKEN_SNAPSHOT.replace(str(KRAKEN_SNAPSHOT_CHECKSUM), "1"))
     await ws.wait_closed()
 
 
@@ -251,6 +262,32 @@ def test_parser_error_is_reported_with_its_venue_and_message(live_engine_address
         assert error.venue == "kraken"
         assert error.error_type == "KrakenMessageError"
         assert "invalid JSON" in str(error)
+        assert supervisor.exit_codes() == {"kraken": 1}
+
+    asyncio.run(scenario())
+
+
+def test_book_checksum_mismatch_stops_the_feed_naming_venue_and_symbol(
+    live_engine_address: str,
+) -> None:
+    async def scenario() -> None:
+        async with serve(kraken_bad_checksum, "127.0.0.1", 0) as server:
+            supervisor = FeedSupervisor(
+                ("kraken",),
+                "BTC/USD",
+                10,
+                live_engine_address,
+                urls={"kraken": f"ws://127.0.0.1:{port_of(server)}"},
+            )
+            supervisor.start()
+            try:
+                error = await expect_feed_error(supervisor)
+                await wait_for_exit(supervisor)
+            finally:
+                await supervisor.stop()
+        assert error.venue == "kraken"
+        assert error.error_type == "BookChecksumError"
+        assert "kraken BTC/USD book checksum mismatch" in str(error)
         assert supervisor.exit_codes() == {"kraken": 1}
 
     asyncio.run(scenario())
