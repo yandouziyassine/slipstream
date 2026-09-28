@@ -258,7 +258,7 @@ Beyond `scripts/ci.sh` (build, tests, lint, benchmark) on every push and PR, fou
 ## Roadmap
 
 - Batch statistics across recorded sessions (`record` + `compare --file`)
-- Property-based and fuzz tests; Kraken book checksum verification
+- C++ fuzz tests
 - Backtest scenarios (e.g. flash-crash windows)
 - Release Docker image
 
