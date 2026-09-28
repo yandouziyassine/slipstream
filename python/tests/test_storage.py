@@ -177,6 +177,31 @@ def test_daily_backup_creates_once_per_day_and_prunes(db: ResultsDB, tmp_path: P
     assert len(remaining) == 2
 
 
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "bug: _prune_backups uses backups[:-keep] to drop the newest `keep` backups from the "
+        "delete list. When keep=0, -keep is 0 and backups[:-0] == backups[:0] == [], so nothing "
+        "is deleted and every backup is kept forever instead of none. "
+        "See python/slipstream/storage.py:121-124."
+    ),
+)
+def test_daily_backup_with_keep_zero_deletes_every_backup(db: ResultsDB, tmp_path: Path) -> None:
+    run_id = db.begin_run(datetime.now(UTC), "buy", 0.01, 600, FEES, {}, None)
+    db.finish_run(run_id, "completed", datetime.now(UTC))
+    now = datetime(2026, 9, 27, 5, tzinfo=UTC)
+
+    for day in range(24, 27):
+        stale = tmp_path / "backup" / f"slipstream-2026-09-{day}.db.gz"
+        stale.parent.mkdir(parents=True, exist_ok=True)
+        stale.write_bytes(b"stale")
+
+    daily_backup(db, tmp_path, now, keep=0)
+
+    remaining = sorted((tmp_path / "backup").glob("slipstream-*.db.gz"))
+    assert remaining == []
+
+
 def test_prune_old_logs_deletes_only_stale_files(tmp_path: Path) -> None:
     now = datetime(2026, 9, 27, tzinfo=UTC)
     logs_dir = tmp_path / "logs"
