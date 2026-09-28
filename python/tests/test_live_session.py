@@ -31,6 +31,7 @@ KRAKEN_SNAPSHOT = json.dumps(
                 "symbol": "BTC/USD",
                 "bids": [{"price": 99990.0, "qty": 1.0}],
                 "asks": [{"price": 100010.0, "qty": 1.0}],
+                "checksum": 2995216371,
             }
         ],
     }
