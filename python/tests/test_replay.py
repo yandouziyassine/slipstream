@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 
 import pytest
+from test_kraken import DOC_SNAPSHOT
 from test_kraken_rest import ohlc_body
 
 from slipstream.kraken import parse_message
@@ -116,3 +117,90 @@ def test_replay_skips_ohlc_header_and_calibration_reads_it(tmp_path: Path) -> No
 def test_bad_calibration_lines_raise(tmp_path: Path, line: str) -> None:
     with pytest.raises(ReplayError, match="line 1"):
         read_calibration(write_lines(tmp_path / "bad.jsonl", [line]))
+
+
+BOOK_ACK = {
+    "method": "subscribe",
+    "result": {"channel": "book", "depth": 10, "snapshot": True, "symbol": "BTC/USD"},
+    "success": True,
+}
+FLIPPED_SNAPSHOT = DOC_SNAPSHOT.replace('"qty":0.00100000', '"qty":0.00100001')
+
+
+def raw_line(recv_ns: int, msg: str, venue: str = "kraken") -> str:
+    """A record spelled the way the recorder writes it: the venue's message text kept verbatim."""
+    return f'{{"recv_ns": {recv_ns}, "venue": "{venue}", "msg": {msg}}}'
+
+
+def test_fixture_book_checksums_verify() -> None:
+    assert len(list(read_replay(FIXTURE))) == 7
+
+
+def test_verifies_the_recorded_wire_text(tmp_path: Path) -> None:
+    file = write_lines(
+        tmp_path / "r.jsonl", [raw_line(1, json.dumps(BOOK_ACK)), raw_line(2, DOC_SNAPSHOT)]
+    )
+    assert len(list(read_replay(file))) == 2
+
+
+def test_recorded_checksum_mismatch_raises_with_its_line(tmp_path: Path) -> None:
+    file = write_lines(
+        tmp_path / "r.jsonl", [raw_line(1, json.dumps(BOOK_ACK)), raw_line(2, FLIPPED_SNAPSHOT)]
+    )
+    records = read_replay(file)
+    assert next(records)[0] == 1
+    with pytest.raises(ReplayError, match="line 2: kraken BTC/USD book checksum mismatch"):
+        next(records)
+
+
+def test_books_before_any_recorded_book_subscription_are_not_verified(tmp_path: Path) -> None:
+    file = write_lines(tmp_path / "r.jsonl", [raw_line(1, FLIPPED_SNAPSHOT)])
+    assert len(list(read_replay(file))) == 1
+
+
+def test_books_without_checksums_are_not_verified(tmp_path: Path) -> None:
+    no_checksum = DOC_SNAPSHOT.replace(',"checksum":3310070434', "")
+    corrupted = no_checksum.replace('"qty":0.00100000', '"qty":0.00100001')
+    file = write_lines(
+        tmp_path / "r.jsonl",
+        [raw_line(1, corrupted), raw_line(2, json.dumps(BOOK_ACK)), raw_line(3, corrupted)],
+    )
+    assert len(list(read_replay(file))) == 3
+
+
+def test_coinbase_records_are_not_kraken_checked(tmp_path: Path) -> None:
+    file = write_lines(tmp_path / "r.jsonl", [raw_line(1, FLIPPED_SNAPSHOT, venue="coinbase")])
+    assert len(list(read_replay(file))) == 1
+
+
+def test_malformed_book_subscription_raises_with_its_line(tmp_path: Path) -> None:
+    ack = {**BOOK_ACK, "result": {"channel": "book", "depth": 7, "symbol": "BTC/USD"}}
+    file = write_lines(tmp_path / "r.jsonl", [raw_line(1, json.dumps(ack))])
+    with pytest.raises(ReplayError, match="line 1: malformed book subscription"):
+        list(read_replay(file))
+
+
+def test_a_new_book_subscription_starts_a_new_mirror(tmp_path: Path) -> None:
+    update = (
+        '{"channel":"book","type":"update","data":[{"symbol":"BTC/USD","bids":[],"asks":[],'
+        '"checksum":3310070434}]}'
+    )
+    file = write_lines(
+        tmp_path / "r.jsonl",
+        [
+            raw_line(1, json.dumps(BOOK_ACK)),
+            raw_line(2, DOC_SNAPSHOT),
+            raw_line(3, json.dumps(BOOK_ACK)),
+            raw_line(4, update),
+        ],
+    )
+    with pytest.raises(ReplayError, match=r"line 4: .*before the snapshot"):
+        list(read_replay(file))
+
+
+def test_replayed_messages_keep_their_float_values(tmp_path: Path) -> None:
+    file = write_lines(
+        tmp_path / "r.jsonl", [raw_line(1, json.dumps(BOOK_ACK)), raw_line(2, DOC_SNAPSHOT)]
+    )
+    _, raw, _ = list(read_replay(file))[1]
+    assert raw == json.dumps(json.loads(DOC_SNAPSHOT))
