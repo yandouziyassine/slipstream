@@ -191,6 +191,8 @@ def test_supervisor_rejects_bad_configuration() -> None:
         FeedSupervisor(("kraken", "kraken"), "BTC/USD", 10, "127.0.0.1:1")
     with pytest.raises(ValueError, match="loopback"):
         FeedSupervisor(("kraken",), "BTC/USD", 10, "10.0.0.1:1")
+    with pytest.raises(ValueError, match="unknown venue"):
+        FeedSupervisor(("kraken", "binance"), "BTC/USD", 10, "127.0.0.1:1")  # type: ignore[arg-type]
 
 
 def test_two_feed_processes_stream_concurrently(two_venue_live_engine_address: str) -> None:
