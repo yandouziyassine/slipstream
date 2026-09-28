@@ -1,4 +1,5 @@
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -204,3 +205,34 @@ def test_replayed_messages_keep_their_float_values(tmp_path: Path) -> None:
     )
     _, raw, _ = list(read_replay(file))[1]
     assert raw == json.dumps(json.loads(DOC_SNAPSHOT))
+
+
+LIVE_FIXTURE = Path(__file__).parent / "fixtures" / "kraken_btcusd_live_checksums.jsonl"
+
+
+def live_book_lines() -> list[int]:
+    lines = LIVE_FIXTURE.read_text(encoding="utf-8").splitlines()
+    return [index for index, line in enumerate(lines) if '"channel":"book","type"' in line]
+
+
+def test_live_recording_checksums_verify() -> None:
+    records = list(read_replay(LIVE_FIXTURE))
+    books = [raw for _, raw, _ in records if json.loads(raw).get("channel") == "book"]
+    assert len(books) == len(live_book_lines()) == 24
+    assert json.loads(books[0])["type"] == "snapshot"
+
+
+@pytest.mark.parametrize("position", [0, 1, 12, 23], ids=["snapshot", "first", "middle", "last"])
+def test_live_recording_with_one_changed_digit_fails_on_that_line(
+    tmp_path: Path, position: int
+) -> None:
+    lines = LIVE_FIXTURE.read_text(encoding="utf-8").splitlines()
+    index = live_book_lines()[position]
+    line = lines[index]
+    qty = re.search(r'"qty":[0-9.]*[1-9]', line)
+    assert qty is not None
+    digit = qty.end() - 1
+    lines[index] = line[:digit] + str(int(line[digit]) % 9 + 1) + line[digit + 1 :]
+    file = write_lines(tmp_path / "changed.jsonl", lines)
+    with pytest.raises(ReplayError, match=rf"line {index + 1}: kraken BTC/USD book checksum"):
+        list(read_replay(file))

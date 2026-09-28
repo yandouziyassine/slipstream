@@ -1,5 +1,6 @@
 import json
 from decimal import Decimal
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -399,3 +400,14 @@ def test_book_subscription_ignores_other_messages(msg: dict[str, Any]) -> None:
 def test_book_subscription_rejects_a_malformed_book_ack(result: dict[str, Any]) -> None:
     with pytest.raises(KrakenMessageError, match="book subscription"):
         book_subscription({"method": "subscribe", "result": result, "success": True})
+
+
+def test_stream_verifies_a_live_recording_message_by_message() -> None:
+    fixture = Path(__file__).parent / "fixtures" / "kraken_btcusd_live_checksums.jsonl"
+    stream = KrakenStream("BTC/USD", 10)
+    books = 0
+    for line in fixture.read_text(encoding="utf-8").splitlines():
+        raw = line[line.index('"msg": ') + len('"msg": ') : -1]
+        if isinstance(stream.parse(raw), BookUpdate):
+            books += 1
+    assert books == 24
