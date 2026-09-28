@@ -7,18 +7,29 @@ import json
 import logging
 import re
 from collections.abc import Awaitable, Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import cast
 
+import pytest
 from websockets.asyncio.server import ServerConnection, serve
 from websockets.exceptions import ConnectionClosed
 
 from slipstream.calibration import CalibrationData
-from slipstream.collect import ALGOS, CollectConfig, acquire_lock, run_hour, side_for
+from slipstream.collect import (
+    ALGOS,
+    CollectConfig,
+    _housekeeping,
+    _recording_path,
+    acquire_lock,
+    main,
+    run_hour,
+    side_for,
+)
 from slipstream.db import ResultsDB
 from slipstream.kraken_rest import Bar
 from slipstream.models import Venue
+from slipstream.storage import StoragePolicy
 from slipstream.venue_rules import VenueRules
 
 RULES = {
@@ -323,3 +334,53 @@ def test_hourly_engine_position_limit_fits_every_order_of_the_hour() -> None:
     assert match is not None
     exposure = len(ALGOS) * sum(CollectConfig().sizes)
     assert float(match.group(1)) >= exposure
+
+
+def test_housekeeping_backs_up_thins_expires_and_logs_disk_usage(tmp_path: Path) -> None:
+    cfg = CollectConfig(sizes=(0.01, 0.25), data_dir=tmp_path)
+    policy = StoragePolicy(
+        full_retention_days=7, thin_retention_days=90, backups_to_keep=2, logs_max_age_days=14
+    )
+    db = _db(tmp_path / "slipstream.db")
+    now = datetime(2026, 9, 27, 0, tzinfo=UTC)
+
+    old_noon_at = now.replace(hour=12) - timedelta(days=40)
+    old_noon_path = _recording_path(tmp_path, old_noon_at, 0.01)
+    old_noon_path.parent.mkdir(parents=True, exist_ok=True)
+    old_noon_path.write_bytes(b"x" * 100)
+    noon_run = db.begin_run(old_noon_at, "buy", 0.01, 600, {"kraken": 40.0}, RULES, None)
+    db.set_recording(noon_run, old_noon_path, "a" * 64, old_noon_at)
+    db.finish_run(noon_run, "completed", now)
+
+    ancient_at = now - timedelta(days=100)
+    ancient_path = _recording_path(tmp_path, ancient_at, 0.01)
+    ancient_path.parent.mkdir(parents=True, exist_ok=True)
+    ancient_path.write_bytes(b"x" * 100)
+    ancient_run = db.begin_run(ancient_at, "buy", 0.01, 600, {"kraken": 40.0}, RULES, None)
+    db.set_recording(ancient_run, ancient_path, "b" * 64, ancient_at)
+    db.finish_run(ancient_run, "completed", now)
+
+    log = logging.getLogger("test-housekeeping")
+    _housekeeping(cfg, policy, db, now, log)
+
+    assert (tmp_path / "backup" / "slipstream-2026-09-27.db.gz").exists()
+    assert not ancient_path.exists()
+    deleted_run_ids = {
+        row[0] for row in db.connection.execute("SELECT run_id FROM recording_deletions")
+    }
+    assert ancient_run in deleted_run_ids
+    db.close()
+
+
+def test_main_fails_fast_on_invalid_recordings_budget_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SLIPSTREAM_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("SLIPSTREAM_RECORDINGS_MAX_MB", "not-a-number")
+
+    result = main(["run", "--engine", "127.0.0.1:1"])
+
+    assert result == 1
+    log_files = list((tmp_path / "logs").glob("collect-*.log"))
+    assert log_files
+    assert "invalid_storage_policy" in log_files[0].read_text(encoding="utf-8")

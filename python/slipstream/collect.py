@@ -25,6 +25,15 @@ from slipstream.logging_setup import JsonFormatter
 from slipstream.models import Algo, MarketDataError, OrderSpec, Side, Venue
 from slipstream.recorder import RecordError, record_stream
 from slipstream.session import LiveSession, OrderRejectedError, check_clock_mode
+from slipstream.storage import (
+    StorageConfigError,
+    StoragePolicy,
+    daily_backup,
+    disk_usage_mb,
+    enforce_recordings_budget,
+    expire_recordings,
+    prune_old_logs,
+)
 from slipstream.v1 import execution_pb2 as pb
 from slipstream.venue_rules import VenueRules, fetch_venue_rules
 
@@ -43,7 +52,6 @@ _RUN_ERRORS = (
 # unreachable): these must propagate, since there is no run row yet to attach them to.
 _HOUR_SETUP_ERRORS = (EngineError, MarketDataError, CalibrationError, OSError)
 
-_BACKUPS_TO_KEEP = 14
 # Closing one size's Subscribe stream and the engine noticing the cancellation (it polls every
 # 50ms; see service.h's kSubscribePoll) race with the next size opening a new one on the same
 # engine connection. Retry a "another subscriber is active" rejection a few times before giving
@@ -279,10 +287,65 @@ def _git_commit(repo_root: Path | None = None) -> str | None:
     return result.stdout.strip() or None
 
 
-def _prune_backups(backup_dir: Path, keep: int = _BACKUPS_TO_KEEP) -> None:
-    backups = sorted(backup_dir.glob("slipstream-*.db"))
-    for stale in backups[:-keep]:
-        stale.unlink(missing_ok=True)
+def _housekeeping(
+    cfg: CollectConfig,
+    policy: StoragePolicy,
+    db: ResultsDB,
+    now: datetime,
+    log: logging.Logger,
+) -> None:
+    """Everything that keeps `$DATA` bounded. Called once per hour, after the live runs finish,
+    so it never competes with the engine or the feeds for CPU or disk I/O (see `main`, which
+    lowers this process's priority right before calling in).
+    """
+    created = daily_backup(db, cfg.data_dir, now, policy.backups_to_keep)
+    if created is not None:
+        log.info(
+            f"backup created: {created.name}",
+            extra={"fields": {"event": "backup_created", "path": created.name}},
+        )
+    if now.hour == 0:
+        thinned = db.thin_recordings(
+            now, keep_hour_utc=policy.thin_keep_hour_utc, older_than_days=policy.full_retention_days
+        )
+        for path in thinned:
+            path.unlink(missing_ok=True)
+        if thinned:
+            log.info(
+                f"thinned {len(thinned)} recording(s)",
+                extra={"fields": {"event": "recordings_thinned", "count": len(thinned)}},
+            )
+        expired = expire_recordings(db, now, policy.thin_retention_days)
+        for path in expired:
+            path.unlink(missing_ok=True)
+        if expired:
+            log.info(
+                f"expired {len(expired)} recording(s)",
+                extra={"fields": {"event": "recordings_expired", "count": len(expired)}},
+            )
+        pruned_logs = prune_old_logs(cfg.data_dir, now, policy.logs_max_age_days)
+        if pruned_logs:
+            log.info(
+                f"pruned {pruned_logs} old log file(s)",
+                extra={"fields": {"event": "logs_pruned", "count": pruned_logs}},
+            )
+    protect = frozenset(_recording_path(cfg.data_dir, now, size) for size in cfg.sizes)
+    evicted_paths, evicted_mb = enforce_recordings_budget(db, cfg.data_dir, policy, now, protect)
+    for path in evicted_paths:
+        path.unlink(missing_ok=True)
+    if evicted_paths:
+        log.warning(
+            f"deleted {len(evicted_paths)} recording(s) ({evicted_mb:.1f} MB) over disk budget",
+            extra={
+                "fields": {
+                    "event": "recordings_budget_evicted",
+                    "count": len(evicted_paths),
+                    "mb": round(evicted_mb, 1),
+                }
+            },
+        )
+    usage = disk_usage_mb(cfg.data_dir, cfg.data_dir / "slipstream.db")
+    log.info("disk usage", extra={"fields": {"event": "disk_usage", **usage}})
 
 
 def _configure_file_logging(path: Path) -> logging.Logger:
@@ -312,6 +375,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     now = datetime.now(UTC)
     log = _configure_file_logging(cfg.data_dir / "logs" / f"collect-{now:%Y-%m-%d}.log")
 
+    try:
+        policy = StoragePolicy.from_env()
+    except StorageConfigError as exc:
+        log.error(str(exc), extra={"fields": {"event": "invalid_storage_policy"}})
+        return 1
+
     lock = acquire_lock(cfg.data_dir)
     if lock is None:
         log.info("skipped: previous run active", extra={"fields": {"event": "skipped"}})
@@ -336,12 +405,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 f"collected {len(run_ids)} run(s)",
                 extra={"fields": {"event": "collected", "run_ids": run_ids}},
             )
-            backup_dir = cfg.data_dir / "backup"
-            db.backup(backup_dir / f"slipstream-{now:%Y-%m-%d}.db")
-            _prune_backups(backup_dir)
-            if now.hour == 0:
-                for path in db.thin_recordings(now):
-                    path.unlink(missing_ok=True)
+            # The live runs are done, so housekeeping (backup, thinning, budget enforcement) can
+            # run at low priority without touching the latency we just measured.
+            if hasattr(os, "nice"):
+                os.nice(policy.housekeeping_nice)
+            _housekeeping(cfg, policy, db, now, log)
         finally:
             db.close()
     return 0
