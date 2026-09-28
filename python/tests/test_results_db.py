@@ -251,6 +251,25 @@ def test_add_results_resolves_algo_from_order_id_for_fills(db: ResultsDB) -> Non
     assert result_row[1] == pytest.approx(2.1 - 1.9)
 
 
+def test_add_results_filled_pct_is_zero_when_nothing_was_ordered(db: ResultsDB) -> None:
+    run_id = db.begin_run(datetime.now(UTC), "buy", 0.0, 600, FEES, RULES, None)
+    status = pb.OrderStatus(
+        order_id="h2026092700-0-twap",
+        algo="twap",
+        state=pb.ORDER_STATE_HALTED,
+        total_qty=0.0,
+        filled_qty=0.0,
+        halt_reason="risk limit exceeded before any child order was sent",
+    )
+
+    db.add_results(run_id, [status], [], _stats())
+
+    filled_pct = db.connection.execute(
+        "SELECT filled_pct FROM results WHERE run_id = ?", (run_id,)
+    ).fetchone()[0]
+    assert filled_pct == 0.0
+
+
 def test_add_results_rejects_a_fill_for_an_unknown_order(db: ResultsDB) -> None:
     run_id = db.begin_run(datetime.now(UTC), "buy", 0.01, 600, FEES, RULES, None)
     with pytest.raises(ResultsDBError, match="unknown order id"):
