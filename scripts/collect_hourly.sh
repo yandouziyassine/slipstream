@@ -18,7 +18,23 @@ STAMP="$(date -u +%Y-%m-%d-%H%M%S)"
 exec >>"$DATA/logs/collect_hourly-$(date -u +%Y-%m-%d).log" 2>&1
 echo "=== collect_hourly $STAMP UTC ==="
 
-bash scripts/build_release.sh
+# Skip the build entirely when the release binary is already newer than every engine/proto
+# source file (an hourly run rebuilding an unchanged engine wastes CPU and disk for nothing).
+# When a build is actually needed, run it niced and with the lowest I/O class available so it
+# never competes with the live engine or the collector below, which stay at normal priority so
+# the latency we measure each hour stays honest.
+BINARY="build/release/slipstream_engine"
+NEEDS_BUILD=1
+if [[ -f "$BINARY" ]] && [[ -z "$(find engine proto -type f -newer "$BINARY" -print -quit)" ]]; then
+  NEEDS_BUILD=0
+fi
+if [[ "$NEEDS_BUILD" -eq 1 ]]; then
+  if command -v ionice >/dev/null 2>&1; then
+    nice -n 19 ionice -c3 bash scripts/build_release.sh
+  else
+    nice -n 19 bash scripts/build_release.sh
+  fi
+fi
 
 # Captured via `$(...)`, not `< <(...)`: a process substitution's exit status is invisible to
 # `set -e`, so a failing venue-flags call (e.g. a network error) would otherwise go unnoticed.
