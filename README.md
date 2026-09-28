@@ -245,11 +245,13 @@ An hourly collector (`scripts/collect_hourly.sh`, driven by `slipstream collect 
 
 ## Development checks
 
-Beyond `scripts/ci.sh` (build, tests, lint, benchmark) on every push and PR, three more checks run in CI:
+Beyond `scripts/ci.sh` (build, tests, lint, benchmark) on every push and PR, four more checks run in CI:
 
 - **CodeQL** (`.github/workflows/codeql.yml`): security-extended queries over `python`, `c-cpp` and `actions` on push to `main`, every PR, and a weekly Monday cron. Results go to GitHub code scanning; there is no local equivalent.
 - **clang-tidy** (`.github/workflows/static-analysis.yml`, config in `.clang-tidy` and `engine/tests/.clang-tidy`): runs on every engine source and test file on push to `main` and every PR. Run it locally in WSL2 Ubuntu 24.04 with `sudo apt-get install -y clang-tidy`, then `bash scripts/clang_tidy.sh`.
 - **Nightly flake hunt** (`.github/workflows/nightly.yml`, `scripts/nightly.sh`): runs daily at 06:17 UTC (and on demand via `workflow_dispatch`). It builds the ASan+UBSan engine, runs the Hypothesis property tests with `SLIPSTREAM_HYPOTHESIS_PROFILE=nightly` (random seed, 2000 examples, vs. CI's derandomized 200-example `ci` profile in `python/tests/conftest.py`), then repeats the timing-sensitive tests (CLI, collector, engine stream, feed process, session, recorder, and the replay/routing/schedules integration tests) 20 times (`SLIPSTREAM_NIGHTLY_REPEATS`) to give real concurrency and wall-clock races a chance to surface. A failure uploads `nightly-output.log` as a workflow artifact. Runs locally the same way: `bash scripts/nightly.sh`.
+
+- **Coverage** (`coverage` job in `.github/workflows/ci.yml`, `scripts/coverage.sh`): Python (pytest-cov) and C++ (gcov + gcovr) line and branch coverage on every push and PR, shown in the job summary with the HTML report as an artifact. Report only, no threshold gate. Run locally with `bash scripts/coverage.sh`; reports land in `build/coverage-report/`.
 
 **Dependabot** (`.github/dependabot.yml`) opens weekly PRs (capped at 5 open at a time) that group minor/patch updates for GitHub Actions and for the `python/` pip dependencies into single PRs.
 
