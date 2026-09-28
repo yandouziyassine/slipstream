@@ -13,3 +13,4 @@ __pycache__/
 python/slipstream/v1/*_pb2*.py
 python/slipstream/v1/*_pb2*.pyi
 .claude/settings.local.json
+.coverage

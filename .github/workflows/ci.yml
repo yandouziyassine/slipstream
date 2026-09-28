@@ -34,3 +34,44 @@ jobs:
         # regression while giving CI the extra headroom local runs don't need.
         run: |
           PATH="$PWD/.venv/bin:$PATH" SLIPSTREAM_BENCH_TOLERANCE=3.0 bash scripts/ci.sh
+
+  coverage:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Install C++ toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake ninja-build pkg-config \
+            libgrpc++-dev libprotobuf-dev protobuf-compiler protobuf-compiler-grpc \
+            libgtest-dev python3-venv
+      - name: Install Python dependencies (hash-verified)
+        run: |
+          python3 -m venv .venv
+          .venv/bin/pip install --require-hashes -r python/requirements-dev.txt
+      - name: Report coverage (Python + C++, no gate)
+        run: |
+          PATH="$PWD/.venv/bin:$PATH" bash scripts/coverage.sh
+      - name: Publish coverage summaries
+        if: always()
+        run: |
+          {
+            echo "### C++ coverage"
+            echo '```'
+            cat build/coverage-report/cpp/summary.txt 2>/dev/null || echo "(no C++ summary generated)"
+            echo '```'
+            echo "### Python coverage"
+            echo '```'
+            cat build/coverage-report/python/summary.txt 2>/dev/null || echo "(no Python summary generated)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: coverage-report
+          path: build/coverage-report
+          retention-days: 14
