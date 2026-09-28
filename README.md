@@ -51,7 +51,7 @@ Each venue's WebSocket feed runs in its own OS process, so a slow Coinbase snaps
 | Engine | C++20, gRPC 1.51, Protocol Buffers, CMake + Ninja, GoogleTest, ASan + UBSan |
 | Orchestrator | Python 3.12, grpcio, websockets, pytest, `mypy --strict`, ruff |
 | Contract | `proto/slipstream/v1/execution.proto` |
-| Tooling | Ubuntu 24.04 dev container, hash-pinned dependencies, pip-audit, GitHub Actions |
+| Tooling | WSL2 Ubuntu 24.04, hash-pinned dependencies, pip-audit, GitHub Actions (`ubuntu-24.04` runners) |
 
 ## Repository layout
 
@@ -63,22 +63,19 @@ scripts/           build, codegen, and demo scripts
 docs/superpowers/  design spec and implementation plans
 ```
 
-## Build and test (Ubuntu 24.04 or WSL)
+## Build and test (WSL2 Ubuntu 24.04, or native Ubuntu 24.04)
+
+One-time setup: `bash scripts/setup_wsl.sh` (installs the apt toolchain and creates a venv at `~/.venvs/slipstream` with hash-verified dependencies). Then, with the venv on `PATH`:
 
 ```bash
-sudo apt-get install -y cmake ninja-build pkg-config libgrpc++-dev libprotobuf-dev \
-  protobuf-compiler protobuf-compiler-grpc libgtest-dev python3-venv
+export PATH="$HOME/.venvs/slipstream/bin:$PATH"
 
+bash scripts/gen_proto.sh
 bash scripts/build_engine.sh
 ctest --test-dir build/engine --output-on-failure
 
-python3 -m venv .venv
-.venv/bin/pip install --require-hashes -r python/requirements-dev.txt
-PYTHON=.venv/bin/python bash scripts/gen_proto.sh
-(cd python && ../.venv/bin/python -m pytest -q)
+(cd python && pytest -q)
 ```
-
-A Docker dev container (`compose.yaml`, `docker/dev.Dockerfile`) wraps the same toolchain.
 
 ## Run a paper execution
 
@@ -86,7 +83,7 @@ Replay a recorded order book:
 
 ```bash
 build/engine/slipstream_engine --listen 127.0.0.1:50051 --max-order-notional 10000 &
-PYTHONPATH=python .venv/bin/python -m slipstream.cli replay \
+PYTHONPATH=python ~/.venvs/slipstream/bin/python -m slipstream.cli replay \
   --file python/tests/fixtures/kraken_btcusd_replay.jsonl \
   --side buy --qty 0.06 --duration 6 --slices 3
 ```
@@ -94,7 +91,7 @@ PYTHONPATH=python .venv/bin/python -m slipstream.cli replay \
 Run against the live Kraken book (public data, simulated fills). `scripts/demo_live.sh` starts the engine with conservative limits and runs the CLI:
 
 ```bash
-PATH="$PWD/.venv/bin:$PATH" bash scripts/demo_live.sh --side buy --qty 0.005 --duration 60 --slices 6
+PATH="$HOME/.venvs/slipstream/bin:$PATH" bash scripts/demo_live.sh --side buy --qty 0.005 --duration 60 --slices 6
 ```
 
 Output of a real run (2026-09-24, Kraken BTC/USD). JSON fill logs go to stderr and the summary to stdout:
@@ -119,7 +116,7 @@ saved        -1.12 bps
 `compare` submits the same parent order once per algorithm and runs them all side by side on the same feed. Paper fills do not consume liquidity, so the orders do not compete for it.
 
 ```bash
-PATH="$PWD/.venv/bin:$PATH" bash scripts/demo_compare.sh --side buy --qty 0.005 --duration 1200 --slices 20
+PATH="$HOME/.venvs/slipstream/bin:$PATH" bash scripts/demo_compare.sh --side buy --qty 0.005 --duration 1200 --slices 20
 ```
 
 Output of a real run (2026-09-24 14:10–14:30 UTC, Kraken BTC/USD, buy 0.005 BTC over 20 minutes):
@@ -156,7 +153,7 @@ Paper fills don't consume liquidity, so these comparisons cost nothing and are e
 - The demo scripts use illustrative entry-tier taker fees. Set your own tier with `KRAKEN_FEE_BPS=… COINBASE_FEE_BPS=…`.
 
 ```bash
-PATH="$PWD/.venv/bin:$PATH" bash scripts/demo_compare.sh --side buy --qty 0.02 --duration 600 --slices 10
+PATH="$HOME/.venvs/slipstream/bin:$PATH" bash scripts/demo_compare.sh --side buy --qty 0.02 --duration 600 --slices 10
 ```
 
 Two live runs on the same feeds at the same time (2026-09-26 01:21–01:30 UTC, BTC/USD, buy 0.02 BTC over 10 minutes). The first uses the demo fees:

@@ -1,0 +1,42 @@
+name: nightly
+
+on:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  flake-hunt:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Install C++ toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake ninja-build pkg-config \
+            libgrpc++-dev libprotobuf-dev protobuf-compiler protobuf-compiler-grpc \
+            libgtest-dev python3-venv
+      - name: Install Python dependencies (hash-verified)
+        run: |
+          python3 -m venv .venv
+          .venv/bin/pip install --require-hashes -r python/requirements-dev.txt
+      - name: Run nightly flake hunt
+        # Without an explicit shell a run step is `bash -e`, with no pipefail: tee's exit status
+        # would hide a failing nightly.sh.
+        run: |
+          set -o pipefail
+          PATH="$PWD/.venv/bin:$PATH" bash scripts/nightly.sh 2>&1 | tee nightly-output.log
+      - name: Upload nightly output
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: nightly-output
+          path: nightly-output.log
+          retention-days: 14
