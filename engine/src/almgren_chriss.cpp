@@ -18,6 +18,9 @@ std::optional<AlmgrenChrissSchedule> AlmgrenChrissSchedule::create(const SlicePa
     if (!positive_finite(sigma) || !positive_finite(eta) || !positive_finite(risk_aversion)) {
         return std::nullopt;
     }
+    // Integer division on purpose: slices start on whole-nanosecond boundaries, so tau matches
+    // the slice clock exactly (the dropped remainder is under 1 ns).
+    // NOLINTNEXTLINE(bugprone-integer-division)
     const double tau_s = static_cast<double>(params.duration_ns / params.num_slices) / 1e9;
     const double cosh_kappa_tau = 1.0 + risk_aversion * sigma * sigma * tau_s * tau_s / (2.0 * eta);
     if (!std::isfinite(cosh_kappa_tau)) return std::nullopt;

@@ -1,0 +1,20 @@
+---
+# readability-braces-around-statements is deliberately not enabled: this codebase does not
+# brace single-statement if/for/while bodies, and that check would flag all of it.
+Checks: >
+  -*,
+  bugprone-*,
+  -bugprone-easily-swappable-parameters,
+  performance-*,
+  concurrency-*,
+  cert-err58-cpp,
+  misc-*,
+  -misc-non-private-member-variables-in-classes,
+  -misc-no-recursion,
+  -misc-include-cleaner,
+  -misc-use-anonymous-namespace,
+  -misc-const-correctness,
+  modernize-use-nullptr,
+  modernize-use-override
+WarningsAsErrors: '*'
+HeaderFilterRegex: 'engine/(src|tests)/[^/]*\.h$'

@@ -179,7 +179,7 @@ std::optional<double> Engine::consolidated_mid_locked(std::int64_t now_ns) const
             }
         }
     }
-    if (!best_bid || !best_ask) return std::nullopt;
+    if (!best_bid || !best_ask || !best_effective_bid || !best_effective_ask) return std::nullopt;
     // Separate venues are routinely crossed by a little, because taker fees make the cross
     // unprofitable to trade. A cross that survives fees is an arbitrage real venues do not leave
     // standing, so treat it as bad data.
