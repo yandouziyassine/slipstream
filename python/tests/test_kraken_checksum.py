@@ -73,7 +73,15 @@ def test_documented_example_checksum() -> None:
         ("1E-8", "1"),
         ("0.5", "5"),
     ],
-    ids=["leading-zeros", "price", "trailing-zero", "trailing-zeros", "integer", "exponent", "half"],
+    ids=[
+        "leading-zeros",
+        "price",
+        "trailing-zero",
+        "trailing-zeros",
+        "integer",
+        "exponent",
+        "half",
+    ],
 )
 def test_level_text_drops_the_point_and_leading_zeros_only(value: str, text: str) -> None:
     assert level_text(Decimal(value)) == text
@@ -102,8 +110,8 @@ def test_snapshot_matches_the_documented_checksum() -> None:
 
 def test_checksum_covers_only_the_top_ten_levels() -> None:
     book = KrakenBook(25)
-    deeper_bids = levels(DOC_BIDS) + [(Decimal("45000.0"), Decimal("1.00000000"))]
-    deeper_asks = levels(DOC_ASKS) + [(Decimal("46000.0"), Decimal("1.00000000"))]
+    deeper_bids = [*levels(DOC_BIDS), (Decimal("45000.0"), Decimal("1.00000000"))]
+    deeper_asks = [*levels(DOC_ASKS), (Decimal("46000.0"), Decimal("1.00000000"))]
     book.apply(True, deeper_bids, deeper_asks)
     assert book.checksum() == DOC_CHECKSUM
 
@@ -120,8 +128,8 @@ def test_update_changes_deletes_and_inserts_levels() -> None:
     book.apply(False, [(Decimal("45283.4"), Decimal("0.00000000"))], [])
     book.apply(False, [(Decimal("45276.5"), Decimal("0.20000000"))], [])
     book.apply(False, [], [(Decimal("45285.2"), Decimal("0.00200000"))])
-    expected_bids = [row for row in DOC_BIDS if row[0] != "45283.4"] + [("45276.5", "0.20000000")]
-    expected_asks = [("45285.2", "0.00200000")] + DOC_ASKS[1:]
+    expected_bids = [*(row for row in DOC_BIDS if row[0] != "45283.4"), ("45276.5", "0.20000000")]
+    expected_asks = [("45285.2", "0.00200000"), *DOC_ASKS[1:]]
     assert book.checksum() == book_checksum(levels(expected_asks), levels(expected_bids))
 
 
@@ -143,7 +151,7 @@ def test_snapshot_replaces_the_whole_book() -> None:
 
 
 def test_flipped_digit_changes_the_checksum() -> None:
-    flipped = [("45285.2", "0.00100001")] + DOC_ASKS[1:]
+    flipped = [("45285.2", "0.00100001"), *DOC_ASKS[1:]]
     assert book_checksum(levels(flipped), levels(DOC_BIDS)) != DOC_CHECKSUM
 
 
