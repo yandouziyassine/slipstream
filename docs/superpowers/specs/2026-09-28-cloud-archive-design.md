@@ -314,7 +314,7 @@ At about 130 MB/day, 7 days is about 0.9 GB, close to the 1 GB default cap. In p
    - Coinbase's Market Data Terms (last updated 2026-08-06) say that without prior written consent you may not "redistribute, display, or disseminate the Market Data" or "Derived Works" (including "data, charts, analytics, research") to third parties [R17]. The terms are presented for the Exchange Market Data API. Whether they bind the Advanced Trade public WebSocket could not be confirmed: the Developer Platform terms page returned HTTP 403 to automated fetches.
    - Kraken: "You must seek our prior permission for … any non-personal commercial use of data from publicly accessible endpoints, such as market data" (contact `marketdata@kraken.com`) [R18].
    - This is why the dataset is private and `anon` has no access in this draft.
-   - **The already-published research page is a Derived Work in Coinbase's terms, so this question applies to it too** (open question 2).
+   - **The research page (built, but never published: `slipstream-live` does not exist and publishing is off) would be a Derived Work in Coinbase's terms, so this question must be answered before its first publish too** (open question 2).
 7. **Validation at the boundaries.** `.env` values (above); remote counts, ids and sizes (section 5.3, step 5); remote file metadata (section 6.2, step 5); local files re-hashed before upload.
 8. **Supply chain.**
    - Two direct dependencies, hash-pinned through pip-compile and covered by `pip-audit` in CI.
@@ -395,7 +395,7 @@ At about 130 MB/day, 7 days is about 0.9 GB, close to the 1 GB default cap. In p
 ## 13. Open questions for the user
 
 1. **Dataset visibility:** keep it private (recommended: licensing risk, and a documented 100 GB quota) or public (best-effort storage, and it needs the answer to question 2)?
-2. **Licensing:** should the controller draft an email to `marketdata@kraken.com` and to Coinbase asking permission for non-commercial research use of raw and derived data? This also covers the live research page, which may already need it under Coinbase's Market Data Terms.
+2. **Licensing:** should the controller draft an email to `marketdata@kraken.com` and to Coinbase asking permission for non-commercial research use of raw and derived data? This also covers the research page, which is not published yet and should stay unpublished until this is answered.
 3. **Fills:** accept the summary in Postgres plus a daily CSV on HF (recommended)? The smaller alternative puts only the summary in Postgres and keeps raw fills local and in local backups, with no off-site raw copy.
 4. **`anon` access:** OK to grant it only when the API spec ships?
 5. **At about 2 years (private quota full):** decide then between (a) making the dataset public, (b) archiving only the 12:00 recordings from then on (about 2 GB/year), or (c) squashing old history (destructive). Until then the archive logs an error when HF refuses a commit, and the recordings stay local under the cap.
