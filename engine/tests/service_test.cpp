@@ -110,6 +110,34 @@ TEST_F(ServiceTest, VwapScheduleMapsThroughOneof) {
     EXPECT_EQ(status.orders(0).algo(), "vwap");
 }
 
+TEST_F(ServiceTest, SellSideRoundTripsThroughTheOneof) {
+    apply_snapshot();
+    const auto request = order(v1::SIDE_SELL);
+    v1::SubmitReply reply;
+    ASSERT_TRUE(service.SubmitParentOrder(nullptr, &request, &reply).ok());
+    ASSERT_TRUE(reply.accepted()) << reply.reason();
+    v1::StatusRequest status_request;
+    v1::StatusReply status;
+    ASSERT_TRUE(service.GetStatus(nullptr, &status_request, &status).ok());
+    EXPECT_DOUBLE_EQ(status.position(), -1.0);
+    EXPECT_DOUBLE_EQ(status.orders(0).avg_fill_price(), 99.0);
+}
+
+TEST_F(ServiceTest, AlmgrenChrissScheduleMapsThroughOneof) {
+    apply_snapshot();
+    auto request = order(v1::SIDE_BUY);
+    request.mutable_almgren_chriss()->set_sigma(1.0);
+    request.mutable_almgren_chriss()->set_eta(1.0);
+    request.mutable_almgren_chriss()->set_risk_aversion(1.0);
+    v1::SubmitReply reply;
+    ASSERT_TRUE(service.SubmitParentOrder(nullptr, &request, &reply).ok());
+    ASSERT_TRUE(reply.accepted()) << reply.reason();
+    v1::StatusRequest status_request;
+    v1::StatusReply status;
+    ASSERT_TRUE(service.GetStatus(nullptr, &status_request, &status).ok());
+    EXPECT_EQ(status.orders(0).algo(), "almgren_chriss");
+}
+
 TEST_F(ServiceTest, TooManyVwapWeightsIsInvalidArgument) {
     auto request = order(v1::SIDE_BUY);
     for (int i = 0; i <= kMaxSlices; ++i) request.mutable_vwap()->add_weights(1.0);

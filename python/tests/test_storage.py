@@ -177,6 +177,22 @@ def test_daily_backup_creates_once_per_day_and_prunes(db: ResultsDB, tmp_path: P
     assert len(remaining) == 2
 
 
+@pytest.mark.parametrize("keep", [0, -1])
+def test_daily_backup_rejects_a_keep_count_below_one(
+    db: ResultsDB, tmp_path: Path, keep: int
+) -> None:
+    now = datetime(2026, 9, 27, 5, tzinfo=UTC)
+    stale = tmp_path / "backup" / "slipstream-2026-09-24.db.gz"
+    stale.parent.mkdir(parents=True, exist_ok=True)
+    stale.write_bytes(b"stale")
+
+    with pytest.raises(ValueError, match="keep"):
+        daily_backup(db, tmp_path, now, keep=keep)
+
+    assert stale.exists()
+    assert not (tmp_path / "backup" / "slipstream-2026-09-27.db.gz").exists()
+
+
 def test_prune_old_logs_deletes_only_stale_files(tmp_path: Path) -> None:
     now = datetime(2026, 9, 27, tzinfo=UTC)
     logs_dir = tmp_path / "logs"
