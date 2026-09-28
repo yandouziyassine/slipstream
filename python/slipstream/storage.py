@@ -129,6 +129,8 @@ def daily_backup(db: ResultsDB, data_dir: Path, now: datetime, keep: int) -> Pat
     not already exist, then prune old backups. Safe to call every hour: only the first call of
     the day does any work.
     """
+    if keep < 1:
+        raise ValueError(f"keep must be at least 1, got {keep}")
     backup_dir = data_dir / "backup"
     backup_dir.mkdir(parents=True, exist_ok=True)
     dest = backup_dir / f"slipstream-{now:%Y-%m-%d}.db.gz"
