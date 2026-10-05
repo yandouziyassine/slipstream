@@ -116,6 +116,7 @@ add_executable(engine_tests
   tests/router_test.cpp
   tests/engine_routing_test.cpp
   tests/engine_consumption_test.cpp
+  tests/engine_market_halt_test.cpp
   tests/clock_test.cpp
   tests/bounded_queue_test.cpp
   tests/engine_loop_test.cpp
