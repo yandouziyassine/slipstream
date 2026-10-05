@@ -69,8 +69,11 @@ class ReconnectPolicy:
 
     def delay_s(self, attempt: int, rng: Callable[[], float] = random.random) -> float:
         """Equal jitter: somewhere in the upper half of the doubled, capped delay."""
-        ceiling = min(self.max_delay_s, self.base_delay_s * 2 ** (attempt - 1))
+        ceiling = min(self.max_delay_s, self.base_delay_s * 2.0 ** (attempt - 1))
         return ceiling * (0.5 + rng() / 2)
+
+
+DEFAULT_RECONNECT = ReconnectPolicy()
 
 
 @dataclass(frozen=True)

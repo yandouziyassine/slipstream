@@ -134,9 +134,7 @@ def test_a_reconnect_is_reported_with_its_downtime_once_a_snapshot_arrives() -> 
     assert reports == []
     clock.now = 102.5
     tracker.received(SNAPSHOT)
-    assert reports == [
-        FeedReconnect("kraken", 1, "ConnectionResetError: reset by peer", 2.5, True)
-    ]
+    assert reports == [FeedReconnect("kraken", 1, "ConnectionResetError: reset by peer", 2.5, True)]
     tracker.received(SNAPSHOT)
     tracker.close()
     assert len(reports) == 1

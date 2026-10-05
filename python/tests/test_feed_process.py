@@ -16,6 +16,7 @@ from slipstream.feed_process import FeedProcessError, FeedSupervisor, market_eve
 from slipstream.live import LiveFeedError
 from slipstream.models import BookUpdate, MarketDataError, TradeBatch, Venue
 from slipstream.v1 import execution_pb2 as pb
+from slipstream.venue_ws import FeedReconnect, ReconnectPolicy
 
 _Handler = Callable[[ServerConnection], Awaitable[None]]
 
@@ -44,6 +45,7 @@ KRAKEN_TRADE = json.dumps(
     }
 )
 KRAKEN_HEARTBEAT = json.dumps({"channel": "heartbeat"})
+FAST = ReconnectPolicy(base_delay_s=0.01, max_delay_s=0.01)
 
 
 def coinbase_message(channel: str, seq: int, events: list[dict[str, object]]) -> str:
@@ -267,7 +269,7 @@ def test_parser_error_is_reported_with_its_venue_and_message(live_engine_address
     asyncio.run(scenario())
 
 
-def test_book_checksum_mismatch_stops_the_feed_naming_venue_and_symbol(
+def test_repeated_book_checksum_mismatches_stop_the_feed_naming_venue_and_symbol(
     live_engine_address: str,
 ) -> None:
     async def scenario() -> None:
@@ -278,6 +280,7 @@ def test_book_checksum_mismatch_stops_the_feed_naming_venue_and_symbol(
                 10,
                 live_engine_address,
                 urls={"kraken": f"ws://127.0.0.1:{port_of(server)}"},
+                reconnect=FAST,
             )
             supervisor.start()
             try:
@@ -286,8 +289,8 @@ def test_book_checksum_mismatch_stops_the_feed_naming_venue_and_symbol(
             finally:
                 await supervisor.stop()
         assert error.venue == "kraken"
-        assert error.error_type == "BookChecksumError"
-        assert "kraken BTC/USD book checksum mismatch" in str(error)
+        assert "gave up after 5 reconnects" in str(error)
+        assert "BookChecksumError: kraken BTC/USD book checksum mismatch" in str(error)
         assert supervisor.exit_codes() == {"kraken": 1}
 
     asyncio.run(scenario())
@@ -302,7 +305,8 @@ def test_idle_feed_is_reported(live_engine_address: str) -> None:
                 10,
                 live_engine_address,
                 urls={"kraken": f"ws://127.0.0.1:{port_of(server)}"},
-                idle_timeout_s=0.5,
+                idle_timeout_s=0.2,
+                reconnect=ReconnectPolicy(max_reconnects=1, base_delay_s=0.01, max_delay_s=0.01),
             )
             supervisor.start()
             try:
@@ -317,8 +321,15 @@ def test_idle_feed_is_reported(live_engine_address: str) -> None:
 
 def test_unreachable_market_data_is_reported(live_engine_address: str) -> None:
     async def scenario() -> None:
+        reports: list[FeedReconnect] = []
         supervisor = FeedSupervisor(
-            ("kraken",), "BTC/USD", 10, live_engine_address, urls={"kraken": "ws://127.0.0.1:1"}
+            ("kraken",),
+            "BTC/USD",
+            10,
+            live_engine_address,
+            urls={"kraken": "ws://127.0.0.1:1"},
+            reconnect=FAST,
+            on_reconnect=reports.append,
         )
         supervisor.start()
         try:
@@ -326,6 +337,8 @@ def test_unreachable_market_data_is_reported(live_engine_address: str) -> None:
         finally:
             await supervisor.stop()
         assert error.venue == "kraken"
+        assert "gave up after 5 reconnects" in str(error)
+        assert [(r.attempt, r.recovered) for r in reports] == [(n, False) for n in range(1, 6)]
 
     asyncio.run(scenario())
 
