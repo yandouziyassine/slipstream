@@ -36,6 +36,7 @@ from slipstream.storage import (
 )
 from slipstream.v1 import execution_pb2 as pb
 from slipstream.venue_rules import VenueRules, fetch_venue_rules
+from slipstream.venue_ws import FeedReconnect
 
 ALGOS: tuple[Algo, ...] = ("twap", "vwap", "pov", "almgren_chriss")
 
@@ -136,6 +137,28 @@ def _recording_path(data_dir: Path, now: datetime, size: float) -> Path:
     return data_dir / "recordings" / f"{now:%Y-%m-%d}" / f"{now:%H}-{_qty_token(size)}.jsonl.gz"
 
 
+def _recorder_reconnect_logger(
+    log: logging.Logger, reconnects: list[FeedReconnect]
+) -> Callable[[FeedReconnect], None]:
+    def record(event: FeedReconnect) -> None:
+        reconnects.append(event)
+        log.warning(
+            "recorder reconnect",
+            extra={
+                "fields": {
+                    "event": "recorder_reconnect",
+                    "venue": event.venue,
+                    "attempt": event.attempt,
+                    "reason": event.reason,
+                    "downtime_s": round(event.downtime_s, 3),
+                    "recovered": event.recovered,
+                }
+            },
+        )
+
+    return record
+
+
 def _sha256_file(path: Path) -> str:
     with path.open("rb") as handle:
         return hashlib.file_digest(handle, "sha256").hexdigest()
@@ -161,8 +184,12 @@ async def _run_size(
     specs = _order_specs(now, side, size, cfg)
     failed = False
     exc: BaseException | None = None
+    session: LiveSession | None = None
+    recorder_reconnects: list[FeedReconnect] = []
     for attempt in range(_SUBSCRIBER_CONFLICT_RETRIES):
         failed = False
+        session = None
+        recorder_reconnects = []
         try:
             rec_path.parent.mkdir(parents=True, exist_ok=True)
             with gzip.open(rec_path, "wt", encoding="utf-8") as handle:
@@ -185,6 +212,7 @@ async def _run_size(
                             cfg.duration_s,
                             venues=cfg.venues,
                             urls=urls,
+                            on_reconnect=_recorder_reconnect_logger(log, recorder_reconnects),
                         )
                     )
                     session_task = group.create_task(session.run(engine_address, urls=urls))
@@ -198,6 +226,8 @@ async def _run_size(
             await asyncio.sleep(_SUBSCRIBER_CONFLICT_DELAY_S)
             continue
         break
+    db.add_reconnects(run_id, "feed", session.reconnects if session is not None else [])
+    db.add_reconnects(run_id, "recorder", recorder_reconnects)
     if failed:
         if exc is None:
             raise RuntimeError("unreachable: failed is True but no exception was recorded")
