@@ -228,7 +228,7 @@ TEST(Consumption, RecordsStayBoundedAcrossManyRefreshes) {
     for (int step = 0; step < kSteps; ++step) {
         const double shift = 0.01 * step;
         std::vector<Level> asks;
-        for (std::size_t i = 0; i < kLevels; ++i) asks.push_back({100.0 + shift + i, 0.05});
+        for (std::size_t i = 0; i < kLevels; ++i) asks.push_back({100.0 + shift + static_cast<double>(i), 0.05});
         asks.push_back({110.0 + shift, 50.0});
         ASSERT_TRUE(engine.apply_book_snapshot({{99.0 + shift, 50.0}}, asks));
         ASSERT_FALSE(engine.step(step * kSec).fills.empty());
