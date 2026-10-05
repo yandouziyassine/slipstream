@@ -36,7 +36,7 @@ An order's record is keyed by version. When the feed touches a level, the level 
 
 `ConsumptionOverlay` (`consumption_overlay.{h,cpp}`): what one order has taken from one venue's book, as a vector of `{version, taken}` sorted by version.
 
-- `remaining(levels)`: each level's displayed quantity minus what this order took at that version. Levels with nothing left are left out. The result is floored at zero: it is never negative.
+- `remaining(levels)`: each level's displayed quantity minus what this order took at that version. Levels with nothing left are left out. The result is floored at zero: it is never negative. A remainder below 1e-9 of the displayed size is rounding noise from summed takes, so it counts as nothing left.
 - `record(levels, taken)`: `taken[i]` is the quantity taken from the `i`-th level of `remaining(levels)`. The overlay is rebuilt from the current levels, so entries for levels that no longer exist, or that have a new version, are dropped here.
 - `clear()`: releases the memory.
 
@@ -73,6 +73,15 @@ An overlay only holds entries for levels in the current book side, so it has at 
 - Single-venue costs also rise, because each counterfactual depletes its own venue. The routed order spreads over venues and depletes each one less, so routing gain can grow. That growth is real: it is the benefit of not walking one book alone.
 - A venue that cannot fill a child from what is left after its own counterfactual history now reports "unavailable" more often.
 - Orders still never deplete each other, so `compare` stays a fair side-by-side comparison.
+
+Measured on the replay fixtures (before → after, buy orders, cost in bps against the arrival mid):
+
+| Fixture and order | Before | After | Why |
+|---|---|---|---|
+| `kraken_btcusd_replay`, 0.06 in 3 slices (the integration test) | 0.833 | 0.833 | Each child lands just after the feed refreshes or improves the level it needs |
+| `kraken_btcusd_replay`, 0.09 in 6 slices | 0.833 | 1.111 | Children between refreshes now walk past what earlier children took |
+| `two_venue_btcusd_replay`, single slice | 1.850 routed, Kraken 1.950, Coinbase 3.050 | unchanged | One child: nothing to consume yet |
+| Schedules fixture (one snapshot, no refresh), 0.04 in 4 slices, each algorithm | TWAP 1.000, VWAP 1.250, POV 1.375, AC 1.176 | 2.250 for all four | The book never refreshes, so every schedule ends up walking the same 0.04 of displayed depth: the same cost as sending it at once |
 
 ## 5. Testing
 
