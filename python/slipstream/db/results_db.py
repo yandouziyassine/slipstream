@@ -12,8 +12,10 @@ from typing import Literal
 from slipstream.models import Fill, Side, Venue
 from slipstream.v1 import execution_pb2 as pb
 from slipstream.venue_rules import VenueRules
+from slipstream.venue_ws import FeedReconnect
 
 RunStatus = Literal["completed", "failed"]
+ReconnectSource = Literal["feed", "recorder"]
 
 
 class ResultsDBError(RuntimeError):
@@ -215,6 +217,30 @@ class ResultsDB:
                 "INSERT INTO engine_stats (run_id, latency_p50_ns, latency_p99_ns, events) "
                 "VALUES (?, ?, ?, ?)",
                 (run_id, stats.latency_p50_ns, stats.latency_p99_ns, stats.events),
+            )
+
+    def add_reconnects(
+        self, run_id: int, source: ReconnectSource, reconnects: Sequence[FeedReconnect]
+    ) -> None:
+        if source not in ("feed", "recorder"):
+            raise ResultsDBError(f"invalid reconnect source {source!r}")
+        with self._conn:
+            self._conn.executemany(
+                "INSERT INTO feed_reconnects "
+                "(run_id, source, venue, attempt, reason, downtime_s, recovered) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                [
+                    (
+                        run_id,
+                        source,
+                        event.venue,
+                        event.attempt,
+                        event.reason,
+                        event.downtime_s,
+                        int(event.recovered),
+                    )
+                    for event in reconnects
+                ],
             )
 
     def set_recording(self, run_id: int, path: Path, sha256: str, recorded_at: datetime) -> None:
