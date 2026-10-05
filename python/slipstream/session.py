@@ -34,7 +34,12 @@ from slipstream.models import (
 )
 from slipstream.replay import ReplayError
 from slipstream.v1 import execution_pb2 as pb
-from slipstream.venue_ws import IDLE_TIMEOUT_S
+from slipstream.venue_ws import (
+    DEFAULT_RECONNECT,
+    IDLE_TIMEOUT_S,
+    FeedReconnect,
+    ReconnectPolicy,
+)
 
 _NS_PER_S = 1_000_000_000
 # The engine rejects a replay clock that jumps more than one day in a single event.
@@ -53,6 +58,9 @@ _BOOK_POLL_S = 0.05
 _BOOK_TIMEOUT_S = 45.0
 # Extra time allowed, past an order's own duration, for a live run's terminal updates to arrive.
 DEADLINE_GRACE_S = 60
+# A live run stops once no venue has had a fresh book for this long (fail safe).
+STALE_LIMIT_S = 30.0
+_STALE_POLL_S = 1.0
 
 _Parser = Callable[[str | bytes], BookUpdate | TradeBatch | None]
 
@@ -419,6 +427,7 @@ class LiveSession:
         self._fee_bps: dict[Venue, float] = dict(fee_bps or {})
         self._terminal: set[str] = set()
         self.fills: list[Fill] = []
+        self.reconnects: list[FeedReconnect] = []
 
     async def order_statuses(self) -> list[pb.OrderStatus]:
         return self._ours(await self._channel.status())
@@ -434,6 +443,9 @@ class LiveSession:
         idle_timeout_s: float = IDLE_TIMEOUT_S,
         book_timeout_s: float = _BOOK_TIMEOUT_S,
         deadline_grace_s: float = DEADLINE_GRACE_S,
+        reconnect: ReconnectPolicy = DEFAULT_RECONNECT,
+        stale_limit_s: float = STALE_LIMIT_S,
+        stale_poll_s: float = _STALE_POLL_S,
     ) -> SessionResult:
         await check_clock_mode(self._channel, pb.CLOCK_MODE_LIVE)
         # Open the subscription before any submit: the engine delivers fills and order updates
@@ -443,6 +455,7 @@ class LiveSession:
         )
         consumer = asyncio.ensure_future(self._consume(subscription))
         error_watch: asyncio.Future[None] | None = None
+        stale_watch: asyncio.Future[None] | None = None
         supervisor: FeedSupervisor | None = None
         try:
             supervisor = FeedSupervisor(
@@ -452,19 +465,23 @@ class LiveSession:
                 engine_address,
                 urls,
                 idle_timeout_s,
+                reconnect,
+                self._on_reconnect,
             )
             supervisor.start()
             error_watch = asyncio.ensure_future(_watch_feeds(supervisor))
             await self._await_books(consumer, error_watch, book_timeout_s)
             await self._submit_all()
+            stale_watch = asyncio.ensure_future(self._watch_market(stale_limit_s, stale_poll_s))
             _check_running(consumer, error_watch)
             deadline_s = max(spec.duration_s for spec in self._specs) + deadline_grace_s
-            await self._await_terminal(consumer, error_watch, deadline_s)
+            await self._await_terminal(consumer, error_watch, stale_watch, deadline_s)
             status = await self._channel.status()
         finally:
-            if error_watch is not None:
-                error_watch.cancel()
-                await asyncio.gather(error_watch, return_exceptions=True)
+            for watch in (error_watch, stale_watch):
+                if watch is not None:
+                    watch.cancel()
+                    await asyncio.gather(watch, return_exceptions=True)
             if supervisor is not None:
                 await supervisor.stop()
             await subscription.close()
@@ -493,17 +510,55 @@ class LiveSession:
                 raise LiveFeedError(f"venue book(s) {missing} not fresh after {timeout_s:.0f}s")
             await asyncio.sleep(_BOOK_POLL_S)
 
+    def _on_reconnect(self, event: FeedReconnect) -> None:
+        self.reconnects.append(event)
+        self._log.warning(
+            "feed reconnect",
+            extra={
+                "fields": {
+                    "event": "feed_reconnect",
+                    "venue": event.venue,
+                    "attempt": event.attempt,
+                    "reason": event.reason,
+                    "downtime_s": round(event.downtime_s, 3),
+                    "recovered": event.recovered,
+                }
+            },
+        )
+
+    async def _watch_market(self, limit_s: float, poll_s: float) -> None:
+        """Raise once no venue has had a book that is fresh for more than limit_s."""
+        loop = asyncio.get_running_loop()
+        last_usable = loop.time()
+        while True:
+            status = await self._channel.status()
+            now = loop.time()
+            if any(
+                info.has_book and info.fresh for info in status.venues if info.name in self._venues
+            ):
+                last_usable = now
+            elif now - last_usable > limit_s:
+                raise LiveFeedError(
+                    f"no venue had a fresh book for {limit_s:.0f}s; stopping the run"
+                )
+            await asyncio.sleep(poll_s)
+
     async def _await_terminal(
         self,
         consumer: asyncio.Future[None],
         error_watch: asyncio.Future[None],
+        stale_watch: asyncio.Future[None],
         deadline_s: float,
     ) -> None:
         done, _pending = await asyncio.wait(
-            {consumer, error_watch}, timeout=deadline_s, return_when=asyncio.FIRST_COMPLETED
+            {consumer, error_watch, stale_watch},
+            timeout=deadline_s,
+            return_when=asyncio.FIRST_COMPLETED,
         )
         if error_watch in done:
             error_watch.result()
+        if stale_watch in done:
+            stale_watch.result()
         if consumer in done:
             consumer.result()
             return
@@ -600,6 +655,9 @@ async def run_live_session(
     idle_timeout_s: float = IDLE_TIMEOUT_S,
     book_timeout_s: float = _BOOK_TIMEOUT_S,
     deadline_grace_s: float = DEADLINE_GRACE_S,
+    reconnect: ReconnectPolicy = DEFAULT_RECONNECT,
 ) -> SessionResult:
     session = LiveSession(channel, specs, symbol, logger, calibration, venues, book_depth, fee_bps)
-    return await session.run(engine_address, urls, idle_timeout_s, book_timeout_s, deadline_grace_s)
+    return await session.run(
+        engine_address, urls, idle_timeout_s, book_timeout_s, deadline_grace_s, reconnect
+    )
