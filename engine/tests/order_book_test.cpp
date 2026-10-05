@@ -82,3 +82,68 @@ TEST(OrderBook, LiquidityIsOrderedBestFirst) {
     EXPECT_DOUBLE_EQ(bids[0].price, 100.0);
     EXPECT_DOUBLE_EQ(bids[1].price, 99.0);
 }
+
+TEST(OrderBook, VersionedLiquidityMatchesLiquidityBestFirst) {
+    OrderBook book;
+    ASSERT_TRUE(book.apply_snapshot({{99.0, 2.0}, {100.0, 1.0}}, {{102.0, 3.0}, {101.0, 1.5}}));
+    const auto asks = book.versioned_liquidity_for(Side::Buy);
+    ASSERT_EQ(asks.size(), 2u);
+    EXPECT_DOUBLE_EQ(asks[0].price, 101.0);
+    EXPECT_DOUBLE_EQ(asks[0].qty, 1.5);
+    EXPECT_DOUBLE_EQ(asks[1].price, 102.0);
+    const auto bids = book.versioned_liquidity_for(Side::Sell);
+    ASSERT_EQ(bids.size(), 2u);
+    EXPECT_DOUBLE_EQ(bids[0].price, 100.0);
+    EXPECT_DOUBLE_EQ(bids[1].qty, 2.0);
+}
+
+TEST(OrderBook, EveryLevelOfABookHasItsOwnVersion) {
+    OrderBook book;
+    ASSERT_TRUE(book.apply_snapshot({{100.0, 1.0}, {99.0, 1.0}}, {{101.0, 1.0}, {102.0, 1.0}}));
+    const auto asks = book.versioned_liquidity_for(Side::Buy);
+    const auto bids = book.versioned_liquidity_for(Side::Sell);
+    EXPECT_NE(asks[0].version, asks[1].version);
+    EXPECT_NE(bids[0].version, bids[1].version);
+    EXPECT_NE(asks[0].version, bids[0].version);
+    EXPECT_NE(asks[1].version, bids[1].version);
+}
+
+TEST(OrderBook, UpdateRenewsOnlyTheVersionsOfTheLevelsItSets) {
+    OrderBook book;
+    ASSERT_TRUE(book.apply_snapshot({{100.0, 1.0}}, {{101.0, 1.0}, {102.0, 1.0}}));
+    const auto before = book.versioned_liquidity_for(Side::Buy);
+    const auto bid_before = book.versioned_liquidity_for(Side::Sell);
+    // Same quantity again still counts as a fresh level from the feed.
+    ASSERT_TRUE(book.apply_update({}, {{101.0, 1.0}}));
+    const auto after = book.versioned_liquidity_for(Side::Buy);
+    EXPECT_NE(after[0].version, before[0].version);
+    EXPECT_EQ(after[1].version, before[1].version);
+    EXPECT_EQ(book.versioned_liquidity_for(Side::Sell)[0].version, bid_before[0].version);
+}
+
+TEST(OrderBook, SnapshotRenewsEveryVersion) {
+    OrderBook book;
+    ASSERT_TRUE(book.apply_snapshot({{100.0, 1.0}}, {{101.0, 1.0}}));
+    const auto ask = book.versioned_liquidity_for(Side::Buy)[0];
+    const auto bid = book.versioned_liquidity_for(Side::Sell)[0];
+    ASSERT_TRUE(book.apply_snapshot({{100.0, 1.0}}, {{101.0, 1.0}}));
+    EXPECT_NE(book.versioned_liquidity_for(Side::Buy)[0].version, ask.version);
+    EXPECT_NE(book.versioned_liquidity_for(Side::Sell)[0].version, bid.version);
+}
+
+TEST(OrderBook, LevelRemovedAndReaddedGetsANewVersion) {
+    OrderBook book;
+    ASSERT_TRUE(book.apply_snapshot({{100.0, 1.0}}, {{101.0, 1.0}}));
+    const auto ask = book.versioned_liquidity_for(Side::Buy)[0];
+    ASSERT_TRUE(book.apply_update({}, {{101.0, 0.0}}));
+    ASSERT_TRUE(book.apply_update({}, {{101.0, 1.0}}));
+    EXPECT_NE(book.versioned_liquidity_for(Side::Buy)[0].version, ask.version);
+}
+
+TEST(OrderBook, RejectedUpdateKeepsVersions) {
+    OrderBook book;
+    ASSERT_TRUE(book.apply_snapshot({{100.0, 1.0}}, {{101.0, 1.0}}));
+    const auto ask = book.versioned_liquidity_for(Side::Buy)[0];
+    EXPECT_FALSE(book.apply_update({{-1.0, 1.0}}, {{101.0, 2.0}}));
+    EXPECT_EQ(book.versioned_liquidity_for(Side::Buy)[0].version, ask.version);
+}

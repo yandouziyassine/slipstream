@@ -113,7 +113,7 @@ saved        -1.12 bps
 
 ## Compare algorithms
 
-`compare` submits the same parent order once per algorithm and runs them all side by side on the same feed. Paper fills do not consume liquidity, so the orders do not compete for it.
+`compare` submits the same parent order once per algorithm and runs them all side by side on the same feed. Each order's paper fills consume its own view of the book (until the feed refreshes a level), but orders never consume each other's liquidity, so they do not compete for it.
 
 ```bash
 PATH="$HOME/.venvs/slipstream/bin:$PATH" bash scripts/demo_compare.sh --side buy --qty 0.005 --duration 1200 --slices 20
@@ -145,7 +145,7 @@ Every fill is also priced, at the same moment and on the same books, as if the w
 - **kraken / coinbase**: the all-in cost on that venue alone. It shows `n/a` when a venue could not have filled a child by itself.
 - **gain**: the best single venue's cost minus the routed cost.
 
-Paper fills don't consume liquidity, so these comparisons cost nothing and are exactly simultaneous.
+Each single-venue counterfactual consumes its own venue's liquidity exactly as the routed order consumes the venues it uses, so the comparison is like for like, simultaneous, and costs nothing.
 
 **How fees are set.**
 - Fees are configured once, on the engine: `--venue kraken:fee_bps=40 --venue coinbase:fee_bps=60`.
