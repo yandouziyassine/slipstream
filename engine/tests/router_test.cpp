@@ -189,3 +189,34 @@ TEST(Router, DroppedLegIsReroutedToTheNextVenue) {
     EXPECT_DOUBLE_EQ(result.filled_qty, 0.5);
     EXPECT_DOUBLE_EQ(result.gross_notional, 0.5 * 100.1);
 }
+
+TEST(Router, LegReportsWhatItTookFromEachLevelBestFirst) {
+    const std::vector<VenueLiquidity> venues{{0, 0.004, {{100.0, 1.0}}},
+                                             {1, 0.0, {{100.3, 0.5}, {100.6, 5.0}}}};
+    const auto result = route(Side::Buy, 1.2, venues);
+    ASSERT_EQ(result.legs.size(), 2u);
+    ASSERT_EQ(result.legs[0].taken.size(), 1u);
+    EXPECT_DOUBLE_EQ(result.legs[0].taken[0], 0.7);
+    ASSERT_EQ(result.legs[1].taken.size(), 1u);
+    EXPECT_DOUBLE_EQ(result.legs[1].taken[0], 0.5);
+
+    const auto deep = route(Side::Buy, 2.5, venues);
+    ASSERT_EQ(deep.legs[1].taken.size(), 2u);
+    EXPECT_DOUBLE_EQ(deep.legs[1].taken[0], 0.5);
+    EXPECT_DOUBLE_EQ(deep.legs[1].taken[1], 1.0);
+}
+
+TEST(Router, LegTakenReflectsTheQtyStepFloor) {
+    VenueLiquidity venue{0, 0.0, {{100.0, 0.02}, {101.0, 0.05}}};
+    venue.qty_step = 0.01;
+    const auto result = route(Side::Buy, 0.037, {venue});
+    ASSERT_EQ(result.legs.size(), 1u);
+    ASSERT_EQ(result.legs[0].taken.size(), 2u);
+    EXPECT_DOUBLE_EQ(result.legs[0].taken[0], 0.02);
+    EXPECT_NEAR(result.legs[0].taken[1], 0.01, 1e-12);
+
+    const auto trimmed = route(Side::Buy, 0.024, {venue});
+    ASSERT_EQ(trimmed.legs.size(), 1u);
+    ASSERT_EQ(trimmed.legs[0].taken.size(), 1u);
+    EXPECT_NEAR(trimmed.legs[0].taken[0], 0.02, 1e-12);
+}

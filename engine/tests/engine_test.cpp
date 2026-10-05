@@ -90,8 +90,9 @@ TEST_F(EngineTest, StepReleasesSlicesOverTime) {
     const auto status = engine.statuses().at(0);
     EXPECT_EQ(status.state, OrderState::Completed);
     EXPECT_DOUBLE_EQ(status.filled_qty, 2.0);
-    EXPECT_DOUBLE_EQ(status.avg_fill_price, 101.0);
-    EXPECT_DOUBLE_EQ(status.slippage_bps, 100.0);
+    // The first two children take all 1.0 at 101, so the last pays 102.
+    EXPECT_DOUBLE_EQ(status.avg_fill_price, 101.5);
+    EXPECT_DOUBLE_EQ(status.slippage_bps, 150.0);
     EXPECT_DOUBLE_EQ(engine.position(), 2.0);
 }
 
@@ -109,8 +110,12 @@ TEST_F(EngineTest, PartialFillRollsIntoNextStep) {
     ASSERT_TRUE(engine.submit({"thin", Side::Buy, 3.0, 0, kSec, 1}).accepted);
     EXPECT_DOUBLE_EQ(engine.step(0).fills.at(0).qty, 1.0);
     EXPECT_EQ(engine.statuses().at(0).state, OrderState::Working);
-    EXPECT_DOUBLE_EQ(engine.step(1).fills.at(0).qty, 1.0);
+    // The order took the whole level, so it waits until the feed shows fresh size there.
+    EXPECT_TRUE(engine.step(1).fills.empty());
+    ASSERT_TRUE(engine.apply_book_update({}, {{101.0, 1.0}}));
     EXPECT_DOUBLE_EQ(engine.step(2).fills.at(0).qty, 1.0);
+    ASSERT_TRUE(engine.apply_book_update({}, {{101.0, 1.0}}));
+    EXPECT_DOUBLE_EQ(engine.step(3).fills.at(0).qty, 1.0);
     EXPECT_EQ(engine.statuses().at(0).state, OrderState::Completed);
 }
 

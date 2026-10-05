@@ -39,6 +39,7 @@ add_library(slipstream_core STATIC
   src/router.cpp
   src/clock.cpp
   src/engine_loop.cpp
+  src/consumption_overlay.cpp
 )
 target_include_directories(slipstream_core PUBLIC src)
 target_compile_options(slipstream_core PRIVATE ${SLIPSTREAM_WARNINGS})
@@ -100,6 +101,7 @@ include(GoogleTest)
 
 add_executable(engine_tests
   tests/order_book_test.cpp
+  tests/consumption_overlay_test.cpp
   tests/twap_test.cpp
   tests/vwap_test.cpp
   tests/almgren_chriss_test.cpp
@@ -113,6 +115,7 @@ add_executable(engine_tests
   tests/engine_schedules_test.cpp
   tests/router_test.cpp
   tests/engine_routing_test.cpp
+  tests/engine_consumption_test.cpp
   tests/clock_test.cpp
   tests/bounded_queue_test.cpp
   tests/engine_loop_test.cpp

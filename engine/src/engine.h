@@ -9,6 +9,7 @@
 #include <string_view>
 #include <vector>
 
+#include "consumption_overlay.h"
 #include "order_book.h"
 #include "risk.h"
 #include "router.h"
@@ -138,6 +139,8 @@ public:
     std::vector<VenueSettings> venue_settings() const;
     std::vector<VenueBookView> books(std::size_t depth) const;
     std::vector<VenueState> venue_states(std::int64_t now_ns) const;
+    // Consumption records held by working orders, summed. Zero once no order is working.
+    std::size_t consumption_entries() const;
 
 private:
     struct ParentOrder {
@@ -153,6 +156,9 @@ private:
         std::string halt_reason;
         std::vector<double> venue_all_in_notional;
         std::vector<char> venue_available;
+        // Per venue: what this order took, and what "this order on that venue alone" took.
+        std::vector<ConsumptionOverlay> taken;
+        std::vector<ConsumptionOverlay> alone_taken;
     };
 
     struct Venue {
@@ -171,10 +177,14 @@ private:
                         const MarketState& market, std::vector<Fill>& fills);
     bool fresh_locked(std::size_t venue, std::int64_t now_ns) const;
     std::optional<double> consolidated_mid_locked(std::int64_t now_ns) const;
-    // Levels beyond the price collar around ref_price are left out.
+    // Each venue's book minus what `taken` records for it. Levels beyond the price collar around
+    // ref_price are left out.
     std::vector<VenueLiquidity> liquidity_locked(Side side, std::int64_t now_ns,
-                                                 std::optional<std::size_t> only,
-                                                 double ref_price) const;
+                                                 std::optional<std::size_t> only, double ref_price,
+                                                 const std::vector<ConsumptionOverlay>& taken) const;
+    void record_taken_locked(std::vector<ConsumptionOverlay>& taken, Side side,
+                             const RouteResult& result) const;
+    static void release_taken(ParentOrder& order);
 
     mutable std::mutex mu_;
     std::vector<Venue> venues_;
