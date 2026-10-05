@@ -283,6 +283,7 @@ StepOutput Engine::step(std::int64_t now_ns) {
         // whole missed amount at once.
         if (order.state == OrderState::Working && no_market) {
             order.state = OrderState::Halted;
+            static_assert(kNoMarketHaltNs == 30'000'000'000, "keep the halt reason's 30s in sync");
             order.halt_reason = "no fresh market data for 30s";
         }
         if (order.state != OrderState::Working) release_taken(order);
