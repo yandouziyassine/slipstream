@@ -6,7 +6,7 @@ from slipstream.coinbase import COINBASE_WS_URL, CoinbaseStream, subscribe_messa
 from slipstream.coinbase import MAX_MESSAGE_BYTES as COINBASE_MAX_BYTES
 from slipstream.kraken import (
     KRAKEN_WS_URL,
-    parse_message,
+    KrakenStream,
     subscribe_message,
     subscribe_trades_message,
 )
@@ -35,7 +35,7 @@ def subscriptions(venue: Venue, symbol: str, depth: int) -> list[str]:
 
 
 def parser(venue: Venue, symbol: str, depth: int) -> Parser:
-    """A fresh parser for one connection: Coinbase sequence numbers are per connection."""
+    """A fresh parser for one connection: sequence numbers and book checksums are per connection."""
     if venue == "coinbase":
         return CoinbaseStream(symbol, depth).parse
-    return parse_message
+    return KrakenStream(symbol, depth).parse

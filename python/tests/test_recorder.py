@@ -22,6 +22,7 @@ BOOK = json.dumps(
                 "symbol": "BTC/USD",
                 "bids": [{"price": 99.0, "qty": 1.0}],
                 "asks": [{"price": 101.0, "qty": 1.0}],
+                "checksum": 3112449789,
             }
         ],
     }
