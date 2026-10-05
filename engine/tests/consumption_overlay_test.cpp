@@ -84,3 +84,13 @@ TEST(ConsumptionOverlay, ClearForgetsEverything) {
     EXPECT_EQ(overlay.size(), 0u);
     expect_levels(overlay.remaining(kAsks), {{100.0, 1.0}, {101.0, 2.0}, {102.0, 5.0}});
 }
+
+TEST(ConsumptionOverlay, TakesThatSumToTheLevelUpToRoundingHideIt) {
+    // 0.7 + 0.2 + 0.1 is 0.9999999999999999 in doubles: no rounding dust may stay visible.
+    const std::vector<BookLevel> book{{100.0, 1.0, 1}, {101.0, 1.0, 2}};
+    ConsumptionOverlay overlay;
+    overlay.record(book, {0.7});
+    overlay.record(book, {0.2});
+    overlay.record(book, {0.1});
+    expect_levels(overlay.remaining(book), {{101.0, 1.0}});
+}

@@ -4,6 +4,16 @@
 #include <utility>
 
 namespace slipstream {
+namespace {
+
+// Float noise only: takes that add up to a level up to rounding must use it all up.
+constexpr double kDustFraction = 1e-9;
+
+bool has_left(const BookLevel& level, double taken) {
+    return level.qty - taken > level.qty * kDustFraction;
+}
+
+}  // namespace
 
 double ConsumptionOverlay::taken_at(std::uint64_t version) const {
     const auto it = std::lower_bound(
@@ -16,8 +26,8 @@ std::vector<Level> ConsumptionOverlay::remaining(const std::vector<BookLevel>& l
     std::vector<Level> out;
     out.reserve(levels.size());
     for (const auto& level : levels) {
-        const double left = level.qty - taken_at(level.version);
-        if (left > 0.0) out.push_back({level.price, left});
+        const double taken = taken_at(level.version);
+        if (has_left(level, taken)) out.push_back({level.price, level.qty - taken});
     }
     return out;
 }
@@ -30,7 +40,7 @@ void ConsumptionOverlay::record(const std::vector<BookLevel>& levels,
     for (const auto& level : levels) {
         double total = taken_at(level.version);
         // Same test as remaining(), so taken[i] lines up with the i-th level it returned.
-        if (level.qty - total > 0.0) {
+        if (has_left(level, total)) {
             if (visible < taken.size()) total += taken[visible];
             ++visible;
         }
