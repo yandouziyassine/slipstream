@@ -124,6 +124,10 @@ class ReconnectTracker:
     def policy(self) -> ReconnectPolicy:
         return self._policy
 
+    @property
+    def failures(self) -> int:
+        return self._failures
+
     def failed(self, error: BaseException) -> float | None:
         """The backoff before the next connection, or None once no reconnect is left."""
         now = self._clock()

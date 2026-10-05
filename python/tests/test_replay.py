@@ -7,7 +7,7 @@ from test_kraken import DOC_SNAPSHOT
 from test_kraken_rest import ohlc_body
 
 from slipstream.kraken import parse_message
-from slipstream.replay import ReplayError, read_calibration, read_replay
+from slipstream.replay import ReconnectMarker, ReplayError, read_calibration, read_replay
 
 FIXTURE = Path(__file__).parent / "fixtures" / "kraken_btcusd_replay.jsonl"
 
@@ -236,3 +236,63 @@ def test_live_recording_with_one_changed_digit_fails_on_that_line(
     file = write_lines(tmp_path / "changed.jsonl", lines)
     with pytest.raises(ReplayError, match=rf"line {index + 1}: kraken BTC/USD book checksum"):
         list(read_replay(file))
+
+
+def marker_line(recv_ns: object, venue: object = "kraken") -> str:
+    return json.dumps(
+        {"recv_ns": recv_ns, "venue": venue, "kind": "reconnect", "attempt": 1, "reason": "x"}
+    )
+
+
+def test_a_reconnect_marker_is_yielded_in_place(tmp_path: Path) -> None:
+    file = write_lines(
+        tmp_path / "r.jsonl",
+        [
+            raw_line(1, '{"channel":"heartbeat"}'),
+            marker_line(2, "coinbase"),
+            raw_line(3, '{"channel":"heartbeat"}'),
+        ],
+    )
+    records = list(read_replay(file))
+    assert records[1] == ReconnectMarker(2, "coinbase")
+    assert [record[0] for record in records if isinstance(record, tuple)] == [1, 3]
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        marker_line(-1),
+        marker_line("5"),
+        marker_line(True),
+        marker_line(5, "binance"),
+        marker_line(5, None),
+    ],
+    ids=["negative", "string", "bool", "unknown-venue", "null-venue"],
+)
+def test_rejects_malformed_reconnect_markers(tmp_path: Path, line: str) -> None:
+    with pytest.raises(ReplayError, match="line 1"):
+        list(read_replay(write_lines(tmp_path / "bad.jsonl", [line])))
+
+
+def test_a_reconnect_marker_drops_the_kraken_checksum_mirror(tmp_path: Path) -> None:
+    file = write_lines(
+        tmp_path / "r.jsonl",
+        [
+            raw_line(1, json.dumps(BOOK_ACK)),
+            raw_line(2, DOC_SNAPSHOT),
+            marker_line(3),
+            raw_line(4, FLIPPED_SNAPSHOT),
+            raw_line(5, json.dumps(BOOK_ACK)),
+            raw_line(6, DOC_SNAPSHOT),
+            raw_line(7, FLIPPED_SNAPSHOT),
+        ],
+    )
+    records = read_replay(file)
+    assert [next(records) for _ in range(6)][2] == ReconnectMarker(3, "kraken")
+    with pytest.raises(ReplayError, match="line 7: kraken BTC/USD book checksum mismatch"):
+        next(records)
+
+
+def test_recordings_without_markers_yield_only_messages() -> None:
+    for fixture in (FIXTURE, LIVE_FIXTURE):
+        assert all(isinstance(record, tuple) for record in read_replay(fixture))
