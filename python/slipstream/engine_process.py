@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 import re
+import shutil
 import subprocess
 import time
 from collections.abc import AsyncIterator, Sequence
@@ -109,6 +110,17 @@ def _stop(process: subprocess.Popen[bytes], timeout_s: float) -> None:
         process.wait()
 
 
+def _dies_with_parent(argv: Sequence[str]) -> list[str]:
+    # A SIGKILLed collector (Task Scheduler force-stopping an overdue run) runs no cleanup, so ask
+    # the kernel to kill the engine with it. setpriv sets the parent-death signal and then execs
+    # the engine under the same pid; preexec_fn could do the same but is unsafe once gRPC has
+    # started threads in this process.
+    setpriv = shutil.which("setpriv")
+    if setpriv is None:
+        return list(argv)
+    return [setpriv, "--pdeathsig", "KILL", "--", *argv]
+
+
 @asynccontextmanager
 async def running_engine(
     argv: Sequence[str],
@@ -117,10 +129,12 @@ async def running_engine(
     stop_timeout_s: float = 5.0,
 ) -> AsyncIterator[RunningEngine]:
     """Runs the engine for the body of the `async with`, with its output in log_path."""
+    if not argv or not os.path.isfile(argv[0]) or not os.access(argv[0], os.X_OK):
+        raise EngineStartError("engine could not start: not an executable file")
     try:
         with log_path.open("wb") as log_file:
             process = subprocess.Popen(  # noqa: S603 - validated argv, no shell
-                list(argv),
+                _dies_with_parent(argv),
                 stdin=subprocess.DEVNULL,
                 stdout=log_file,
                 stderr=subprocess.STDOUT,

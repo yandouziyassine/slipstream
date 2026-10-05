@@ -184,6 +184,47 @@ def test_sigterm_to_the_collector_still_stops_its_engine(tmp_path: Path) -> None
     assert _gone(engine_pid)
 
 
+def test_sigkill_to_the_collector_still_stops_its_engine(tmp_path: Path) -> None:
+    # Task Scheduler force-stops an overdue run; no handler runs, so the kernel must end the engine.
+    binary = _listening_engine(tmp_path)
+    pid_file = tmp_path / "engine.pid"
+    child = textwrap.dedent(
+        f"""\
+        import asyncio
+        from pathlib import Path
+        from slipstream.engine_process import running_engine
+
+        async def main() -> None:
+            async with running_engine([{str(binary)!r}], Path({str(tmp_path / "e.log")!r})) as e:
+                Path({str(pid_file)!r}).write_text(str(e.pid))
+                await asyncio.sleep(60)
+
+        asyncio.run(main())
+        """
+    )
+    python_dir = Path(__file__).resolve().parents[1]
+    proc = subprocess.Popen(
+        [sys.executable, "-c", child], cwd=python_dir, env={**os.environ, "PYTHONPATH": "."}
+    )
+    try:
+        deadline = time.monotonic() + 20
+        while not pid_file.exists() or not pid_file.read_text(encoding="utf-8"):
+            assert proc.poll() is None, "collector child exited early"
+            assert time.monotonic() < deadline, "engine never started"
+            time.sleep(0.05)
+        engine_pid = int(pid_file.read_text(encoding="utf-8"))
+        proc.kill()
+        proc.wait(timeout=20)
+        deadline = time.monotonic() + 10
+        while not _gone(engine_pid):
+            assert time.monotonic() < deadline, "engine outlived its SIGKILLed collector"
+            time.sleep(0.05)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+
+
 def test_validate_engine_binary_accepts_an_executable_inside_the_build_dir(
     tmp_path: Path,
 ) -> None:
