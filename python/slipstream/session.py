@@ -32,7 +32,7 @@ from slipstream.models import (
     TradeBatch,
     Venue,
 )
-from slipstream.replay import ReplayError
+from slipstream.replay import ReconnectMarker, ReplayError, ReplayRecord
 from slipstream.v1 import execution_pb2 as pb
 from slipstream.venue_ws import (
     DEFAULT_RECONNECT,
@@ -123,6 +123,7 @@ class ReplaySession:
         self._calibration = calibration
         self._venues: frozenset[Venue] = frozenset(venues)
         self._fee_bps: dict[Venue, float] = dict(fee_bps or {})
+        self._book_depth = book_depth
         self._books: dict[Venue, LocalBook] = {venue: LocalBook(book_depth) for venue in venues}
         self._parsers: dict[Venue, _Parser] = {}
         if "kraken" in self._venues:
@@ -130,6 +131,7 @@ class ReplaySession:
         if "coinbase" in self._venues:
             self._parsers["coinbase"] = CoinbaseStream(symbol, book_depth).parse
         self._snapshot_venues: set[Venue] = set()
+        self._resyncing: set[Venue] = set()
         self._submitted = False
         self._start_ns = 0
         self._engine_ns = 0
@@ -140,7 +142,7 @@ class ReplaySession:
     async def order_statuses(self) -> list[pb.OrderStatus]:
         return self._ours(await self._channel.status())
 
-    async def run(self, records: Iterable[tuple[int, str, Venue]]) -> SessionResult:
+    async def run(self, records: Iterable[ReplayRecord]) -> SessionResult:
         baseline = (await self._channel.status()).stats.events
         subscription = await asyncio.wait_for(
             Subscription.open(self._channel), timeout=_SUBSCRIBE_TIMEOUT_S
@@ -173,20 +175,28 @@ class ReplaySession:
 
     async def _stream(
         self,
-        records: Iterable[tuple[int, str, Venue]],
+        records: Iterable[ReplayRecord],
         writer: MarketStreamWriter,
         consumer: asyncio.Future[None],
         baseline: int,
     ) -> None:
         last_ns = 0
-        for recv_ns, raw, venue in records:
+        for record in records:
+            recv_ns, venue = (
+                (record.recv_ns, record.venue)
+                if isinstance(record, ReconnectMarker)
+                else (record[0], record[2])
+            )
             if recv_ns < last_ns:
                 raise ReplayError("replay timestamps must be non-decreasing")
             last_ns = recv_ns
             _raise_if_failed(consumer)
             if venue not in self._venues:
                 continue
-            events, submit_now = self._events(raw, recv_ns, venue)
+            if isinstance(record, ReconnectMarker):
+                events, submit_now = self._reconnected(venue, recv_ns), False
+            else:
+                events, submit_now = self._events(record[1], recv_ns, venue)
             for event in events:
                 await self._send(writer, event)
             if submit_now:
@@ -201,6 +211,16 @@ class ReplaySession:
             while self._engine_ns < deadline:
                 self._engine_ns = min(deadline, self._engine_ns + _MAX_TICK_JUMP_NS)
                 await self._send(writer, tick_event(self._engine_ns))
+
+    def _reconnected(self, venue: Venue, recv_ns: int) -> list[pb.MarketEvent]:
+        """The recorder lost this venue here: forget its book until the next snapshot."""
+        self._books[venue] = LocalBook(self._book_depth)
+        self._snapshot_venues.discard(venue)
+        self._resyncing.add(venue)
+        if venue == "coinbase":
+            self._parsers["coinbase"] = CoinbaseStream(self._symbol, self._book_depth).parse
+        self._engine_ns = max(self._engine_ns, recv_ns)
+        return [book_event(BookUpdate(self._symbol, True, (), (), venue), recv_ns)]
 
     def _events(self, raw: str, recv_ns: int, venue: Venue) -> tuple[list[pb.MarketEvent], bool]:
         """The engine events for one record, and whether the orders are due after them.
@@ -218,6 +238,12 @@ class ReplaySession:
         update = self._parsers[venue](raw)
         if isinstance(update, BookUpdate):
             self._check_symbol(update.symbol)
+            if venue in self._resyncing:
+                if not update.is_snapshot:
+                    raise MarketDataError(
+                        f"{venue} book update before the snapshot that follows a reconnect"
+                    )
+                self._resyncing.discard(venue)
             if self._submitted:
                 return [book_event(update, recv_ns)], False
             self._books[venue].apply(update)
@@ -362,7 +388,7 @@ async def run_replay_session(
     symbol: str,
     logger: logging.Logger,
     *,
-    records: Iterable[tuple[int, str, Venue]],
+    records: Iterable[ReplayRecord],
     calibration: CalibrationData | None = None,
     venues: Sequence[Venue] = ("kraken",),
     book_depth: int = 10,
