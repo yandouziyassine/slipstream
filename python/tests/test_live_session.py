@@ -14,8 +14,9 @@ from slipstream.engine_stream import EngineChannel
 from slipstream.feed_process import FeedProcessError
 from slipstream.live import LiveFeedError
 from slipstream.models import OrderSpec, Venue
-from slipstream.session import LiveSession, run_live_session
+from slipstream.session import LiveSession, SessionResult, run_live_session
 from slipstream.v1 import execution_pb2 as pb
+from slipstream.venue_ws import ReconnectPolicy
 
 _Handler = Callable[[ServerConnection], Awaitable[None]]
 
@@ -215,3 +216,130 @@ def test_book_wait_timeout_raises_live_feed_error(live_engine_address: str) -> N
         assert our_feed_processes() == []
 
     asyncio.run(scenario())
+
+
+FAST = ReconnectPolicy(base_delay_s=0.01, max_delay_s=0.01)
+
+
+def _drop_first_connection(first: _Handler, rest: _Handler) -> _Handler:
+    count = 0
+
+    async def handler(ws: ServerConnection) -> None:
+        nonlocal count
+        count += 1
+        await (first if count == 1 else rest)(ws)
+
+    return handler
+
+
+async def coinbase_snapshot_then_drop(ws: ServerConnection) -> None:
+    for _ in range(3):
+        await ws.recv()
+    await ws.send(coinbase_message("subscriptions", 0, [{"subscriptions": {}}]))
+    await ws.send(coinbase_snapshot(1))
+    await asyncio.sleep(0.3)
+    await ws.close()
+
+
+async def kraken_snapshot_then_drop(ws: ServerConnection) -> None:
+    for _ in range(2):
+        await ws.recv()
+    await ws.send(KRAKEN_ACK)
+    await ws.send(KRAKEN_SNAPSHOT)
+    await asyncio.sleep(0.3)
+    await ws.close()
+
+
+async def kraken_heartbeats_without_a_book(ws: ServerConnection) -> None:
+    for _ in range(2):
+        await ws.recv()
+    await ws.send(KRAKEN_ACK)
+    try:
+        while True:
+            await asyncio.sleep(0.05)
+            await ws.send(KRAKEN_HEARTBEAT)
+    except ConnectionClosed:
+        pass
+
+
+def test_live_session_survives_a_dropped_feed_and_records_the_reconnect(
+    two_venue_live_engine_address: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    async def scenario() -> tuple[LiveSession, SessionResult]:
+        coinbase = _drop_first_connection(coinbase_snapshot_then_drop, coinbase_feed)
+        async with serve(kraken_feed, "127.0.0.1", 0) as kraken_server:
+            async with serve(coinbase, "127.0.0.1", 0) as coinbase_server:
+                urls: dict[Venue, str] = {
+                    "kraken": f"ws://127.0.0.1:{port_of(kraken_server)}",
+                    "coinbase": f"ws://127.0.0.1:{port_of(coinbase_server)}",
+                }
+                channel = EngineChannel(two_venue_live_engine_address)
+                try:
+                    await channel.wait_ready(5.0)
+                    session = LiveSession(
+                        channel,
+                        [OrderSpec("live-reconnect", "buy", 0.02, 2, 2)],
+                        "BTC/USD",
+                        logging.getLogger("test"),
+                        venues=("kraken", "coinbase"),
+                        fee_bps=await channel.venue_fees(),
+                    )
+                    result = await session.run(
+                        two_venue_live_engine_address,
+                        urls=urls,
+                        book_timeout_s=10.0,
+                        reconnect=FAST,
+                    )
+                finally:
+                    await channel.close()
+        return session, result
+
+    with caplog.at_level(logging.WARNING, logger="test"):
+        session, result = asyncio.run(scenario())
+    assert result.statuses[0].state in (pb.ORDER_STATE_COMPLETED, pb.ORDER_STATE_HALTED)
+    assert [(r.venue, r.attempt, r.recovered) for r in session.reconnects] == [
+        ("coinbase", 1, True)
+    ]
+    (record,) = [r for r in caplog.records if r.getMessage() == "feed reconnect"]
+    fields = record.fields  # type: ignore[attr-defined]
+    assert (fields["event"], fields["venue"], fields["attempt"]) == (
+        "feed_reconnect",
+        "coinbase",
+        1,
+    )
+    assert fields["recovered"] is True
+    assert our_feed_processes() == []
+
+
+def test_no_usable_venue_for_the_stale_limit_ends_the_run(live_engine_address: str) -> None:
+    async def scenario() -> LiveSession:
+        kraken = _drop_first_connection(kraken_snapshot_then_drop, kraken_heartbeats_without_a_book)
+        async with serve(kraken, "127.0.0.1", 0) as server:
+            urls: dict[Venue, str] = {"kraken": f"ws://127.0.0.1:{port_of(server)}"}
+            channel = EngineChannel(live_engine_address)
+            try:
+                await channel.wait_ready(5.0)
+                session = LiveSession(
+                    channel,
+                    [OrderSpec("live-stale", "buy", 0.02, 30, 5)],
+                    "BTC/USD",
+                    logging.getLogger("test"),
+                    venues=("kraken",),
+                    fee_bps=await channel.venue_fees(),
+                )
+                with pytest.raises(LiveFeedError, match="no venue had a fresh book for 1s"):
+                    await session.run(
+                        live_engine_address,
+                        urls=urls,
+                        book_timeout_s=10.0,
+                        reconnect=FAST,
+                        stale_limit_s=1.0,
+                        stale_poll_s=0.05,
+                    )
+            finally:
+                await channel.close()
+        return session
+
+    session = asyncio.run(scenario())
+    assert [(r.venue, r.attempt, r.recovered) for r in session.reconnects] == [("kraken", 1, False)]
+    assert our_feed_processes() == []

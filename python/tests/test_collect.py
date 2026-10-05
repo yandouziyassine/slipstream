@@ -385,3 +385,61 @@ def test_main_fails_fast_on_invalid_recordings_budget_env(
     log_files = list((tmp_path / "logs").glob("collect-*.log"))
     assert log_files
     assert "invalid_storage_policy" in log_files[0].read_text(encoding="utf-8")
+
+
+def _coinbase_feed_first_connection_drops(
+    counter: itertools.count[int],
+) -> Callable[[ServerConnection], Awaitable[None]]:
+    async def handler(ws: ServerConnection) -> None:
+        if next(counter) > 0:
+            await _coinbase_feed(ws)
+            return
+        for _ in range(3):
+            await ws.recv()
+        await ws.send(_coinbase_message("subscriptions", 0, [{"subscriptions": {}}]))
+        await ws.send(_coinbase_snapshot(1))
+        await asyncio.sleep(0.3)
+        await ws.close()
+
+    return handler
+
+
+def test_a_reconnect_during_a_run_is_stored_with_the_completed_run(
+    two_venue_live_engine_address: str, tmp_path: Path
+) -> None:
+    counter = itertools.count()
+
+    async def scenario() -> list[int]:
+        async with serve(_kraken_feed, "127.0.0.1", 0) as kraken_server:
+            handler = _coinbase_feed_first_connection_drops(counter)
+            async with serve(handler, "127.0.0.1", 0) as coinbase_server:
+                urls: dict[Venue, str] = {
+                    "kraken": f"ws://127.0.0.1:{_port_of(kraken_server)}",
+                    "coinbase": f"ws://127.0.0.1:{_port_of(coinbase_server)}",
+                }
+                return await run_hour(
+                    two_venue_live_engine_address,
+                    CollectConfig(sizes=(0.001,), duration_s=3, slices=2, data_dir=tmp_path),
+                    datetime(2026, 9, 27, 12, tzinfo=UTC),
+                    None,
+                    db,
+                    logging.getLogger("test"),
+                    urls=urls,
+                    fetch_rules=_fake_fetch_rules,
+                    fetch_calibration=_fake_fetch_calibration,
+                )
+
+    db = _db(tmp_path / "slipstream.db")
+    try:
+        (run_id,) = asyncio.run(scenario())
+        status = db.connection.execute("SELECT status FROM runs WHERE id = ?", (run_id,))
+        rows = db.connection.execute(
+            "SELECT run_id, source, venue, attempt, recovered FROM feed_reconnects"
+        ).fetchall()
+        assert status.fetchone() == ("completed",)
+    finally:
+        db.close()
+    assert len(rows) == 1
+    (row_run_id, source, venue, attempt, recovered) = rows[0]
+    assert (row_run_id, venue, attempt, recovered) == (run_id, "coinbase", 1, 1)
+    assert source in ("feed", "recorder")

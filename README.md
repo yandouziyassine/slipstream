@@ -233,6 +233,10 @@ An hourly collector (`scripts/collect_hourly.sh`, driven by `slipstream collect 
 - Publish it: `python -m slipstream.site publish` syncs `site/` into a clone of the public `slipstream-live` repo and pushes over SSH with a deploy key scoped to that one repo. It is a no-op until `$SLIPSTREAM_DATA_DIR/publish.enabled` exists, so nothing is ever pushed automatically before you switch it on (see `input.md`). A push happens only when something changed; a publish failure is logged and never fails the hourly collector.
 - `scripts/collect_hourly.sh` runs both after every collection, failure-tolerant: the hour's evidence is already safely in the database either way.
 
+## Feed resilience
+
+A dropped exchange WebSocket reconnects with jittered exponential backoff (0.5 s doubling to 8 s, at most 5 reconnects per venue per run; the 6th failure ends the run). A Kraken book checksum mismatch is recovered the same way, because Kraken's documented fix is a fresh snapshot. While a venue is down its engine book is emptied at once, so nothing trades on a pre-disconnect book, and it is rebuilt only from the new connection's snapshot. If no venue has a fresh book for 30 s, the run stops. Every reconnect is logged and stored per run in the `feed_reconnects` table; recordings carry reconnect markers that replay honours.
+
 ## Security
 
 - **Paper trading is enforced.** `SLIPSTREAM_PAPER_MODE` must be `true`, and v0.1 contains no live order path.
