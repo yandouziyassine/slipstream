@@ -14,16 +14,22 @@ from slipstream.kraken_rest import parse_ohlc
 from slipstream.live import root_cause, wall_clock
 from slipstream.models import Venue
 from slipstream.venue_ws import (
+    DEFAULT_RECONNECT,
     IDLE_TIMEOUT_S,
+    FeedReconnect,
+    IdleTimeoutError,
+    ReconnectPolicy,
+    ReconnectTracker,
+    describe,
     endpoints,
+    give_up_message,
+    is_reconnectable,
     max_message_bytes,
     parser,
     subscriptions,
 )
 
 _WRITE_QUEUE_MAXSIZE = 1024
-
-_WriteItem = tuple[Venue, int, str]
 
 
 class RecordError(RuntimeError):
@@ -45,11 +51,24 @@ def _encode(venue: Venue, recv_ns: int, raw: str) -> str:
     return json.dumps({"recv_ns": recv_ns, "venue": venue, "msg": json.loads(raw)})
 
 
+def _marker(venue: Venue, recv_ns: int, attempt: int, reason: str) -> str:
+    """Replay discards this venue's book here, until the new connection's snapshot."""
+    return json.dumps(
+        {
+            "recv_ns": recv_ns,
+            "venue": venue,
+            "kind": "reconnect",
+            "attempt": attempt,
+            "reason": reason,
+        }
+    )
+
+
 class _Writer:
     """Serializes writes to `handle` on a dedicated thread, off the event loop."""
 
     def __init__(self, handle: TextIO) -> None:
-        self._queue: queue.Queue[_WriteItem | None] = queue.Queue(maxsize=_WRITE_QUEUE_MAXSIZE)
+        self._queue: queue.Queue[str | None] = queue.Queue(maxsize=_WRITE_QUEUE_MAXSIZE)
         self._error: Exception | None = None
         self._thread = threading.Thread(target=self._run, args=(handle,), daemon=True)
         self._thread.start()
@@ -62,17 +81,16 @@ class _Writer:
                 break
             if error is not None:
                 continue
-            venue, recv_ns, raw = item
             try:
-                handle.write(_encode(venue, recv_ns, raw))
+                handle.write(item)
                 handle.write("\n")
             except OSError as exc:
                 error = exc
         self._error = error
 
-    async def put(self, venue: Venue, recv_ns: int, raw: str) -> None:
+    async def put(self, line: str) -> None:
         loop = asyncio.get_running_loop()
-        await loop.run_in_executor(None, self._queue.put, (venue, recv_ns, raw))
+        await loop.run_in_executor(None, self._queue.put, line)
 
     def close(self) -> None:
         self._queue.put(None)
@@ -102,6 +120,8 @@ async def record_stream(
     venues: Sequence[Venue] = ("kraken",),
     urls: Mapping[Venue, str] | None = None,
     clock: Callable[[], int] | None = None,
+    reconnect: ReconnectPolicy = DEFAULT_RECONNECT,
+    on_reconnect: Callable[[FeedReconnect], None] | None = None,
 ) -> int:
     urls_by_venue = endpoints(urls)
     loop = asyncio.get_running_loop()
@@ -120,7 +140,14 @@ async def record_stream(
             deadline = loop.time() + duration_s
             barrier.set()
 
-    async def feed(venue: Venue) -> None:
+    def report(event: FeedReconnect) -> None:
+        if on_reconnect is not None:
+            on_reconnect(event)
+
+    def finished() -> bool:
+        return barrier.is_set() and loop.time() >= deadline
+
+    async def connection(venue: Venue, tracker: ReconnectTracker) -> None:
         nonlocal written
         max_size = max_message_bytes(venue)
         validate = parser(venue, symbol, depth)
@@ -138,16 +165,43 @@ async def record_stream(
                 try:
                     raw = await asyncio.wait_for(ws.recv(), timeout=timeout)
                 except TimeoutError:
-                    if barrier.is_set() and loop.time() >= deadline:
+                    if finished():
                         return
-                    raise RecordError(f"no market data from {venue} (idle timeout)") from None
+                    raise IdleTimeoutError(f"no market data from {venue} (idle timeout)") from None
                 recv_ns = now()
                 text = _decode(raw)
-                validate(text)
-                await writer.put(venue, recv_ns, text)
+                update = validate(text)
+                await writer.put(_encode(venue, recv_ns, text))
                 written += 1
+                tracker.received(update)
                 if not delivered[venue]:
                     mark_delivered(venue)
+
+    async def feed(venue: Venue) -> None:
+        tracker = ReconnectTracker(venue, reconnect, report)
+        try:
+            while True:
+                try:
+                    await connection(venue, tracker)
+                    return
+                except Exception as exc:
+                    if not is_reconnectable(exc):
+                        raise
+                    if finished():
+                        return
+                    delay = tracker.failed(exc)
+                    await writer.put(_marker(venue, now(), tracker.failures, describe(exc)))
+                    if delay is None:
+                        raise RecordError(
+                            give_up_message(venue, reconnect.max_reconnects, exc)
+                        ) from exc
+                    if barrier.is_set():
+                        delay = min(delay, max(0.0, deadline - loop.time()))
+                    await asyncio.sleep(delay)
+                    if finished():
+                        return
+        finally:
+            tracker.close()
 
     try:
         async with asyncio.TaskGroup() as group:

@@ -210,6 +210,11 @@ TEST_F(MarketValidationTest, LiveStreamRejectsClientTime) {
     EXPECT_EQ(code(stream.admit(v1::MarketEvent{})), grpc::StatusCode::INVALID_ARGUMENT);
 }
 
+TEST_F(MarketValidationTest, ReplayStreamRejectsEmptyMarketEvent) {
+    auto stream = StreamAdmission::replay(validator);
+    EXPECT_EQ(code(stream.admit(v1::MarketEvent{})), grpc::StatusCode::INVALID_ARGUMENT);
+}
+
 TEST_F(MarketValidationTest, ReplayStreamNeedsVenuesAndTimes) {
     auto stream = StreamAdmission::replay(validator);
     EXPECT_EQ(code(stream.admit(book_event("", kSec))), grpc::StatusCode::INVALID_ARGUMENT);

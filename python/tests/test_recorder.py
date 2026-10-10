@@ -11,7 +11,8 @@ from slipstream import recorder
 from slipstream.coinbase import CoinbaseMessageError
 from slipstream.kraken import KrakenMessageError
 from slipstream.recorder import RecordError, open_new_file, record_stream, write_ohlc_header
-from slipstream.replay import read_calibration, read_replay
+from slipstream.replay import ReconnectMarker, read_calibration, read_replay
+from slipstream.venue_ws import FeedReconnect, ReconnectPolicy
 
 BOOK = json.dumps(
     {
@@ -22,6 +23,7 @@ BOOK = json.dumps(
                 "symbol": "BTC/USD",
                 "bids": [{"price": 99.0, "qty": 1.0}],
                 "asks": [{"price": 101.0, "qty": 1.0}],
+                "checksum": 3112449789,
             }
         ],
     }
@@ -329,3 +331,100 @@ def test_write_failure_surfaces_as_record_error() -> None:
 
     with pytest.raises(RecordError, match="write"):
         asyncio.run(scenario())
+
+
+KRAKEN_ACK = json.dumps({"method": "subscribe", "success": True, "result": {}})
+FAST = ReconnectPolicy(base_delay_s=0.01, max_delay_s=0.01)
+
+
+def kraken_connections(*sends: list[str]):  # type: ignore[no-untyped-def]
+    """Connection n subscribes, sends sends[n], then closes if more connections follow."""
+    count = 0
+
+    async def handler(ws: ServerConnection) -> None:
+        nonlocal count
+        index = min(count, len(sends) - 1)
+        count += 1
+        await ws.recv()
+        await ws.recv()
+        for message in sends[index]:
+            await ws.send(message)
+        if index < len(sends) - 1 or not sends[index]:
+            await ws.close()
+        else:
+            await ws.wait_closed()
+
+    return serve(handler, "127.0.0.1", 0)
+
+
+def test_recording_survives_a_reconnect_with_a_marker(tmp_path: Path) -> None:
+    path = tmp_path / "reconnect.jsonl"
+    reports: list[FeedReconnect] = []
+    clock = iter(range(1_000, 10_000, 10))
+
+    async def scenario() -> int:
+        async with kraken_connections([KRAKEN_ACK, BOOK], [KRAKEN_ACK, BOOK, TRADE]) as server:
+            with open_new_file(path) as handle:
+                return await record_stream(
+                    handle,
+                    "BTC/USD",
+                    10,
+                    duration_s=0.5,
+                    urls={"kraken": f"ws://127.0.0.1:{port_of(server)}"},
+                    clock=lambda: next(clock),
+                    reconnect=FAST,
+                    on_reconnect=reports.append,
+                )
+
+    assert asyncio.run(scenario()) == 5
+    lines = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    marker = lines[2]
+    assert marker["kind"] == "reconnect"
+    assert (marker["recv_ns"], marker["venue"], marker["attempt"]) == (1_020, "kraken", 1)
+    assert marker["reason"].startswith("ConnectionClosed")
+    records = list(read_replay(path))
+    assert records[2] == ReconnectMarker(1_020, "kraken")
+    messages = [json.loads(record[1]) for record in records if isinstance(record, tuple)]
+    assert messages == [json.loads(m) for m in (KRAKEN_ACK, BOOK, KRAKEN_ACK, BOOK, TRADE)]
+    assert [(r.venue, r.attempt, r.recovered) for r in reports] == [("kraken", 1, True)]
+
+
+def test_recording_gives_up_after_the_last_reconnect(tmp_path: Path) -> None:
+    path = tmp_path / "down.jsonl"
+
+    async def scenario() -> int:
+        async with kraken_connections([KRAKEN_ACK, BOOK], []) as server:
+            with open_new_file(path) as handle:
+                return await record_stream(
+                    handle,
+                    "BTC/USD",
+                    10,
+                    duration_s=30,
+                    urls={"kraken": f"ws://127.0.0.1:{port_of(server)}"},
+                    reconnect=ReconnectPolicy(
+                        max_reconnects=2, base_delay_s=0.01, max_delay_s=0.01
+                    ),
+                )
+
+    with pytest.raises(RecordError, match="kraken feed gave up after 2 reconnects"):
+        asyncio.run(scenario())
+    kinds = [json.loads(line).get("kind") for line in path.read_text().splitlines()]
+    assert kinds == [None, None, "reconnect", "reconnect", "reconnect"]
+
+
+def test_an_outage_that_reaches_the_deadline_ends_the_recording(tmp_path: Path) -> None:
+    path = tmp_path / "late.jsonl"
+
+    async def scenario() -> int:
+        async with kraken_connections([KRAKEN_ACK, BOOK], []) as server:
+            with open_new_file(path) as handle:
+                return await record_stream(
+                    handle,
+                    "BTC/USD",
+                    10,
+                    duration_s=0.3,
+                    urls={"kraken": f"ws://127.0.0.1:{port_of(server)}"},
+                    reconnect=ReconnectPolicy(base_delay_s=0.2, max_delay_s=0.2),
+                )
+
+    assert asyncio.run(scenario()) == 2

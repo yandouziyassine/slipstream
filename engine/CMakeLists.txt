@@ -7,6 +7,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 option(SLIPSTREAM_SANITIZE "Build with AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
 option(SLIPSTREAM_TSAN "Build with ThreadSanitizer" OFF)
+option(SLIPSTREAM_COVERAGE "Build engine and test targets with gcov instrumentation" OFF)
 if(SLIPSTREAM_SANITIZE AND SLIPSTREAM_TSAN)
   message(FATAL_ERROR
     "SLIPSTREAM_SANITIZE and SLIPSTREAM_TSAN cannot both be ON: ThreadSanitizer cannot be "
@@ -38,6 +39,7 @@ add_library(slipstream_core STATIC
   src/router.cpp
   src/clock.cpp
   src/engine_loop.cpp
+  src/consumption_overlay.cpp
 )
 target_include_directories(slipstream_core PUBLIC src)
 target_compile_options(slipstream_core PRIVATE ${SLIPSTREAM_WARNINGS})
@@ -99,6 +101,7 @@ include(GoogleTest)
 
 add_executable(engine_tests
   tests/order_book_test.cpp
+  tests/consumption_overlay_test.cpp
   tests/twap_test.cpp
   tests/vwap_test.cpp
   tests/almgren_chriss_test.cpp
@@ -112,6 +115,8 @@ add_executable(engine_tests
   tests/engine_schedules_test.cpp
   tests/router_test.cpp
   tests/engine_routing_test.cpp
+  tests/engine_consumption_test.cpp
+  tests/engine_market_halt_test.cpp
   tests/clock_test.cpp
   tests/bounded_queue_test.cpp
   tests/engine_loop_test.cpp
@@ -122,3 +127,17 @@ add_executable(engine_tests
 target_link_libraries(engine_tests PRIVATE slipstream_service GTest::gtest_main Threads::Threads)
 target_compile_options(engine_tests PRIVATE ${SLIPSTREAM_WARNINGS})
 gtest_discover_tests(engine_tests)
+
+if(SLIPSTREAM_COVERAGE)
+  set(SLIPSTREAM_COVERAGE_FLAGS --coverage -O0 -g)
+  # slipstream_core and slipstream_service are static libraries: they have no link step of their
+  # own, so --coverage must be a PUBLIC usage requirement to reach the executables that link them
+  # (engine_tests here, and transitively slipstream_engine) rather than a PRIVATE link option,
+  # which a static library target would simply drop on the floor.
+  foreach(target slipstream_core slipstream_service)
+    target_compile_options(${target} PRIVATE ${SLIPSTREAM_COVERAGE_FLAGS})
+    target_link_options(${target} PUBLIC --coverage)
+  endforeach()
+  target_compile_options(engine_tests PRIVATE ${SLIPSTREAM_COVERAGE_FLAGS})
+  target_link_options(engine_tests PRIVATE --coverage)
+endif()

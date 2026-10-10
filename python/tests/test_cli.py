@@ -43,9 +43,10 @@ def test_parses_valid_arguments() -> None:
 def test_collect_command_forwards_its_arguments(monkeypatch: pytest.MonkeyPatch) -> None:
     seen: list[list[str]] = []
     monkeypatch.setattr("slipstream.cli.collect_main", lambda argv: (seen.append(list(argv)), 0)[1])
-    status = main(["collect", "run", "--engine", "127.0.0.1:1"])
+    forwarded = ["run", "--engine-binary", "build/release/slipstream_engine", "--venue", "k:x"]
+    status = main(["collect", *forwarded])
     assert status == 0
-    assert seen == [["run", "--engine", "127.0.0.1:1"]]
+    assert seen == [forwarded]
 
 
 def test_format_summary() -> None:

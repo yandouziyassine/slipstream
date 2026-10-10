@@ -21,6 +21,8 @@ struct RouteLeg {
     double qty;
     double gross_notional;
     double fee;
+    // Quantity taken from each of the venue's levels, best-first: a prefix of its levels.
+    std::vector<double> taken;
 };
 
 struct RouteResult {

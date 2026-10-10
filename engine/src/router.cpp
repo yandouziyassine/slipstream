@@ -76,8 +76,10 @@ RouteResult route_once(Side taker_side, double qty, const std::vector<VenueLiqui
         if (pieces[i].empty()) continue;
         const auto& venue = venues[i];
         floor_to_step(pieces[i], venue.qty_step);
-        RouteLeg leg{venue.venue, 0.0, 0.0, 0.0};
+        RouteLeg leg{venue.venue, 0.0, 0.0, 0.0, {}};
+        leg.taken.reserve(pieces[i].size());
         for (const auto& piece : pieces[i]) {
+            leg.taken.push_back(piece.qty);
             const double notional = piece.qty * piece.price;
             leg.qty += piece.qty;
             leg.gross_notional += notional;

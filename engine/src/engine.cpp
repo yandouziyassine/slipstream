@@ -187,16 +187,18 @@ std::optional<double> Engine::consolidated_mid_locked(std::int64_t now_ns) const
     return (*best_bid + *best_ask) / 2.0;
 }
 
-std::vector<VenueLiquidity> Engine::liquidity_locked(Side side, std::int64_t now_ns,
-                                                     std::optional<std::size_t> only,
-                                                     double ref_price) const {
+std::vector<VenueLiquidity> Engine::liquidity_locked(
+    Side side, std::int64_t now_ns, std::optional<std::size_t> only, double ref_price,
+    const std::vector<ConsumptionOverlay>& taken) const {
     const double limit =
         side == Side::Buy ? ref_price * (1.0 + max_deviation_) : ref_price * (1.0 - max_deviation_);
     std::vector<VenueLiquidity> out;
     for (std::size_t v = 0; v < venues_.size(); ++v) {
         if (only && *only != v) continue;
         if (!fresh_locked(v, now_ns)) continue;
-        auto levels = venues_[v].book.liquidity_for(side);
+        // The collar only cuts the worst end, so the router's levels stay a prefix of what
+        // remaining() returned and each leg's `taken` lines up with it in record().
+        auto levels = taken[v].remaining(venues_[v].book.versioned_liquidity_for(side));
         const auto beyond = std::find_if(levels.begin(), levels.end(), [&](const Level& level) {
             return side == Side::Buy ? level.price > limit : level.price < limit;
         });
@@ -206,6 +208,18 @@ std::vector<VenueLiquidity> Engine::liquidity_locked(Side side, std::int64_t now
                        settings.qty_step, settings.min_notional});
     }
     return out;
+}
+
+void Engine::record_taken_locked(std::vector<ConsumptionOverlay>& taken, Side side,
+                                 const RouteResult& result) const {
+    for (const auto& leg : result.legs) {
+        taken[leg.venue].record(venues_[leg.venue].book.versioned_liquidity_for(side), leg.taken);
+    }
+}
+
+void Engine::release_taken(ParentOrder& order) {
+    std::vector<ConsumptionOverlay>().swap(order.taken);
+    std::vector<ConsumptionOverlay>().swap(order.alone_taken);
 }
 
 SubmitResult Engine::submit(const ParentOrderRequest& request, const ScheduleSpec& spec) {
@@ -229,9 +243,11 @@ SubmitResult Engine::submit(const ParentOrderRequest& request, const ScheduleSpe
         risk_.check_parent(request.side, request.qty, *arrival_mid, projected_position_locked());
     if (!decision.ok) return {false, decision.reason};
 
+    // A fresh order has taken nothing, so the one-shot cost sweeps the displayed book.
+    std::vector<ConsumptionOverlay> taken(venues_.size());
     const auto immediate = route(request.side, request.qty,
                                  liquidity_locked(request.side, request.start_ns, std::nullopt,
-                                                  *arrival_mid));
+                                                  *arrival_mid, taken));
     const double immediate_avg =
         immediate.filled_qty > 0.0 ? immediate.gross_notional / immediate.filled_qty : 0.0;
 
@@ -239,7 +255,10 @@ SubmitResult Engine::submit(const ParentOrderRequest& request, const ScheduleSpe
                                   *arrival_mid, cost_bps(request.side, immediate_avg, *arrival_mid),
                                   immediate.filled_qty, "",
                                   std::vector<double>(venues_.size(), 0.0),
-                                  std::vector<char>(venues_.size(), 1)});
+                                  std::vector<char>(venues_.size(), 1), std::move(taken),
+                                  std::vector<ConsumptionOverlay>(venues_.size())});
+    // The arrival mid was judged at this time, so the no-market timer starts here at the latest.
+    last_market_ns_ = std::max({last_market_ns_, request.start_ns, latest_ns_});
     return {true, ""};
 }
 
@@ -248,6 +267,9 @@ StepOutput Engine::step(std::int64_t now_ns) {
     latest_ns_ = std::max(latest_ns_, now_ns);
     StepOutput out;
     const auto ref_price = consolidated_mid_locked(now_ns);
+    if (ref_price) last_market_ns_ = std::max(last_market_ns_, latest_ns_);
+    // Both times are non-negative, so the difference cannot overflow.
+    const bool no_market = latest_ns_ - last_market_ns_ > kNoMarketHaltNs;
     const MarketState market{market_volume_};
     for (auto& order : orders_) {
         if (order.state != OrderState::Working) continue;
@@ -257,6 +279,14 @@ StepOutput Engine::step(std::int64_t now_ns) {
             order.state = OrderState::Halted;
             order.halt_reason = "deadline reached";
         }
+        // Fail safe: without a market, a returning venue would let the next slice catch up the
+        // whole missed amount at once.
+        if (order.state == OrderState::Working && no_market) {
+            order.state = OrderState::Halted;
+            static_assert(kNoMarketHaltNs == 30'000'000'000, "keep the halt reason's 30s in sync");
+            order.halt_reason = "no fresh market data for 30s";
+        }
+        if (order.state != OrderState::Working) release_taken(order);
         if (order.state != OrderState::Working || order.filled_qty != filled_before) {
             out.updates.push_back(
                 {order.request.order_id, order.state, order.halt_reason, order.filled_qty});
@@ -272,7 +302,8 @@ void Engine::advance_locked(ParentOrder& order, std::int64_t now_ns,
     double child = order.schedule->target_qty_at(now_ns, market) - order.filled_qty;
     if (child <= dust || !ref_price) return;
 
-    const auto liquidity = liquidity_locked(order.request.side, now_ns, std::nullopt, *ref_price);
+    const auto liquidity =
+        liquidity_locked(order.request.side, now_ns, std::nullopt, *ref_price, order.taken);
     // "Never executable" is judged against every registered venue, so a venue that is only
     // briefly stale cannot make the order give up; the child waits for fresh venues instead.
     const double registered_minimum = registered_minimum_locked(*ref_price);
@@ -304,16 +335,20 @@ void Engine::advance_locked(ParentOrder& order, std::int64_t now_ns,
     order.filled_notional += result.gross_notional;
     order.fees += result.fees;
     position_ += signed_qty(order.request.side, result.filled_qty);
+    record_taken_locked(order.taken, order.request.side, result);
 
     for (std::size_t v = 0; v < venues_.size(); ++v) {
         if (!order.venue_available[v]) continue;
         if (!fresh_locked(v, now_ns)) {
             order.venue_available[v] = 0;
+            order.alone_taken[v].clear();
             continue;
         }
         // Price and depth only: a venue trading alone would simply wait for its own minimum,
-        // so minimum order sizes must not mark it unavailable.
-        auto alone_liquidity = liquidity_locked(order.request.side, now_ns, v, *ref_price);
+        // so minimum order sizes must not mark it unavailable. It walks what its own earlier
+        // children left, just as the routed order does, so routing gain stays like for like.
+        auto alone_liquidity =
+            liquidity_locked(order.request.side, now_ns, v, *ref_price, order.alone_taken);
         for (auto& venue : alone_liquidity) {
             venue.min_qty = 0.0;
             venue.qty_step = 0.0;
@@ -322,8 +357,10 @@ void Engine::advance_locked(ParentOrder& order, std::int64_t now_ns,
         const auto alone = route(order.request.side, result.filled_qty, alone_liquidity);
         if (alone.filled_qty < result.filled_qty * (1.0 - 1e-9)) {
             order.venue_available[v] = 0;
+            order.alone_taken[v].clear();
         } else {
             order.venue_all_in_notional[v] += all_in_notional(order.request.side, alone);
+            record_taken_locked(order.alone_taken, order.request.side, alone);
         }
     }
 
@@ -389,6 +426,16 @@ std::vector<OrderStatus> Engine::statuses() const {
                        order.immediate_filled_qty});
     }
     return out;
+}
+
+std::size_t Engine::consumption_entries() const {
+    std::lock_guard lock(mu_);
+    std::size_t total = 0;
+    for (const auto& order : orders_) {
+        for (const auto& overlay : order.taken) total += overlay.size();
+        for (const auto& overlay : order.alone_taken) total += overlay.size();
+    }
+    return total;
 }
 
 std::size_t Engine::book_depth() const { return book_depth_; }

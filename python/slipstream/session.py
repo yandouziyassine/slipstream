@@ -32,9 +32,14 @@ from slipstream.models import (
     TradeBatch,
     Venue,
 )
-from slipstream.replay import ReplayError
+from slipstream.replay import ReconnectMarker, ReplayError, ReplayRecord
 from slipstream.v1 import execution_pb2 as pb
-from slipstream.venue_ws import IDLE_TIMEOUT_S
+from slipstream.venue_ws import (
+    DEFAULT_RECONNECT,
+    IDLE_TIMEOUT_S,
+    FeedReconnect,
+    ReconnectPolicy,
+)
 
 _NS_PER_S = 1_000_000_000
 # The engine rejects a replay clock that jumps more than one day in a single event.
@@ -53,6 +58,9 @@ _BOOK_POLL_S = 0.05
 _BOOK_TIMEOUT_S = 45.0
 # Extra time allowed, past an order's own duration, for a live run's terminal updates to arrive.
 DEADLINE_GRACE_S = 60
+# A live run stops once no venue has had a fresh book for this long (fail safe).
+STALE_LIMIT_S = 30.0
+_STALE_POLL_S = 1.0
 
 _Parser = Callable[[str | bytes], BookUpdate | TradeBatch | None]
 
@@ -115,6 +123,7 @@ class ReplaySession:
         self._calibration = calibration
         self._venues: frozenset[Venue] = frozenset(venues)
         self._fee_bps: dict[Venue, float] = dict(fee_bps or {})
+        self._book_depth = book_depth
         self._books: dict[Venue, LocalBook] = {venue: LocalBook(book_depth) for venue in venues}
         self._parsers: dict[Venue, _Parser] = {}
         if "kraken" in self._venues:
@@ -122,6 +131,7 @@ class ReplaySession:
         if "coinbase" in self._venues:
             self._parsers["coinbase"] = CoinbaseStream(symbol, book_depth).parse
         self._snapshot_venues: set[Venue] = set()
+        self._resyncing: set[Venue] = set()
         self._submitted = False
         self._start_ns = 0
         self._engine_ns = 0
@@ -132,7 +142,7 @@ class ReplaySession:
     async def order_statuses(self) -> list[pb.OrderStatus]:
         return self._ours(await self._channel.status())
 
-    async def run(self, records: Iterable[tuple[int, str, Venue]]) -> SessionResult:
+    async def run(self, records: Iterable[ReplayRecord]) -> SessionResult:
         baseline = (await self._channel.status()).stats.events
         subscription = await asyncio.wait_for(
             Subscription.open(self._channel), timeout=_SUBSCRIBE_TIMEOUT_S
@@ -165,20 +175,28 @@ class ReplaySession:
 
     async def _stream(
         self,
-        records: Iterable[tuple[int, str, Venue]],
+        records: Iterable[ReplayRecord],
         writer: MarketStreamWriter,
         consumer: asyncio.Future[None],
         baseline: int,
     ) -> None:
         last_ns = 0
-        for recv_ns, raw, venue in records:
+        for record in records:
+            recv_ns, venue = (
+                (record.recv_ns, record.venue)
+                if isinstance(record, ReconnectMarker)
+                else (record[0], record[2])
+            )
             if recv_ns < last_ns:
                 raise ReplayError("replay timestamps must be non-decreasing")
             last_ns = recv_ns
             _raise_if_failed(consumer)
             if venue not in self._venues:
                 continue
-            events, submit_now = self._events(raw, recv_ns, venue)
+            if isinstance(record, ReconnectMarker):
+                events, submit_now = self._reconnected(venue, recv_ns), False
+            else:
+                events, submit_now = self._events(record[1], recv_ns, venue)
             for event in events:
                 await self._send(writer, event)
             if submit_now:
@@ -193,6 +211,16 @@ class ReplaySession:
             while self._engine_ns < deadline:
                 self._engine_ns = min(deadline, self._engine_ns + _MAX_TICK_JUMP_NS)
                 await self._send(writer, tick_event(self._engine_ns))
+
+    def _reconnected(self, venue: Venue, recv_ns: int) -> list[pb.MarketEvent]:
+        """The recorder lost this venue here: forget its book until the next snapshot."""
+        self._books[venue] = LocalBook(self._book_depth)
+        self._snapshot_venues.discard(venue)
+        self._resyncing.add(venue)
+        if venue == "coinbase":
+            self._parsers["coinbase"] = CoinbaseStream(self._symbol, self._book_depth).parse
+        self._engine_ns = max(self._engine_ns, recv_ns)
+        return [book_event(BookUpdate(self._symbol, True, (), (), venue), recv_ns)]
 
     def _events(self, raw: str, recv_ns: int, venue: Venue) -> tuple[list[pb.MarketEvent], bool]:
         """The engine events for one record, and whether the orders are due after them.
@@ -210,6 +238,12 @@ class ReplaySession:
         update = self._parsers[venue](raw)
         if isinstance(update, BookUpdate):
             self._check_symbol(update.symbol)
+            if venue in self._resyncing:
+                if not update.is_snapshot:
+                    raise MarketDataError(
+                        f"{venue} book update before the snapshot that follows a reconnect"
+                    )
+                self._resyncing.discard(venue)
             if self._submitted:
                 return [book_event(update, recv_ns)], False
             self._books[venue].apply(update)
@@ -354,7 +388,7 @@ async def run_replay_session(
     symbol: str,
     logger: logging.Logger,
     *,
-    records: Iterable[tuple[int, str, Venue]],
+    records: Iterable[ReplayRecord],
     calibration: CalibrationData | None = None,
     venues: Sequence[Venue] = ("kraken",),
     book_depth: int = 10,
@@ -419,6 +453,7 @@ class LiveSession:
         self._fee_bps: dict[Venue, float] = dict(fee_bps or {})
         self._terminal: set[str] = set()
         self.fills: list[Fill] = []
+        self.reconnects: list[FeedReconnect] = []
 
     async def order_statuses(self) -> list[pb.OrderStatus]:
         return self._ours(await self._channel.status())
@@ -434,6 +469,9 @@ class LiveSession:
         idle_timeout_s: float = IDLE_TIMEOUT_S,
         book_timeout_s: float = _BOOK_TIMEOUT_S,
         deadline_grace_s: float = DEADLINE_GRACE_S,
+        reconnect: ReconnectPolicy = DEFAULT_RECONNECT,
+        stale_limit_s: float = STALE_LIMIT_S,
+        stale_poll_s: float = _STALE_POLL_S,
     ) -> SessionResult:
         await check_clock_mode(self._channel, pb.CLOCK_MODE_LIVE)
         # Open the subscription before any submit: the engine delivers fills and order updates
@@ -443,6 +481,7 @@ class LiveSession:
         )
         consumer = asyncio.ensure_future(self._consume(subscription))
         error_watch: asyncio.Future[None] | None = None
+        stale_watch: asyncio.Future[None] | None = None
         supervisor: FeedSupervisor | None = None
         try:
             supervisor = FeedSupervisor(
@@ -452,19 +491,23 @@ class LiveSession:
                 engine_address,
                 urls,
                 idle_timeout_s,
+                reconnect,
+                self._on_reconnect,
             )
             supervisor.start()
             error_watch = asyncio.ensure_future(_watch_feeds(supervisor))
             await self._await_books(consumer, error_watch, book_timeout_s)
             await self._submit_all()
+            stale_watch = asyncio.ensure_future(self._watch_market(stale_limit_s, stale_poll_s))
             _check_running(consumer, error_watch)
             deadline_s = max(spec.duration_s for spec in self._specs) + deadline_grace_s
-            await self._await_terminal(consumer, error_watch, deadline_s)
+            await self._await_terminal(consumer, error_watch, stale_watch, deadline_s)
             status = await self._channel.status()
         finally:
-            if error_watch is not None:
-                error_watch.cancel()
-                await asyncio.gather(error_watch, return_exceptions=True)
+            for watch in (error_watch, stale_watch):
+                if watch is not None:
+                    watch.cancel()
+                    await asyncio.gather(watch, return_exceptions=True)
             if supervisor is not None:
                 await supervisor.stop()
             await subscription.close()
@@ -493,17 +536,55 @@ class LiveSession:
                 raise LiveFeedError(f"venue book(s) {missing} not fresh after {timeout_s:.0f}s")
             await asyncio.sleep(_BOOK_POLL_S)
 
+    def _on_reconnect(self, event: FeedReconnect) -> None:
+        self.reconnects.append(event)
+        self._log.warning(
+            "feed reconnect",
+            extra={
+                "fields": {
+                    "event": "feed_reconnect",
+                    "venue": event.venue,
+                    "attempt": event.attempt,
+                    "reason": event.reason,
+                    "downtime_s": round(event.downtime_s, 3),
+                    "recovered": event.recovered,
+                }
+            },
+        )
+
+    async def _watch_market(self, limit_s: float, poll_s: float) -> None:
+        """Raise once no venue has had a book that is fresh for more than limit_s."""
+        loop = asyncio.get_running_loop()
+        last_usable = loop.time()
+        while True:
+            status = await self._channel.status()
+            now = loop.time()
+            if any(
+                info.has_book and info.fresh for info in status.venues if info.name in self._venues
+            ):
+                last_usable = now
+            elif now - last_usable > limit_s:
+                raise LiveFeedError(
+                    f"no venue had a fresh book for {limit_s:.0f}s; stopping the run"
+                )
+            await asyncio.sleep(poll_s)
+
     async def _await_terminal(
         self,
         consumer: asyncio.Future[None],
         error_watch: asyncio.Future[None],
+        stale_watch: asyncio.Future[None],
         deadline_s: float,
     ) -> None:
         done, _pending = await asyncio.wait(
-            {consumer, error_watch}, timeout=deadline_s, return_when=asyncio.FIRST_COMPLETED
+            {consumer, error_watch, stale_watch},
+            timeout=deadline_s,
+            return_when=asyncio.FIRST_COMPLETED,
         )
         if error_watch in done:
             error_watch.result()
+        if stale_watch in done:
+            stale_watch.result()
         if consumer in done:
             consumer.result()
             return
@@ -600,6 +681,9 @@ async def run_live_session(
     idle_timeout_s: float = IDLE_TIMEOUT_S,
     book_timeout_s: float = _BOOK_TIMEOUT_S,
     deadline_grace_s: float = DEADLINE_GRACE_S,
+    reconnect: ReconnectPolicy = DEFAULT_RECONNECT,
 ) -> SessionResult:
     session = LiveSession(channel, specs, symbol, logger, calibration, venues, book_depth, fee_bps)
-    return await session.run(engine_address, urls, idle_timeout_s, book_timeout_s, deadline_grace_s)
+    return await session.run(
+        engine_address, urls, idle_timeout_s, book_timeout_s, deadline_grace_s, reconnect
+    )

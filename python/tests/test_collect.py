@@ -5,8 +5,9 @@ import gzip
 import itertools
 import json
 import logging
-import re
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import cast
@@ -16,21 +17,35 @@ from websockets.asyncio.server import ServerConnection, serve
 from websockets.exceptions import ConnectionClosed
 
 from slipstream.calibration import CalibrationData
+from slipstream.cli import main as cli_main
 from slipstream.collect import (
     ALGOS,
+    HOURLY_MAX_ORDER_NOTIONAL,
+    HOURLY_MAX_POSITION,
     CollectConfig,
+    EngineLauncher,
     _housekeeping,
     _recording_path,
     acquire_lock,
+    build_parser,
+    engine_argv,
+    engine_launcher,
     main,
     run_hour,
     side_for,
 )
 from slipstream.db import ResultsDB
+from slipstream.engine_process import RunningEngine, running_engine
+from slipstream.engine_stream import EngineChannel
 from slipstream.kraken_rest import Bar
 from slipstream.models import Venue
 from slipstream.storage import StoragePolicy
+from slipstream.v1 import execution_pb2 as pb
 from slipstream.venue_rules import VenueRules
+
+ENGINE_BIN = Path(__file__).resolve().parents[2] / "build" / "engine" / "slipstream_engine"
+TEST_VENUE_FLAGS = ("kraken:fee_bps=0", "coinbase:fee_bps=1")
+HOURLY_VENUE_ARGS = ["--venue", "kraken:fee_bps=40", "--venue", "coinbase:fee_bps=60"]
 
 RULES = {
     "kraken": VenueRules(min_qty=0.00005, qty_step=1e-8, min_notional=0.5),
@@ -81,6 +96,7 @@ KRAKEN_SNAPSHOT = json.dumps(
                 "symbol": "BTC/USD",
                 "bids": [{"price": 99990.0 - 10 * i, "qty": 1.0} for i in range(3)],
                 "asks": [{"price": 100010.0 + 10 * i, "qty": 1.0} for i in range(3)],
+                "checksum": 1025701644,
             }
         ],
     }
@@ -200,6 +216,47 @@ def _db(path: Path) -> ResultsDB:
     return db
 
 
+async def _status(address: str) -> pb.StatusReply:
+    channel = EngineChannel(address)
+    try:
+        await channel.wait_ready(5.0)
+        return await channel.status()
+    finally:
+        await channel.close()
+
+
+@dataclass
+class _Observed:
+    engine: RunningEngine
+    start: pb.StatusReply
+    end: pb.StatusReply | None = None
+
+
+def _observed_launcher(tmp_path: Path, now: datetime, seen: list[_Observed]) -> EngineLauncher:
+    """The production launcher on the debug engine, recording each engine's state at start and
+    end of its size run."""
+    if not ENGINE_BIN.exists():
+        pytest.fail(f"engine binary not found at {ENGINE_BIN}; run scripts/build_engine.sh")
+    (tmp_path / "logs").mkdir(exist_ok=True)
+    launch = engine_launcher(engine_argv(ENGINE_BIN, TEST_VENUE_FLAGS), tmp_path / "logs", now)
+
+    @asynccontextmanager
+    async def observed(size: float) -> AsyncIterator[RunningEngine]:
+        async with launch(size) as engine:
+            observation = _Observed(engine, await _status(engine.address))
+            seen.append(observation)
+            yield engine
+            observation.end = await _status(engine.address)
+
+    return observed
+
+
+def _assert_all_stopped(seen: list[_Observed]) -> None:
+    assert len({observed.engine.pid for observed in seen}) == len(seen)
+    for observed in seen:
+        assert observed.engine.returncode is not None
+
+
 def test_side_for_both_parities() -> None:
     assert side_for(0) == "buy"
     assert side_for(2) == "buy"
@@ -218,9 +275,10 @@ def test_lock_prevents_a_concurrent_second_run(tmp_path: Path) -> None:
         pass
 
 
-def test_run_hour_completes_two_sizes_with_recordings(
-    two_venue_live_engine_address: str, tmp_path: Path
-) -> None:
+def test_run_hour_completes_two_sizes_with_recordings(tmp_path: Path) -> None:
+    seen: list[_Observed] = []
+    now = datetime(2026, 9, 27, 10, tzinfo=UTC)
+
     async def scenario() -> None:
         async with serve(_kraken_feed, "127.0.0.1", 0) as kraken_server:
             async with serve(_coinbase_feed, "127.0.0.1", 0) as coinbase_server:
@@ -230,22 +288,22 @@ def test_run_hour_completes_two_sizes_with_recordings(
                 }
                 db = _db(tmp_path / "slipstream.db")
                 cfg = CollectConfig(sizes=(0.001, 0.002), duration_s=4, slices=2, data_dir=tmp_path)
-                now = datetime(2026, 9, 27, 10, tzinfo=UTC)
-                try:
-                    run_ids = await run_hour(
-                        two_venue_live_engine_address,
-                        cfg,
-                        now,
-                        "deadbeef",
-                        db,
-                        logging.getLogger("test"),
-                        urls=urls,
-                        fetch_rules=_fake_fetch_rules,
-                        fetch_calibration=_fake_fetch_calibration,
-                    )
-                finally:
-                    pass
+                run_ids = await run_hour(
+                    _observed_launcher(tmp_path, now, seen),
+                    cfg,
+                    now,
+                    "deadbeef",
+                    db,
+                    logging.getLogger("test"),
+                    urls=urls,
+                    fetch_rules=_fake_fetch_rules,
+                    fetch_calibration=_fake_fetch_calibration,
+                )
 
+        assert len(seen) == 2
+        _assert_all_stopped(seen)
+        for size in ("0p001", "0p002"):
+            assert (tmp_path / "logs" / f"engine-2026-09-27-100000-{size}.log").exists()
         assert len(run_ids) == 2
         for run_id in run_ids:
             row = db.connection.execute(
@@ -283,10 +341,10 @@ def test_run_hour_completes_two_sizes_with_recordings(
     asyncio.run(scenario())
 
 
-def test_feed_error_fails_one_size_and_the_next_still_runs(
-    two_venue_live_engine_address: str, tmp_path: Path
-) -> None:
+def test_feed_error_fails_one_size_and_the_next_runs_on_a_clean_engine(tmp_path: Path) -> None:
     counter = itertools.count()
+    seen: list[_Observed] = []
+    now = datetime(2026, 9, 27, 11, tzinfo=UTC)
 
     async def scenario() -> None:
         async with serve(_kraken_feed, "127.0.0.1", 0) as kraken_server:
@@ -298,9 +356,8 @@ def test_feed_error_fails_one_size_and_the_next_still_runs(
                 }
                 db = _db(tmp_path / "slipstream.db")
                 cfg = CollectConfig(sizes=(0.001, 0.002), duration_s=4, slices=2, data_dir=tmp_path)
-                now = datetime(2026, 9, 27, 11, tzinfo=UTC)
                 run_ids = await run_hour(
-                    two_venue_live_engine_address,
+                    _observed_launcher(tmp_path, now, seen),
                     cfg,
                     now,
                     None,
@@ -325,15 +382,96 @@ def test_feed_error_fails_one_size_and_the_next_still_runs(
 
     asyncio.run(scenario())
 
+    assert len(seen) == 2
+    _assert_all_stopped(seen)
+    second = seen[1]
+    assert list(second.start.orders) == []
+    assert second.start.position == 0.0
+    assert second.end is not None
+    assert {order.order_id for order in second.end.orders} == {
+        f"h2026092711-0p002-{algo}" for algo in ALGOS
+    }
 
-def test_hourly_engine_position_limit_fits_every_order_of_the_hour() -> None:
-    # Both sizes run on one engine per hour, and working orders count towards its position limit,
-    # so the limit must cover every algorithm at every size or the last orders are rejected.
-    script = Path(__file__).resolve().parents[2] / "scripts" / "collect_hourly.sh"
-    match = re.search(r"--max-position (\S+)", script.read_text(encoding="utf-8"))
-    assert match is not None
-    exposure = len(ALGOS) * sum(CollectConfig().sizes)
-    assert float(match.group(1)) >= exposure
+
+def test_engine_startup_failure_fails_that_size_and_the_next_still_runs(tmp_path: Path) -> None:
+    broken = tmp_path / "broken" / "slipstream_engine"
+    broken.parent.mkdir()
+    broken.write_text("#!/bin/sh\necho 'error: invalid --venue' >&2\nexit 2\n", encoding="utf-8")
+    broken.chmod(0o755)
+    seen: list[_Observed] = []
+    now = datetime(2026, 9, 27, 13, tzinfo=UTC)
+    working = _observed_launcher(tmp_path, now, seen)
+
+    def launch(size: float) -> AbstractAsyncContextManager[RunningEngine]:
+        if size == 0.001:
+            return running_engine([str(broken)], tmp_path / "broken.log")
+        return working(size)
+
+    async def scenario() -> list[int]:
+        async with serve(_kraken_feed, "127.0.0.1", 0) as kraken_server:
+            async with serve(_coinbase_feed, "127.0.0.1", 0) as coinbase_server:
+                urls: dict[Venue, str] = {
+                    "kraken": f"ws://127.0.0.1:{_port_of(kraken_server)}",
+                    "coinbase": f"ws://127.0.0.1:{_port_of(coinbase_server)}",
+                }
+                return await run_hour(
+                    launch,
+                    CollectConfig(sizes=(0.001, 0.002), duration_s=3, slices=2, data_dir=tmp_path),
+                    now,
+                    None,
+                    db,
+                    logging.getLogger("test"),
+                    urls=urls,
+                    fetch_rules=_fake_fetch_rules,
+                    fetch_calibration=_fake_fetch_calibration,
+                )
+
+    db = _db(tmp_path / "slipstream.db")
+    try:
+        run_ids = asyncio.run(scenario())
+        rows = [
+            db.connection.execute(
+                "SELECT qty, status, error, fees_json FROM runs WHERE id = ?", (run_id,)
+            ).fetchone()
+            for run_id in run_ids
+        ]
+    finally:
+        db.close()
+    assert len(rows) == 2
+    qty, status, error, fees_json = rows[0]
+    assert (qty, status, fees_json) == (0.001, "failed", "{}")
+    assert "exited with code 2" in error
+    assert rows[1][:2] == (0.002, "completed")
+    assert json.loads(rows[1][3]) == {"kraken": 0.0, "coinbase": 1.0}
+    _assert_all_stopped(seen)
+
+
+def test_engine_argv_starts_a_live_paper_engine_with_the_hourly_limits() -> None:
+    binary = Path("/repo/build/release/slipstream_engine")
+
+    argv = engine_argv(binary, ["kraken:fee_bps=40", "coinbase:fee_bps=60"])
+
+    assert argv == [
+        str(binary),
+        "--listen",
+        "127.0.0.1:0",
+        "--clock",
+        "live",
+        "--max-order-notional",
+        str(HOURLY_MAX_ORDER_NOTIONAL),
+        "--max-position",
+        str(HOURLY_MAX_POSITION),
+        "--venue",
+        "kraken:fee_bps=40",
+        "--venue",
+        "coinbase:fee_bps=60",
+    ]
+
+
+def test_hourly_engine_position_limit_fits_every_order_of_one_size_run() -> None:
+    # Each size runs on its own engine, and working orders count towards its position limit, so
+    # the limit must cover every algorithm at the largest size or the last orders are rejected.
+    assert HOURLY_MAX_POSITION >= len(ALGOS) * max(CollectConfig().sizes)
 
 
 def test_housekeeping_backs_up_thins_expires_and_logs_disk_usage(tmp_path: Path) -> None:
@@ -378,9 +516,107 @@ def test_main_fails_fast_on_invalid_recordings_budget_env(
     monkeypatch.setenv("SLIPSTREAM_DATA_DIR", str(tmp_path))
     monkeypatch.setenv("SLIPSTREAM_RECORDINGS_MAX_MB", "not-a-number")
 
-    result = main(["run", "--engine", "127.0.0.1:1"])
+    result = main(["run", "--engine-binary", str(ENGINE_BIN), *HOURLY_VENUE_ARGS])
 
     assert result == 1
     log_files = list((tmp_path / "logs").glob("collect-*.log"))
     assert log_files
     assert "invalid_storage_policy" in log_files[0].read_text(encoding="utf-8")
+
+
+def test_collector_accepts_what_venue_flags_prints(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr("slipstream.cli.fetch_venue_rules", _fake_fetch_rules)
+    assert (
+        cli_main(["venue-flags", "--venues", "kraken,coinbase", "--fees", "kraken=40,coinbase=60"])
+        == 0
+    )
+    printed = capsys.readouterr().out.splitlines()
+
+    args = build_parser().parse_args(["run", "--engine-binary", str(ENGINE_BIN), *printed])
+
+    assert args.venue_flags == printed[1::2]
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["run", "--engine-binary", "/bin/sh", *HOURLY_VENUE_ARGS],
+        ["run", "--engine-binary", str(ENGINE_BIN.parent / "missing"), *HOURLY_VENUE_ARGS],
+        ["run", "--engine-binary", str(ENGINE_BIN), "--venue", "kraken:fee_bps=40;id"],
+        ["run", "--engine-binary", str(ENGINE_BIN), *HOURLY_VENUE_ARGS, "--clock", "replay"],
+        ["run", "--engine-binary", str(ENGINE_BIN), "--venue", "kraken:fee_bps=40"],
+        ["run", "--engine-binary", str(ENGINE_BIN), *HOURLY_VENUE_ARGS, *HOURLY_VENUE_ARGS[:2]],
+        ["run", "--engine-binary", str(ENGINE_BIN)],
+    ],
+)
+def test_main_rejects_an_unexpected_engine_binary_or_engine_args(
+    argv: list[str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SLIPSTREAM_DATA_DIR", str(tmp_path / "data"))
+
+    with pytest.raises(SystemExit) as raised:
+        main(argv)
+
+    assert raised.value.code == 2
+    assert not (tmp_path / "data").exists()
+
+
+def _coinbase_feed_first_connection_drops(
+    counter: itertools.count[int],
+) -> Callable[[ServerConnection], Awaitable[None]]:
+    async def handler(ws: ServerConnection) -> None:
+        if next(counter) > 0:
+            await _coinbase_feed(ws)
+            return
+        for _ in range(3):
+            await ws.recv()
+        await ws.send(_coinbase_message("subscriptions", 0, [{"subscriptions": {}}]))
+        await ws.send(_coinbase_snapshot(1))
+        await asyncio.sleep(0.3)
+        await ws.close()
+
+    return handler
+
+
+def test_a_reconnect_during_a_run_is_stored_with_the_completed_run(tmp_path: Path) -> None:
+    counter = itertools.count()
+    now = datetime(2026, 9, 27, 12, tzinfo=UTC)
+    seen: list[_Observed] = []
+
+    async def scenario() -> list[int]:
+        async with serve(_kraken_feed, "127.0.0.1", 0) as kraken_server:
+            handler = _coinbase_feed_first_connection_drops(counter)
+            async with serve(handler, "127.0.0.1", 0) as coinbase_server:
+                urls: dict[Venue, str] = {
+                    "kraken": f"ws://127.0.0.1:{_port_of(kraken_server)}",
+                    "coinbase": f"ws://127.0.0.1:{_port_of(coinbase_server)}",
+                }
+                return await run_hour(
+                    _observed_launcher(tmp_path, now, seen),
+                    CollectConfig(sizes=(0.001,), duration_s=3, slices=2, data_dir=tmp_path),
+                    now,
+                    None,
+                    db,
+                    logging.getLogger("test"),
+                    urls=urls,
+                    fetch_rules=_fake_fetch_rules,
+                    fetch_calibration=_fake_fetch_calibration,
+                )
+
+    db = _db(tmp_path / "slipstream.db")
+    try:
+        (run_id,) = asyncio.run(scenario())
+        status = db.connection.execute("SELECT status FROM runs WHERE id = ?", (run_id,))
+        rows = db.connection.execute(
+            "SELECT run_id, source, venue, attempt, recovered FROM feed_reconnects"
+        ).fetchall()
+        assert status.fetchone() == ("completed",)
+    finally:
+        db.close()
+    assert len(rows) == 1
+    (row_run_id, source, venue, attempt, recovered) = rows[0]
+    assert (row_run_id, venue, attempt, recovered) == (run_id, "coinbase", 1, 1)
+    assert source in ("feed", "recorder")
+    _assert_all_stopped(seen)

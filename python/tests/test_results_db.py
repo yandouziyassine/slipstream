@@ -11,6 +11,7 @@ from slipstream.db import ResultsDB, ResultsDBError
 from slipstream.models import Fill
 from slipstream.v1 import execution_pb2 as pb
 from slipstream.venue_rules import VenueRules
+from slipstream.venue_ws import FeedReconnect
 
 FEES = {"kraken": 40.0, "coinbase": 60.0}
 RULES = {
@@ -94,7 +95,7 @@ def test_migrate_is_idempotent(tmp_path: Path) -> None:
     second.migrate()
     version_count = second.connection.execute("SELECT COUNT(*) FROM schema_version").fetchone()[0]
     second.close()
-    assert version_count == 1
+    assert version_count == 2
 
 
 @pytest.mark.parametrize("table", ["results", "fills", "engine_stats", "recordings"])
@@ -251,6 +252,25 @@ def test_add_results_resolves_algo_from_order_id_for_fills(db: ResultsDB) -> Non
     assert result_row[1] == pytest.approx(2.1 - 1.9)
 
 
+def test_add_results_filled_pct_is_zero_when_nothing_was_ordered(db: ResultsDB) -> None:
+    run_id = db.begin_run(datetime.now(UTC), "buy", 0.0, 600, FEES, RULES, None)
+    status = pb.OrderStatus(
+        order_id="h2026092700-0-twap",
+        algo="twap",
+        state=pb.ORDER_STATE_HALTED,
+        total_qty=0.0,
+        filled_qty=0.0,
+        halt_reason="risk limit exceeded before any child order was sent",
+    )
+
+    db.add_results(run_id, [status], [], _stats())
+
+    filled_pct = db.connection.execute(
+        "SELECT filled_pct FROM results WHERE run_id = ?", (run_id,)
+    ).fetchone()[0]
+    assert filled_pct == 0.0
+
+
 def test_add_results_rejects_a_fill_for_an_unknown_order(db: ResultsDB) -> None:
     run_id = db.begin_run(datetime.now(UTC), "buy", 0.01, 600, FEES, RULES, None)
     with pytest.raises(ResultsDBError, match="unknown order id"):
@@ -266,3 +286,65 @@ def test_finish_run_rejects_non_terminal_status(db: ResultsDB) -> None:
     run_id = db.begin_run(datetime.now(UTC), "buy", 0.01, 600, FEES, RULES, None)
     with pytest.raises(ResultsDBError, match="completed or failed"):
         db.finish_run(run_id, "abandoned", datetime.now(UTC))  # type: ignore[arg-type]
+
+
+def _reconnects() -> list[FeedReconnect]:
+    return [
+        FeedReconnect("coinbase", 1, "ConnectionClosedError: no close frame", 1.25, True),
+        FeedReconnect("coinbase", 2, "TimeoutError: timed out", 0.5, False),
+    ]
+
+
+def test_reconnects_are_stored_per_run_and_source(db: ResultsDB) -> None:
+    run_id = db.begin_run(datetime.now(UTC), "buy", 0.01, 600, FEES, RULES, "abc123")
+    db.add_reconnects(run_id, "feed", _reconnects())
+    db.add_reconnects(run_id, "recorder", _reconnects()[:1])
+    rows = db.connection.execute(
+        "SELECT source, venue, attempt, reason, downtime_s, recovered FROM feed_reconnects "
+        "WHERE run_id = ? ORDER BY id",
+        (run_id,),
+    ).fetchall()
+    assert rows == [
+        ("feed", "coinbase", 1, "ConnectionClosedError: no close frame", 1.25, 1),
+        ("feed", "coinbase", 2, "TimeoutError: timed out", 0.5, 0),
+        ("recorder", "coinbase", 1, "ConnectionClosedError: no close frame", 1.25, 1),
+    ]
+
+
+def test_reconnect_rows_are_append_only(db: ResultsDB) -> None:
+    run_id = db.begin_run(datetime.now(UTC), "buy", 0.01, 600, FEES, RULES, "abc123")
+    db.add_reconnects(run_id, "feed", _reconnects())
+    with pytest.raises(sqlite3.IntegrityError, match="append-only"):
+        db.connection.execute("UPDATE feed_reconnects SET attempt = 9 WHERE id = 1")
+    with pytest.raises(sqlite3.IntegrityError, match="append-only"):
+        db.connection.execute("DELETE FROM feed_reconnects WHERE id = 1")
+
+
+def test_reconnect_source_is_checked(db: ResultsDB) -> None:
+    run_id = db.begin_run(datetime.now(UTC), "buy", 0.01, 600, FEES, RULES, "abc123")
+    with pytest.raises(ResultsDBError, match="source"):
+        db.add_reconnects(run_id, "other", _reconnects())  # type: ignore[arg-type]
+
+
+def test_migrating_a_version_one_database_keeps_its_rows(tmp_path: Path) -> None:
+    path = tmp_path / "v1.db"
+    old = sqlite3.connect(path)
+    old.executescript(
+        (Path(__file__).parents[1] / "slipstream/db/migrations/001_initial.sql").read_text()
+    )
+    old.execute(
+        "INSERT INTO runs (started_at, status, side, qty, duration_s, fees_json, "
+        "venue_rules_json) VALUES ('2026-09-27T10:00:00', 'completed', 'buy', 0.01, 600, '{}', "
+        "'{}')"
+    )
+    old.commit()
+    old.close()
+    db = _db(path)
+    try:
+        versions = [row[0] for row in db.connection.execute("SELECT version FROM schema_version")]
+        runs = db.connection.execute("SELECT COUNT(*) FROM runs").fetchone()[0]
+        db.add_reconnects(1, "feed", _reconnects())
+    finally:
+        db.close()
+    assert sorted(versions) == [1, 2]
+    assert runs == 1

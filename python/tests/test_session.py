@@ -591,3 +591,71 @@ def test_fill_log_carries_venue_and_fee(caplog: pytest.LogCaptureFixture) -> Non
     assert fields[0]["venue"] == "coinbase"
     assert fields[0]["fee"] == 0.02
     assert [(f.venue, f.fee) for f in session.fills] == [("coinbase", 0.02)]
+
+
+def _marker_line(recv_ns: int, venue: str = "kraken") -> str:
+    return json.dumps(
+        {"recv_ns": recv_ns, "venue": venue, "kind": "reconnect", "attempt": 1, "reason": "x"}
+    )
+
+
+def test_no_fill_uses_a_book_from_before_a_recorded_reconnect(
+    engine_address: str, tmp_path: Path
+) -> None:
+    path = tmp_path / "s.jsonl"
+    lines = [
+        json.dumps({"recv_ns": _T0, "venue": "kraken", "msg": _snapshot()}),
+        _marker_line(_T0 + 1 * _SEC),
+        json.dumps({"recv_ns": _T0 + 2 * _SEC, "venue": "kraken", "msg": {"channel": "heartbeat"}}),
+        json.dumps({"recv_ns": _T0 + 4 * _SEC, "venue": "kraken", "msg": {"channel": "heartbeat"}}),
+        json.dumps({"recv_ns": _T0 + 5 * _SEC, "venue": "kraken", "msg": _snapshot()}),
+    ]
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    result = _run(engine_address, [OrderSpec("gap-1", "buy", 0.03, 6, 3)], read_replay(path))
+
+    assert [f.ts_ns for f in result.fills] == [_T0, _T0 + 5 * _SEC]
+    assert [f.qty for f in result.fills] == pytest.approx([0.01, 0.02])
+    assert result.statuses[0].state == pb.ORDER_STATE_COMPLETED
+
+
+def test_a_reconnect_marker_empties_the_venue_book_at_its_time() -> None:
+    session = _session(_RecordingChannel(), venues=("kraken", "coinbase"))
+    events = session._reconnected("coinbase", 777)
+    assert _kinds(events) == ["book"]
+    book = events[0].book
+    assert (book.venue, book.recv_ns, book.is_snapshot) == ("coinbase", 777, True)
+    assert list(book.bids) == [] and list(book.asks) == []
+
+
+def test_orders_wait_for_a_new_snapshot_from_a_venue_that_reconnected() -> None:
+    session = _session(_RecordingChannel(), venues=("kraken", "coinbase"))
+    session._events(_kraken_snapshot(), 100, "kraken")
+    session._reconnected("kraken", 150)
+    _, due = session._events(_coinbase_snapshot(), 200, "coinbase")
+    assert not due
+    _, due = session._events(_kraken_snapshot(), 300, "kraken")
+    assert due
+
+
+def test_a_reconnect_drops_the_local_book_before_submission() -> None:
+    session = _session(_RecordingChannel())
+    session._events(_kraken_snapshot(), 100, "kraken")
+    session._reconnected("kraken", 150)
+    assert session._books["kraken"].bids() == ()
+
+
+def test_coinbase_sequence_numbers_restart_after_a_reconnect() -> None:
+    session = _session(_RecordingChannel(), venues=("coinbase",))
+    session._events(_coinbase_snapshot(), 100, "coinbase")
+    session._reconnected("coinbase", 150)
+    events, due = session._events(_coinbase_snapshot(), 200, "coinbase")
+    assert _kinds(events) == ["book"]
+    assert due
+
+
+def test_a_book_update_before_the_snapshot_after_a_reconnect_is_rejected() -> None:
+    session = _session(_RecordingChannel())
+    session._events(_kraken_snapshot(), 100, "kraken")
+    session._reconnected("kraken", 150)
+    with pytest.raises(MarketDataError, match="before the snapshot"):
+        session._events(_kraken_delta(), 200, "kraken")

@@ -4,6 +4,25 @@
 #include <iterator>
 
 namespace slipstream {
+namespace {
+
+template <typename Map>
+std::vector<BookLevel> versioned(const Map& side) {
+    std::vector<BookLevel> levels;
+    levels.reserve(side.size());
+    for (const auto& [price, slot] : side) levels.push_back({price, slot.qty, slot.version});
+    return levels;
+}
+
+template <typename Map>
+std::vector<Level> plain(const Map& side) {
+    std::vector<Level> levels;
+    levels.reserve(side.size());
+    for (const auto& [price, slot] : side) levels.push_back({price, slot.qty});
+    return levels;
+}
+
+}  // namespace
 
 OrderBook::OrderBook(std::size_t max_depth) : max_depth_(max_depth) {}
 
@@ -20,20 +39,20 @@ bool OrderBook::apply_snapshot(const std::vector<Level>& bids, const std::vector
     if (!valid_levels(bids, false) || !valid_levels(asks, false)) return false;
     bids_.clear();
     asks_.clear();
-    for (const auto& level : bids) bids_[level.price] = level.qty;
-    for (const auto& level : asks) asks_[level.price] = level.qty;
+    for (const auto& level : bids) bids_[level.price] = {level.qty, ++next_version_};
+    for (const auto& level : asks) asks_[level.price] = {level.qty, ++next_version_};
     truncate();
     return true;
 }
 
 bool OrderBook::apply_update(const std::vector<Level>& bids, const std::vector<Level>& asks) {
     if (!valid_levels(bids, true) || !valid_levels(asks, true)) return false;
-    auto apply = [](auto& side, const std::vector<Level>& levels) {
+    auto apply = [this](auto& side, const std::vector<Level>& levels) {
         for (const auto& level : levels) {
             if (level.qty == 0.0) {
                 side.erase(level.price);
             } else {
-                side[level.price] = level.qty;
+                side[level.price] = {level.qty, ++next_version_};
             }
         }
     };
@@ -50,12 +69,12 @@ void OrderBook::truncate() {
 
 std::optional<Level> OrderBook::best_bid() const {
     if (bids_.empty()) return std::nullopt;
-    return Level{bids_.begin()->first, bids_.begin()->second};
+    return Level{bids_.begin()->first, bids_.begin()->second.qty};
 }
 
 std::optional<Level> OrderBook::best_ask() const {
     if (asks_.empty()) return std::nullopt;
-    return Level{asks_.begin()->first, asks_.begin()->second};
+    return Level{asks_.begin()->first, asks_.begin()->second.qty};
 }
 
 std::optional<double> OrderBook::mid() const {
@@ -66,13 +85,11 @@ std::optional<double> OrderBook::mid() const {
 }
 
 std::vector<Level> OrderBook::liquidity_for(Side taker_side) const {
-    std::vector<Level> levels;
-    if (taker_side == Side::Buy) {
-        for (const auto& [price, qty] : asks_) levels.push_back({price, qty});
-    } else {
-        for (const auto& [price, qty] : bids_) levels.push_back({price, qty});
-    }
-    return levels;
+    return taker_side == Side::Buy ? plain(asks_) : plain(bids_);
+}
+
+std::vector<BookLevel> OrderBook::versioned_liquidity_for(Side taker_side) const {
+    return taker_side == Side::Buy ? versioned(asks_) : versioned(bids_);
 }
 
 bool OrderBook::empty() const { return bids_.empty() && asks_.empty(); }
