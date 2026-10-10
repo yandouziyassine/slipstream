@@ -8,16 +8,31 @@ import hashlib
 import logging
 import os
 import shutil
+import signal
 import subprocess
 import sys
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from contextlib import AbstractContextManager, contextmanager
+from contextlib import (
+    AbstractAsyncContextManager,
+    AbstractContextManager,
+    AsyncExitStack,
+    contextmanager,
+)
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
+from types import FrameType
 
 from slipstream.calibration import CalibrationData, CalibrationError
 from slipstream.db import ResultsDB
+from slipstream.engine_process import (
+    EngineConfigError,
+    EngineStartError,
+    RunningEngine,
+    running_engine,
+    validate_engine_binary,
+    validate_venue_flag,
+)
 from slipstream.engine_stream import EngineChannel, EngineError
 from slipstream.kraken_rest import fetch_ohlc, parse_ohlc
 from slipstream.live import LiveFeedError
@@ -40,6 +55,13 @@ from slipstream.venue_ws import FeedReconnect
 
 ALGOS: tuple[Algo, ...] = ("twap", "vwap", "pov", "almgren_chriss")
 
+# Paper risk limits of each size run's engine. Every size gets a fresh engine, so the position
+# limit only has to hold one size's orders: all algorithms at the largest size, plus headroom.
+HOURLY_MAX_ORDER_NOTIONAL = 50000
+HOURLY_MAX_POSITION = 1.5
+
+_BUILD_DIR = Path(__file__).resolve().parents[2] / "build"
+
 # Errors that can happen once a run is in progress: recorded as a failed run, never raised out.
 _RUN_ERRORS = (
     EngineError,
@@ -49,20 +71,13 @@ _RUN_ERRORS = (
     LiveFeedError,
     OSError,
 )
-# Errors that mean the hour never got started (no engine, venue rules or calibration data
-# unreachable): these must propagate, since there is no run row yet to attach them to.
-_HOUR_SETUP_ERRORS = (EngineError, MarketDataError, CalibrationError, OSError)
+# Errors that stop one size's engine from becoming usable: recorded as that size's failed run.
+_ENGINE_SETUP_ERRORS = (EngineStartError, EngineError)
+# Errors that mean the hour never got started (venue rules or calibration data unreachable):
+# these must propagate, since there is no run row yet to attach them to.
+_HOUR_SETUP_ERRORS = (MarketDataError, CalibrationError, OSError)
 
-# Closing one size's Subscribe stream and the engine noticing the cancellation (it polls every
-# 50ms; see service.h's kSubscribePoll) race with the next size opening a new one on the same
-# engine connection. Retry a "another subscriber is active" rejection a few times before giving
-# up, rather than failing a run over a timing gap that always closes within a couple of polls.
-_SUBSCRIBER_CONFLICT_RETRIES = 5
-_SUBSCRIBER_CONFLICT_DELAY_S = 0.1
-
-
-def _is_transient_subscriber_conflict(exc: BaseException) -> bool:
-    return isinstance(exc, EngineError) and "another subscriber is active" in str(exc)
+EngineLauncher = Callable[[float], AbstractAsyncContextManager[RunningEngine]]
 
 
 def _default_data_dir() -> Path:
@@ -182,60 +197,41 @@ async def _run_size(
     run_id = db.begin_run(now, side, size, cfg.duration_s, fees, venue_rules, git_commit)
     rec_path = _recording_path(cfg.data_dir, now, size)
     specs = _order_specs(now, side, size, cfg)
-    failed = False
     exc: BaseException | None = None
     session: LiveSession | None = None
     recorder_reconnects: list[FeedReconnect] = []
-    for attempt in range(_SUBSCRIBER_CONFLICT_RETRIES):
-        failed = False
-        session = None
-        recorder_reconnects = []
-        try:
-            rec_path.parent.mkdir(parents=True, exist_ok=True)
-            with gzip.open(rec_path, "wt", encoding="utf-8") as handle:
-                session = LiveSession(
-                    channel,
-                    specs,
-                    cfg.symbol,
-                    log,
-                    calibration,
-                    venues=cfg.venues,
-                    fee_bps=fees,
-                    book_depth=cfg.book_depth,
-                )
-                async with asyncio.TaskGroup() as group:
-                    record_task = group.create_task(
-                        record_stream(
-                            handle,
-                            cfg.symbol,
-                            cfg.book_depth,
-                            cfg.duration_s,
-                            venues=cfg.venues,
-                            urls=urls,
-                            on_reconnect=_recorder_reconnect_logger(log, recorder_reconnects),
-                        )
+    try:
+        rec_path.parent.mkdir(parents=True, exist_ok=True)
+        with gzip.open(rec_path, "wt", encoding="utf-8") as handle:
+            session = LiveSession(
+                channel,
+                specs,
+                cfg.symbol,
+                log,
+                calibration,
+                venues=cfg.venues,
+                fee_bps=fees,
+                book_depth=cfg.book_depth,
+            )
+            async with asyncio.TaskGroup() as group:
+                record_task = group.create_task(
+                    record_stream(
+                        handle,
+                        cfg.symbol,
+                        cfg.book_depth,
+                        cfg.duration_s,
+                        venues=cfg.venues,
+                        urls=urls,
+                        on_reconnect=_recorder_reconnect_logger(log, recorder_reconnects),
                     )
-                    session_task = group.create_task(session.run(engine_address, urls=urls))
-        except* _RUN_ERRORS as errors:
-            exc = errors.exceptions[0]
-            failed = True
-        if not failed:
-            break
-        last_attempt = attempt + 1 == _SUBSCRIBER_CONFLICT_RETRIES
-        if not last_attempt and exc is not None and _is_transient_subscriber_conflict(exc):
-            await asyncio.sleep(_SUBSCRIBER_CONFLICT_DELAY_S)
-            continue
-        break
+                )
+                session_task = group.create_task(session.run(engine_address, urls=urls))
+    except* _RUN_ERRORS as errors:
+        exc = errors.exceptions[0]
     db.add_reconnects(run_id, "feed", session.reconnects if session is not None else [])
     db.add_reconnects(run_id, "recorder", recorder_reconnects)
-    if failed:
-        if exc is None:
-            raise RuntimeError("unreachable: failed is True but no exception was recorded")
-        log.error(
-            f"run {run_id} failed: {exc}",
-            extra={"fields": {"event": "run_failed", "run_id": run_id, "size": size}},
-        )
-        db.finish_run(run_id, "failed", datetime.now(UTC), error=str(exc)[:500])
+    if exc is not None:
+        _fail_run(db, log, run_id, size, exc)
         return run_id
     record_task.result()
     result = session_task.result()
@@ -250,12 +246,70 @@ async def _run_size(
     return run_id
 
 
+def _fail_run(
+    db: ResultsDB, log: logging.Logger, run_id: int, size: float, exc: BaseException
+) -> None:
+    log.error(
+        f"run {run_id} failed: {exc}",
+        extra={"fields": {"event": "run_failed", "run_id": run_id, "size": size}},
+    )
+    db.finish_run(run_id, "failed", datetime.now(UTC), error=str(exc)[:500])
+
+
+async def _run_size_on_own_engine(
+    launch: EngineLauncher,
+    cfg: CollectConfig,
+    now: datetime,
+    side: Side,
+    size: float,
+    venue_rules: Mapping[Venue, VenueRules],
+    calibration: CalibrationData,
+    git_commit: str | None,
+    db: ResultsDB,
+    log: logging.Logger,
+    urls: Mapping[Venue, str] | None,
+) -> int:
+    """One size run on an engine of its own, so no order, position or statistic left over by an
+    earlier size (e.g. orders still working after that run failed) can leak into this one."""
+    async with AsyncExitStack() as stack:
+        try:
+            engine = await stack.enter_async_context(launch(size))
+            log.info(
+                f"engine started on {engine.address}",
+                extra={"fields": {"event": "engine_started", "size": size, "pid": engine.pid}},
+            )
+            channel = EngineChannel(engine.address)
+            stack.push_async_callback(channel.close)
+            await channel.wait_ready()
+            await check_clock_mode(channel, pb.CLOCK_MODE_LIVE)
+            fees = await channel.venue_fees()
+        except _ENGINE_SETUP_ERRORS as exc:
+            run_id = db.begin_run(now, side, size, cfg.duration_s, {}, venue_rules, git_commit)
+            _fail_run(db, log, run_id, size, exc)
+            return run_id
+        return await _run_size(
+            channel,
+            engine.address,
+            cfg,
+            now,
+            side,
+            size,
+            fees,
+            venue_rules,
+            calibration,
+            git_commit,
+            db,
+            log,
+            urls,
+        )
+
+
 def _fetch_live_calibration(symbol: str) -> CalibrationData:
     return CalibrationData(parse_ohlc(fetch_ohlc(symbol, 15)), parse_ohlc(fetch_ohlc(symbol, 1)))
 
 
 async def run_hour(
-    engine_address: str,
+    launch: EngineLauncher,
     cfg: CollectConfig,
     now: datetime,
     git_commit: str | None,
@@ -266,34 +320,54 @@ async def run_hour(
     fetch_calibration: Callable[[str], CalibrationData] = _fetch_live_calibration,
 ) -> list[int]:
     side = side_for(now.hour)
-    channel = EngineChannel(engine_address)
-    run_ids: list[int] = []
+    venue_rules = fetch_rules(cfg.venues, cfg.symbol)
+    calibration = fetch_calibration(cfg.symbol)
+    return [
+        await _run_size_on_own_engine(
+            launch, cfg, now, side, size, venue_rules, calibration, git_commit, db, log, urls
+        )
+        for size in cfg.sizes
+    ]
+
+
+def engine_argv(binary: Path, venue_flags: Sequence[str]) -> list[str]:
+    argv = [
+        str(binary),
+        "--listen",
+        "127.0.0.1:0",
+        "--clock",
+        "live",
+        "--max-order-notional",
+        str(HOURLY_MAX_ORDER_NOTIONAL),
+        "--max-position",
+        str(HOURLY_MAX_POSITION),
+    ]
+    for flag in venue_flags:
+        argv += ["--venue", flag]
+    return argv
+
+
+def engine_launcher(argv: Sequence[str], log_dir: Path, now: datetime) -> EngineLauncher:
+    def launch(size: float) -> AbstractAsyncContextManager[RunningEngine]:
+        log_path = log_dir / f"engine-{now:%Y-%m-%d-%H%M%S}-{_qty_token(size)}.log"
+        return running_engine(argv, log_path)
+
+    return launch
+
+
+def _raise_exit(signum: int, frame: FrameType | None) -> None:
+    raise SystemExit(128 + signum)
+
+
+@contextmanager
+def sigterm_exits() -> Iterator[None]:
+    """Turns SIGTERM into SystemExit, so `finally` blocks still stop the engine of the size run
+    in progress instead of leaving it running as an orphan."""
+    previous = signal.signal(signal.SIGTERM, _raise_exit)
     try:
-        await channel.wait_ready()
-        await check_clock_mode(channel, pb.CLOCK_MODE_LIVE)
-        fees = await channel.venue_fees()
-        venue_rules = fetch_rules(cfg.venues, cfg.symbol)
-        calibration = fetch_calibration(cfg.symbol)
-        for size in cfg.sizes:
-            run_id = await _run_size(
-                channel,
-                engine_address,
-                cfg,
-                now,
-                side,
-                size,
-                fees,
-                venue_rules,
-                calibration,
-                git_commit,
-                db,
-                log,
-                urls,
-            )
-            run_ids.append(run_id)
+        yield
     finally:
-        await channel.close()
-    return run_ids
+        signal.signal(signal.SIGTERM, previous)
 
 
 def _git_commit(repo_root: Path | None = None) -> str | None:
@@ -388,17 +462,48 @@ def _configure_file_logging(path: Path) -> logging.Logger:
     return logger
 
 
+def _engine_binary(value: str) -> Path:
+    try:
+        return validate_engine_binary(Path(value), _BUILD_DIR)
+    except EngineConfigError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
+
+
+def _venue_flag(value: str) -> str:
+    try:
+        return validate_venue_flag(value)
+    except EngineConfigError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="slipstream.collect")
     commands = parser.add_subparsers(dest="command", required=True)
     run = commands.add_parser("run", help="collect one hour of paper-trading evidence")
-    run.add_argument("--engine", required=True, help="engine loopback host:port")
+    run.add_argument(
+        "--engine-binary",
+        required=True,
+        type=_engine_binary,
+        help="slipstream_engine under the repo's build/ dir; one is started per size run",
+    )
+    run.add_argument(
+        "--venue",
+        dest="venue_flags",
+        action="append",
+        required=True,
+        type=_venue_flag,
+        help="engine --venue value as printed by `slipstream.cli venue-flags`; one per venue",
+    )
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
     cfg = CollectConfig()
+    flag_venues = sorted(flag.split(":", 1)[0] for flag in args.venue_flags)
+    if flag_venues != sorted(cfg.venues):
+        parser.error(f"--venue must be given once for each of {', '.join(cfg.venues)}")
     cfg.data_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     cfg.data_dir.chmod(0o700)
     (cfg.data_dir / "logs").mkdir(parents=True, exist_ok=True)
@@ -426,8 +531,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                     f"marked {abandoned} run(s) abandoned",
                     extra={"fields": {"event": "abandoned", "count": abandoned}},
                 )
+            launch = engine_launcher(
+                engine_argv(args.engine_binary, args.venue_flags), cfg.data_dir / "logs", now
+            )
             try:
-                run_ids = asyncio.run(run_hour(args.engine, cfg, now, _git_commit(), db, log))
+                with sigterm_exits():
+                    run_ids = asyncio.run(run_hour(launch, cfg, now, _git_commit(), db, log))
             except _HOUR_SETUP_ERRORS as exc:
                 log.error(str(exc), extra={"fields": {"event": "run_hour_failed"}})
                 return 1
