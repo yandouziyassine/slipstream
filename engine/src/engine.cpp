@@ -257,6 +257,8 @@ SubmitResult Engine::submit(const ParentOrderRequest& request, const ScheduleSpe
                                   std::vector<double>(venues_.size(), 0.0),
                                   std::vector<char>(venues_.size(), 1), std::move(taken),
                                   std::vector<ConsumptionOverlay>(venues_.size())});
+    // The arrival mid was judged at this time, so the no-market timer starts here at the latest.
+    last_market_ns_ = std::max({last_market_ns_, request.start_ns, latest_ns_});
     return {true, ""};
 }
 
@@ -265,6 +267,9 @@ StepOutput Engine::step(std::int64_t now_ns) {
     latest_ns_ = std::max(latest_ns_, now_ns);
     StepOutput out;
     const auto ref_price = consolidated_mid_locked(now_ns);
+    if (ref_price) last_market_ns_ = std::max(last_market_ns_, latest_ns_);
+    // Both times are non-negative, so the difference cannot overflow.
+    const bool no_market = latest_ns_ - last_market_ns_ > kNoMarketHaltNs;
     const MarketState market{market_volume_};
     for (auto& order : orders_) {
         if (order.state != OrderState::Working) continue;
@@ -273,6 +278,13 @@ StepOutput Engine::step(std::int64_t now_ns) {
         if (order.state == OrderState::Working && order.schedule->expired(now_ns)) {
             order.state = OrderState::Halted;
             order.halt_reason = "deadline reached";
+        }
+        // Fail safe: without a market, a returning venue would let the next slice catch up the
+        // whole missed amount at once.
+        if (order.state == OrderState::Working && no_market) {
+            order.state = OrderState::Halted;
+            static_assert(kNoMarketHaltNs == 30'000'000'000, "keep the halt reason's 30s in sync");
+            order.halt_reason = "no fresh market data for 30s";
         }
         if (order.state != OrderState::Working) release_taken(order);
         if (order.state != OrderState::Working || order.filled_qty != filled_before) {

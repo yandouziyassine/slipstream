@@ -125,6 +125,8 @@ public:
     // kHeartbeatGraceNs after the venue's last real book change.
     bool apply_heartbeat(std::size_t venue, std::int64_t now_ns);
     static constexpr std::int64_t kHeartbeatGraceNs = 30'000'000'000;
+    // Working orders halt once no step has seen a usable mid for longer than this.
+    static constexpr std::int64_t kNoMarketHaltNs = 30'000'000'000;
 
     SubmitResult submit(const ParentOrderRequest& request, const ScheduleSpec& spec = TwapSpec{});
     StepOutput step(std::int64_t now_ns);
@@ -192,6 +194,8 @@ private:
     std::int64_t stale_ns_;
     double max_deviation_;
     std::int64_t latest_ns_ = 0;
+    // Engine time a usable mid was last seen, by a step or by an accepted submit.
+    std::int64_t last_market_ns_ = 0;
     RiskCheck risk_;
     double position_ = 0.0;
     double market_volume_ = 0.0;
