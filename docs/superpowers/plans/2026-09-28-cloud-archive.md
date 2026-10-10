@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Status: DRAFT — do not execute until the user approves the spec** (`docs/superpowers/specs/2026-09-28-cloud-archive-design.md`) and has answered its open questions. The answers may change T3, T8 and T12.
+**Status: approved 2026-10-10; ready to execute.** Answers are in the spec's section 13. Local migration is `003_*` (002 is taken by feed reconnects).
 
 **Goal:** Build an off-site, free copy of the evidence:
 - finished runs go to Supabase Postgres every hour;
@@ -38,7 +38,7 @@ Collection is never slowed down or blocked.
 |---|---|---|---|
 | 0 | **T0** deps and Postgres tooling | `python/requirements-dev.in`, `python/requirements-dev.txt`, `python/pyproject.toml`, `scripts/setup_wsl.sh`, `scripts/ci.sh`, `.github/workflows/ci.yml` | — |
 | 1 | **T1** shared redaction | `python/slipstream/redaction.py`, `python/slipstream/site/render.py` (import swap only), `python/tests/test_redaction.py` | — |
-| 1 | **T2** migration 002 and archive DB methods | `python/slipstream/db/migrations/002_cloud_archive.sql`, `python/slipstream/db/results_db.py`, `python/tests/test_results_db_archive.py` | — |
+| 1 | **T2** migration 003 and archive DB methods | `python/slipstream/db/migrations/003_cloud_archive.sql`, `python/slipstream/db/results_db.py`, `python/tests/test_results_db_archive.py` | — |
 | 1 | **T3** Supabase schema and the Postgres fixture | `cloud/supabase/001_schema.sql`, `python/tests/conftest.py` (append the `pg_cluster` fixture only), `python/tests/pg_cluster.py`, `python/tests/test_supabase_schema.py` | T0 |
 | 1 | **T4** cloud settings and the enable switch | `python/slipstream/cloud/__init__.py`, `python/slipstream/cloud/settings.py`, `python/tests/test_cloud_settings.py` | — |
 | 1 | **T9** Hub adapter | `python/slipstream/cloud/hub.py`, `python/tests/test_hub.py` | T0 |

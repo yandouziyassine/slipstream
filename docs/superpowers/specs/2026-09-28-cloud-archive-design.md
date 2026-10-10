@@ -1,7 +1,7 @@
 # Cloud Archive: Supabase Results and Hugging Face Recordings — Design
 
 Date: 2026-09-28
-Status: **DRAFT — awaiting user approval.** The user chose the services (Supabase for results, Hugging Face Datasets for recordings). Every detail below is a proposal until the user approves it in chat.
+Status: **Approved by the user on 2026-10-10** ("storage in supabase hugging face"; "keep all the data clear and well maintained, we will put them public in the future but not now"). Answers to section 13 are recorded there.
 Scope: an off-site, free, online copy of the evidence the hourly collector produces (see `2026-09-27-collector-and-leaderboard-design.md`). Builds on the storage budget from PR #26 (`python/slipstream/storage.py`).
 
 ## 1. Goal
@@ -198,7 +198,7 @@ class HubClient(Protocol):
 
 ## 7. Local changes
 
-### 7.1 Migration `002_cloud_archive.sql`
+### 7.1 Migration `003_cloud_archive.sql`
 
 ```sql
 CREATE TABLE archive_days (
@@ -429,3 +429,13 @@ At about 130 MB/day, 7 days is about 0.9 GB, close to the 1 GB default cap. In p
 - [R16] https://github.com/huggingface/huggingface_hub/blob/main/src/huggingface_hub/hf_api.py (`RepoFile`, `BlobLfsInfo`, `get_paths_info`)
 - [R17] https://www.coinbase.com/legal/market_data (the page returns HTTP 403 to automated fetches; quoted from its indexed text, "last updated August 6, 2026")
 - [R18] https://docs-legacy.kraken.com/api/docs/guides/global-intro/
+
+### Answers (2026-10-10)
+1. Dataset visibility: **private**. Public later, by a separate decision.
+2. Licensing: nothing is published (dataset private, no `anon` access, research page unpublished) until the user decides; no emails yet.
+3. Fills: summary in Postgres plus a daily gzipped CSV on HF (the recommended option).
+4. `anon` access: only when the API ships.
+5. Private quota (~2 years): decide when it approaches.
+6. Supabase region: East US (North Virginia), nearest to the user.
+7. One `cloud.enabled` flag for both services.
+8. Local migration numbering: `002_feed_reconnects.sql` already exists on main (feed reconnect), so this plan's local migration is **003**.
