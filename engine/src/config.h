@@ -1,11 +1,9 @@
 #pragma once
 
-#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <string>
-#include <string_view>
 #include <vector>
 
 #include "risk.h"
@@ -19,8 +17,6 @@ struct VenueConfig {
     double qty_step = 0.0;
     double min_notional = 0.0;
 };
-
-constexpr std::array<std::string_view, 2> kKnownVenues{"kraken", "coinbase"};
 
 // Live: the engine stamps events with its own clock and ignores client-supplied time.
 // Replay: recorded times drive the clock; there is no timer.
