@@ -4,7 +4,7 @@ import dataclasses
 import json
 import sqlite3
 from collections.abc import Mapping, Sequence
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from importlib import resources
 from pathlib import Path
 from typing import Literal
@@ -20,6 +20,36 @@ ReconnectSource = Literal["feed", "recorder"]
 
 class ResultsDBError(RuntimeError):
     pass
+
+
+@dataclasses.dataclass(frozen=True)
+class RecordingUpload:
+    run_id: int
+    path_in_repo: str
+    sha256: str
+    bytes: int
+
+
+@dataclasses.dataclass(frozen=True)
+class DayRecording:
+    run_id: int
+    path: Path
+    sha256: str
+    started_at: datetime
+    recorded_at: datetime
+    qty: float
+
+
+@dataclasses.dataclass(frozen=True)
+class FillRow:
+    fill_id: int
+    run_id: int
+    algo: str
+    venue: str
+    qty: float
+    price: float
+    fee: float
+    ts_ns: int
 
 
 def _iso(moment: datetime) -> str:
@@ -289,14 +319,133 @@ class ResultsDB:
         ).fetchall()
         return [(run_id, Path(path)) for run_id, path in rows]
 
-    def active_recordings(self) -> list[tuple[int, Path]]:
-        """Every recording not yet marked deleted, oldest first."""
-        rows = self._conn.execute(
+    def active_recordings(self, uploaded_first: bool = False) -> list[tuple[int, Path]]:
+        """Every recording not yet marked deleted, oldest first. With `uploaded_first`, the
+        recordings that have a verified off-site copy come first (oldest first), then the rest."""
+        sql = (
             "SELECT run_id, path FROM recordings "
             "WHERE run_id NOT IN (SELECT run_id FROM recording_deletions) "
-            "ORDER BY recorded_at ASC"
+        )
+        if uploaded_first:
+            sql += "ORDER BY (run_id NOT IN (SELECT run_id FROM recording_uploads)), recorded_at"
+        else:
+            sql += "ORDER BY recorded_at ASC"
+        rows = self._conn.execute(sql).fetchall()
+        return [(run_id, Path(path)) for run_id, path in rows]
+
+    def is_uploaded(self, run_id: int) -> bool:
+        row = self._conn.execute(
+            "SELECT 1 FROM recording_uploads WHERE run_id = ?", (run_id,)
+        ).fetchone()
+        return row is not None
+
+    def uploaded_recordings_older_than(self, now: datetime, days: int) -> list[tuple[int, Path]]:
+        """Recordings with a verified off-site copy, not yet marked deleted, older than the
+        cutoff, oldest first."""
+        cutoff = _iso(now - timedelta(days=days))
+        rows = self._conn.execute(
+            "SELECT run_id, path FROM recordings "
+            "WHERE recorded_at < ? AND run_id NOT IN (SELECT run_id FROM recording_deletions) "
+            "AND run_id IN (SELECT run_id FROM recording_uploads) "
+            "ORDER BY recorded_at ASC",
+            (cutoff,),
         ).fetchall()
         return [(run_id, Path(path)) for run_id, path in rows]
+
+    def unarchived_recordings_older_than(self, now: datetime, days: int) -> int:
+        """How many recordings older than the cutoff have no verified off-site copy yet."""
+        cutoff = _iso(now - timedelta(days=days))
+        row = self._conn.execute(
+            "SELECT COUNT(*) FROM recordings "
+            "WHERE recorded_at < ? AND run_id NOT IN (SELECT run_id FROM recording_deletions) "
+            "AND run_id NOT IN (SELECT run_id FROM recording_uploads)",
+            (cutoff,),
+        ).fetchone()
+        return int(row[0])
+
+    def archive_ready_days(self, today: date) -> list[date]:
+        """UTC days before `today` with at least one run, no run still `started`, and no
+        archive row yet, oldest first."""
+        rows = self._conn.execute(
+            "SELECT substr(started_at, 1, 10) AS day FROM runs "
+            "WHERE day < ? AND day NOT IN (SELECT day FROM archive_days) "
+            "GROUP BY day HAVING SUM(status = 'started') = 0 ORDER BY day ASC",
+            (today.isoformat(),),
+        ).fetchall()
+        return [date.fromisoformat(row[0]) for row in rows]
+
+    def day_recordings(self, day: date) -> list[DayRecording]:
+        """The not-deleted recordings of runs that started on `day`, by run id."""
+        rows = self._conn.execute(
+            "SELECT recordings.run_id, recordings.path, recordings.sha256, runs.started_at, "
+            "recordings.recorded_at, runs.qty "
+            "FROM recordings JOIN runs ON runs.id = recordings.run_id "
+            "WHERE substr(runs.started_at, 1, 10) = ? "
+            "AND recordings.run_id NOT IN (SELECT run_id FROM recording_deletions) "
+            "ORDER BY recordings.run_id ASC",
+            (day.isoformat(),),
+        ).fetchall()
+        return [
+            DayRecording(run_id, Path(path), sha256, _parse_iso(started), _parse_iso(recorded), qty)
+            for run_id, path, sha256, started, recorded, qty in rows
+        ]
+
+    def day_fills(self, day: date) -> list[FillRow]:
+        """Every fill of the runs that started on `day`, by fill id."""
+        rows = self._conn.execute(
+            "SELECT fills.id, fills.run_id, fills.algo, fills.venue, fills.qty, fills.price, "
+            "fills.fee, fills.ts_ns "
+            "FROM fills JOIN runs ON runs.id = fills.run_id "
+            "WHERE substr(runs.started_at, 1, 10) = ? ORDER BY fills.id ASC",
+            (day.isoformat(),),
+        ).fetchall()
+        return [FillRow(*row) for row in rows]
+
+    def record_archive_day(
+        self,
+        day: date,
+        commit_oid: str,
+        manifest_path: str,
+        manifest_sha256: str,
+        fills_path: str,
+        fills_sha256: str,
+        fills_rows: int,
+        uploads: Sequence[RecordingUpload],
+        uploaded_at: datetime,
+    ) -> None:
+        """Record a verified off-site commit for `day`: its ledger row and one row per upload,
+        in one transaction."""
+        with self._conn:
+            cursor = self._conn.execute(
+                "INSERT INTO archive_days (day, commit_oid, manifest_path, manifest_sha256, "
+                "fills_path, fills_sha256, fills_rows, uploaded_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    day.isoformat(),
+                    commit_oid,
+                    manifest_path,
+                    manifest_sha256,
+                    fills_path,
+                    fills_sha256,
+                    fills_rows,
+                    _iso(uploaded_at),
+                ),
+            )
+            archive_day_id = cursor.lastrowid
+            self._conn.executemany(
+                "INSERT INTO recording_uploads (run_id, archive_day_id, path_in_repo, sha256, "
+                "bytes) VALUES (?, ?, ?, ?, ?)",
+                [
+                    (
+                        upload.run_id,
+                        archive_day_id,
+                        upload.path_in_repo,
+                        upload.sha256,
+                        upload.bytes,
+                    )
+                    for upload in uploads
+                ],
+            )
 
     def delete_recordings(self, run_ids: Sequence[int], now: datetime) -> None:
         """Record that the recordings for `run_ids` were deleted. The caller removes the files;

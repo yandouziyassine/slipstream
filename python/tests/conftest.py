@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 from hypothesis import settings
+from pg_cluster import pg_cluster, pg_server  # noqa: F401 - registers the Postgres fixtures
 
 from slipstream.calibration import CalibrationData
 from slipstream.engine_stream import EngineChannel

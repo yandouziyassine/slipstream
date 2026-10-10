@@ -95,7 +95,7 @@ def test_migrate_is_idempotent(tmp_path: Path) -> None:
     second.migrate()
     version_count = second.connection.execute("SELECT COUNT(*) FROM schema_version").fetchone()[0]
     second.close()
-    assert version_count == 2
+    assert version_count == 3
 
 
 @pytest.mark.parametrize("table", ["results", "fills", "engine_stats", "recordings"])
@@ -346,5 +346,5 @@ def test_migrating_a_version_one_database_keeps_its_rows(tmp_path: Path) -> None
         db.add_reconnects(1, "feed", _reconnects())
     finally:
         db.close()
-    assert sorted(versions) == [1, 2]
+    assert sorted(versions) == [1, 2, 3]
     assert runs == 1
