@@ -8,45 +8,34 @@ from dataclasses import dataclass
 
 from websockets.exceptions import WebSocketException
 
-from slipstream.coinbase import COINBASE_WS_URL, CoinbaseStream, subscribe_messages
-from slipstream.coinbase import MAX_MESSAGE_BYTES as COINBASE_MAX_BYTES
-from slipstream.kraken import (
-    KRAKEN_WS_URL,
-    KrakenStream,
-    subscribe_message,
-    subscribe_trades_message,
-)
-from slipstream.kraken import MAX_MESSAGE_BYTES as KRAKEN_MAX_BYTES
-from slipstream.kraken_checksum import BookChecksumError
-from slipstream.models import BookUpdate, TradeBatch, Venue
+from slipstream.models import BookUpdate, Venue
+from slipstream.venues.base import Parsed, Parser
+from slipstream.venues.registry import ADAPTERS, adapter
 
 IDLE_TIMEOUT_S = 30.0
 MAX_REASON_CHARS = 200
 
-Parser = Callable[[str | bytes], BookUpdate | TradeBatch | None]
+# Errors a fresh connection recovers from, such as a Kraken book checksum mismatch.
+_RESYNC_ERRORS = tuple(error for venue in ADAPTERS for error in venue.resync_errors)
 
 
 def endpoints(urls: Mapping[Venue, str] | None = None) -> dict[Venue, str]:
-    resolved: dict[Venue, str] = {"kraken": KRAKEN_WS_URL, "coinbase": COINBASE_WS_URL}
+    resolved: dict[Venue, str] = {venue.name: venue.ws_url for venue in ADAPTERS}
     resolved.update(urls or {})
     return resolved
 
 
 def max_message_bytes(venue: Venue) -> int:
-    return COINBASE_MAX_BYTES if venue == "coinbase" else KRAKEN_MAX_BYTES
+    return adapter(venue).max_message_bytes
 
 
 def subscriptions(venue: Venue, symbol: str, depth: int) -> list[str]:
-    if venue == "coinbase":
-        return subscribe_messages(symbol)
-    return [subscribe_message(symbol, depth), subscribe_trades_message(symbol)]
+    return adapter(venue).subscriptions(symbol, depth)
 
 
 def parser(venue: Venue, symbol: str, depth: int) -> Parser:
     """A fresh parser for one connection: sequence numbers and book checksums are per connection."""
-    if venue == "coinbase":
-        return CoinbaseStream(symbol, depth).parse
-    return KrakenStream(symbol, depth).parse
+    return adapter(venue).new_parser(symbol, depth)
 
 
 class IdleTimeoutError(ConnectionError):
@@ -86,8 +75,7 @@ class FeedReconnect:
 
 
 def is_reconnectable(error: BaseException) -> bool:
-    # A checksum mismatch is retried too: Kraken's documented recovery is a fresh snapshot.
-    return isinstance(error, (OSError, WebSocketException, BookChecksumError))
+    return isinstance(error, (OSError, WebSocketException, *_RESYNC_ERRORS))
 
 
 def describe(error: BaseException) -> str:
@@ -138,7 +126,7 @@ class ReconnectTracker:
         self._pending = (self._failures, describe(error), now)
         return self._policy.delay_s(self._failures, self._rng)
 
-    def received(self, update: BookUpdate | TradeBatch | None) -> None:
+    def received(self, update: Parsed) -> None:
         if self._pending is not None and isinstance(update, BookUpdate) and update.is_snapshot:
             self._settle(self._clock(), recovered=True)
 

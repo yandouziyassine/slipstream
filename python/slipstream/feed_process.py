@@ -22,7 +22,7 @@ from slipstream.engine_stream import (
     trade_event,
 )
 from slipstream.live import LiveFeedError
-from slipstream.models import VENUES, BookUpdate, MarketDataError, TradeBatch, Venue
+from slipstream.models import BookUpdate, MarketDataError, Venue
 from slipstream.v1 import execution_pb2 as pb
 from slipstream.venue_ws import (
     DEFAULT_RECONNECT,
@@ -39,6 +39,8 @@ from slipstream.venue_ws import (
     parser,
     subscriptions,
 )
+from slipstream.venues.base import Parsed, Reply
+from slipstream.venues.registry import VENUES
 
 _MAX_DETAIL_CHARS = 500
 _ENGINE_READY_TIMEOUT_S = 10.0
@@ -82,11 +84,9 @@ class FeedProcessError(LiveFeedError):
         self.detail = detail
 
 
-def market_event(
-    update: BookUpdate | TradeBatch | None, venue: Venue, symbol: str
-) -> pb.MarketEvent | None:
+def market_event(update: Parsed, venue: Venue, symbol: str) -> pb.MarketEvent | None:
     """The engine event for one parsed message, or None when there is nothing to send."""
-    if update is None:
+    if update is None or isinstance(update, Reply):
         return heartbeat_event(venue, None)
     if update.symbol != symbol:
         raise MarketDataError(f"unexpected symbol {update.symbol[:32]!r}")
@@ -154,6 +154,8 @@ async def _connection(
             except TimeoutError:
                 raise IdleTimeoutError(f"no market data from {venue} (idle timeout)") from None
             update = parse(raw)
+            if isinstance(update, Reply):
+                await ws.send(update.text)
             event = market_event(update, venue, symbol)
             if event is not None:
                 sink.send_nowait(event)

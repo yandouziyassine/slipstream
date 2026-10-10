@@ -28,6 +28,7 @@ from slipstream.venue_ws import (
     parser,
     subscriptions,
 )
+from slipstream.venues.base import Reply
 
 _WRITE_QUEUE_MAXSIZE = 1024
 
@@ -171,6 +172,8 @@ async def record_stream(
                 recv_ns = now()
                 text = _decode(raw)
                 update = validate(text)
+                if isinstance(update, Reply):
+                    await ws.send(update.text)
                 await writer.put(_encode(venue, recv_ns, text))
                 written += 1
                 tracker.received(update)
