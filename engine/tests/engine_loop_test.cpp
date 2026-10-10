@@ -255,6 +255,26 @@ TEST_F(EngineLoopTest, ReplayTradesAndHeartbeatsAdvanceTimeToTheirRecvNs) {
     EXPECT_EQ(loop.inspect([](Engine&, const LoopView& view) { return view.now_ns; }), 3 * kSec);
 }
 
+TEST_F(EngineLoopTest, ReplaySubscriberSeesTheHaltWhenNoVenueIsFreshFor30s) {
+    EngineLoop loop(engine, ClockMode::Replay);
+    ASSERT_TRUE(loop.push(deep_book(kSec)));
+    wait_for_events(loop, 1);
+    auto subscriber = loop.subscribe();
+    ASSERT_TRUE(
+        loop.submit_and_step({"o", Side::Buy, 1.0, kSec, 100 * kSec, 4}, TwapSpec{}).accepted);
+    ASSERT_EQ(fills_of(drain(*subscriber)).size(), 1u);
+
+    ASSERT_TRUE(loop.push(tick(32 * kSec)));
+    wait_for_events(loop, 2);
+    const auto events = drain(*subscriber);
+    ASSERT_EQ(events.size(), 1u);
+    const auto* update = std::get_if<OrderUpdate>(&events[0].event);
+    ASSERT_NE(update, nullptr);
+    EXPECT_EQ(update->order_id, "o");
+    EXPECT_EQ(update->state, OrderState::Halted);
+    EXPECT_EQ(update->reason, "no fresh market data for 30s");
+}
+
 TEST_F(EngineLoopTest, SeqIsStrictlyIncreasingFromOne) {
     EngineLoop loop(engine, ClockMode::Replay);
     auto subscriber = loop.subscribe();
