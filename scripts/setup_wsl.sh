@@ -12,12 +12,16 @@ cd "$(dirname "$0")/.."
 PACKAGES=(
   cmake ninja-build pkg-config
   libgrpc++-dev libprotobuf-dev protobuf-compiler protobuf-compiler-grpc
-  libgtest-dev python3-venv
+  libgtest-dev python3-venv postgresql
 )
 
 echo "== Installing apt packages: ${PACKAGES[*]}"
 sudo apt-get update
 sudo apt-get install -y --no-install-recommends "${PACKAGES[@]}"
+
+# The package is only wanted for its binaries: the tests run their own throwaway cluster, so no
+# system service should be running.
+sudo systemctl disable --now postgresql 2>/dev/null || true
 
 VENV_DIR="$HOME/.venvs/slipstream"
 if [ ! -d "$VENV_DIR" ]; then
