@@ -102,23 +102,35 @@ def _http_get(
     return body
 
 
+def kraken_rules(symbol: str, fetch: Callable[[str], bytes]) -> VenueRules:
+    try:
+        query, result_key = _KRAKEN_PAIRS[symbol]
+    except KeyError as exc:
+        raise VenueRulesError(f"no venue rules mapping for {symbol!r}") from exc
+    return parse_kraken_rules(fetch(f"{KRAKEN_ASSET_PAIRS_URL}?pair={query}"), pair_key=result_key)
+
+
+def coinbase_rules(symbol: str, fetch: Callable[[str], bytes]) -> VenueRules:
+    try:
+        product = _COINBASE_PRODUCTS[symbol]
+    except KeyError as exc:
+        raise VenueRulesError(f"no venue rules mapping for {symbol!r}") from exc
+    return parse_coinbase_rules(fetch(f"{COINBASE_PRODUCT_URL}/{product}"), product=product)
+
+
 def fetch_venue_rules(
     venues: Sequence[Venue], symbol: str, fetch: Callable[[str], bytes] = _http_get
 ) -> dict[Venue, VenueRules]:
-    if symbol not in _KRAKEN_PAIRS or symbol not in _COINBASE_PRODUCTS:
-        raise VenueRulesError(f"no venue rules mapping for {symbol!r}")
-    kraken_query, kraken_result_key = _KRAKEN_PAIRS[symbol]
-    coinbase_product = _COINBASE_PRODUCTS[symbol]
+    # Imported here: the venue adapters import this module's parsers.
+    from slipstream.venues.registry import adapter
+
     rules: dict[Venue, VenueRules] = {}
     for venue in venues:
-        if venue == "kraken":
-            url = f"{KRAKEN_ASSET_PAIRS_URL}?pair={kraken_query}"
-            rules["kraken"] = parse_kraken_rules(fetch(url), pair_key=kraken_result_key)
-        elif venue == "coinbase":
-            url = f"{COINBASE_PRODUCT_URL}/{coinbase_product}"
-            rules["coinbase"] = parse_coinbase_rules(fetch(url), product=coinbase_product)
-        else:
-            raise VenueRulesError(f"unsupported venue {venue!r}")
+        try:
+            fetch_rules = adapter(venue).fetch_rules
+        except ValueError as exc:
+            raise VenueRulesError(f"unsupported venue {venue!r}") from exc
+        rules[venue] = fetch_rules(symbol, fetch)
     return rules
 
 

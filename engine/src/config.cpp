@@ -53,8 +53,13 @@ std::optional<std::size_t> parse_depth(const std::string& text) {
     return value;
 }
 
-bool is_known_venue(std::string_view name) {
-    return std::find(kKnownVenues.begin(), kKnownVenues.end(), name) != kKnownVenues.end();
+constexpr bool is_ascii_lower(char c) { return c >= 'a' && c <= 'z'; }
+
+// The Python venue registry is the allowlist; the engine only checks a name's shape.
+bool valid_venue_name(std::string_view name) {
+    if (name.empty() || name.size() > 16 || !is_ascii_lower(name.front())) return false;
+    return std::all_of(name.begin(), name.end(),
+                       [](char c) { return is_ascii_lower(c) || is_ascii_digit(c); });
 }
 
 // Plain decimal only: no sign, exponent, whitespace, nan or inf.
@@ -93,7 +98,7 @@ std::optional<VenueConfig> parse_venue(const std::string& value) {
     const auto colon = value.find(':');
     if (colon == std::string::npos) return std::nullopt;
     VenueConfig venue{value.substr(0, colon), 0.0};
-    if (!is_known_venue(venue.name)) return std::nullopt;
+    if (!valid_venue_name(venue.name)) return std::nullopt;
     std::array<bool, kVenueKeys.size()> seen{};
     std::string_view rest = std::string_view(value).substr(colon + 1);
     while (true) {
@@ -158,7 +163,7 @@ ParseResult parse_args(const std::vector<std::string>& args) {
             if (!parsed) {
                 return {std::nullopt,
                         "invalid --venue (name:fee_bps=F[,min_qty=Q][,qty_step=S][,min_notional=N]"
-                        ", name in kraken|coinbase, plain decimals, 0<=F<=1000)"};
+                        ", name [a-z][a-z0-9]{0,15}, plain decimals, 0<=F<=1000)"};
             }
             if (!venue_flag_seen) {
                 config.venues.clear();

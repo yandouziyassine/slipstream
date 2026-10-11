@@ -9,7 +9,6 @@ import sys
 import time
 from collections.abc import Sequence
 from pathlib import Path
-from typing import cast
 
 from slipstream.calibration import CalibrationData, CalibrationError
 from slipstream.collect import main as collect_main
@@ -18,12 +17,13 @@ from slipstream.engine_stream import EngineChannel, EngineError
 from slipstream.kraken_rest import fetch_ohlc, parse_ohlc
 from slipstream.live import LiveFeedError
 from slipstream.logging_setup import configure_logging
-from slipstream.models import VENUES, Fill, MarketDataError, OrderSpec, Venue
+from slipstream.models import Fill, MarketDataError, OrderSpec, Venue
 from slipstream.recorder import RecordError, open_new_file, record_stream, write_ohlc_header
 from slipstream.replay import ReplayError, read_calibration, read_replay
 from slipstream.session import LiveSession, OrderRejectedError, ReplaySession, check_clock_mode
 from slipstream.v1 import execution_pb2 as pb
 from slipstream.venue_rules import VenueRules, VenueRulesError, fetch_venue_rules
+from slipstream.venues.registry import VENUES
 
 _SYMBOL = re.compile(r"^[A-Z0-9]{2,10}/[A-Z0-9]{2,10}$")
 _ORDER_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
@@ -85,7 +85,7 @@ def _venues(value: str) -> tuple[Venue, ...]:
     unknown = [name for name in names if name not in VENUES]
     if not names or unknown:
         raise argparse.ArgumentTypeError(f"venues must be a comma list of {', '.join(VENUES)}")
-    return tuple(cast(Venue, name) for name in dict.fromkeys(names))
+    return tuple(dict.fromkeys(names))
 
 
 def _fees(value: str) -> dict[Venue, float]:

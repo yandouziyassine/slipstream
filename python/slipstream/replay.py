@@ -7,9 +7,11 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-from slipstream.kraken import KrakenMessageError, KrakenStream, book_subscription
+from slipstream.kraken import KrakenMessageError
 from slipstream.kraken_rest import SUPPORTED_INTERVALS, Bar, parse_ohlc
-from slipstream.models import VENUES, MarketDataError, Venue
+from slipstream.models import MarketDataError, Venue
+from slipstream.venues.base import RecordedCheck
+from slipstream.venues.registry import ADAPTERS, VENUES
 
 _VALID_VENUES: frozenset[Venue] = frozenset(VENUES)
 
@@ -38,29 +40,6 @@ class _FloatEncoder(json.JSONEncoder):
 
 def _dumps(value: Any) -> str:
     return json.dumps(value, cls=_FloatEncoder)
-
-
-class _KrakenBookCheck:
-    """Checks recorded Kraken book checksums from the recorded book subscription on.
-
-    The recorder always writes Kraken's subscribe ack first; before one there is no depth to
-    mirror the book at, so hand-written files without it are not checked.
-    """
-
-    def __init__(self) -> None:
-        self._stream: KrakenStream | None = None
-
-    def check(self, msg: Any) -> None:
-        if not isinstance(msg, dict):
-            return
-        subscription = book_subscription(msg)
-        if subscription is not None:
-            self._stream = KrakenStream(*subscription, require_checksum=False)
-        elif self._stream is not None:
-            self._stream.accept(msg)
-
-    def reset(self) -> None:
-        self._stream = None
 
 
 def _records(path: Path) -> Iterator[tuple[int, dict[str, Any]]]:
@@ -105,24 +84,32 @@ def _venue(record: dict[str, Any], lineno: int) -> Venue:
     return venue
 
 
+def _recorded_checks() -> dict[Venue, RecordedCheck]:
+    return {
+        venue.name: venue.new_recorded_check()
+        for venue in ADAPTERS
+        if venue.new_recorded_check is not None
+    }
+
+
 def read_replay(path: Path) -> Iterator[ReplayRecord]:
-    kraken_books = _KrakenBookCheck()
+    checks = _recorded_checks()
     for lineno, record in _records(path):
         if _is_ohlc(record):
             continue
         if record.get("kind") == "reconnect":
             marker = ReconnectMarker(_recv_ns(record, lineno), _venue(record, lineno))
-            if marker.venue == "kraken":
-                kraken_books.reset()
+            if marker.venue in checks:
+                checks[marker.venue].reset()
             yield marker
             continue
         if "msg" not in record:
             raise ReplayError(f"line {lineno}: malformed replay record")
         recv_ns = _recv_ns(record, lineno)
         venue = _venue(record, lineno)
-        if venue == "kraken":
+        if venue in checks:
             try:
-                kraken_books.check(record["msg"])
+                checks[venue].check(record["msg"])
             except MarketDataError as exc:
                 raise ReplayError(f"line {lineno}: {exc}") from exc
         yield recv_ns, _dumps(record["msg"]), venue

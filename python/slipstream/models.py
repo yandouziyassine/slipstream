@@ -6,7 +6,9 @@ from typing import Literal
 Side = Literal["buy", "sell"]
 Algo = Literal["twap", "vwap", "pov", "almgren_chriss"]
 Urgency = Literal["low", "medium", "high"]
-Venue = Literal["kraken", "coinbase"]
+# A registered venue name. slipstream.venues.registry is the source of truth; this copy serves
+# modules that cannot import the registry yet, and a test keeps the two equal.
+Venue = str
 VENUES: tuple[Venue, ...] = ("kraken", "coinbase")
 
 

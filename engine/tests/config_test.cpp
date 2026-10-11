@@ -94,7 +94,9 @@ TEST(Config, ParsesVenuesInOrderAndStaleness) {
 }
 
 TEST(Config, RejectsBadVenues) {
-    for (const char* value : {"binance:fee_bps=10", "kraken", "kraken:fee=10", "kraken:fee_bps=",
+    for (const char* value : {"Kraken:fee_bps=10", "1kraken:fee_bps=10", "kra-ken:fee_bps=10",
+                              "abcdefghijklmnopq:fee_bps=10", "kraken", "kraken:fee=10",
+                              "kraken:fee_bps=",
                               "kraken:fee_bps=-1", "kraken:fee_bps=1001", "kraken:fee_bps=nan",
                               "kraken:fee_bps=10x", ":fee_bps=10", "kraken:fee_bps= 50",
                               "kraken:fee_bps=+5", "kraken:fee_bps=5e2", "kraken:fee_bps=1.2.3",
@@ -102,6 +104,16 @@ TEST(Config, RejectsBadVenues) {
         EXPECT_FALSE(parse_args({"--venue", value}).config) << value;
     }
     EXPECT_FALSE(parse_args({"--venue", "kraken:fee_bps=1", "--venue", "kraken:fee_bps=2"}).config);
+}
+
+TEST(Config, AcceptsAnyWellFormedVenueName) {
+    const auto result = parse_args({"--venue", "bitstamp:fee_bps=40", "--venue",
+                                    "abcdefghijklmnop:fee_bps=1", "--venue", "x1:fee_bps=0"});
+    ASSERT_TRUE(result.config) << result.error;
+    ASSERT_EQ(result.config->venues.size(), 3u);
+    EXPECT_EQ(result.config->venues[0].name, "bitstamp");
+    EXPECT_EQ(result.config->venues[1].name, "abcdefghijklmnop");
+    EXPECT_EQ(result.config->venues[2].name, "x1");
 }
 
 TEST(Config, VenueRulesDefaultToZero) {
